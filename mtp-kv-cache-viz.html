@@ -150,134 +150,360 @@
   ① <span class="highlight">MTP/Draft 层 KV cache</span>:每个序列位置都要缓存(和主干一样)<br>
   ② <span class="highlight">草稿树临时槽位</span>:验证前预占,验证后回收 — 但总量不为零,系统按最坏情况分配<br>
   → 主干 KV pool 被压缩 → max_total_tokens ↓ → 上下文减小
-</div>
+<h2>3. Forward 过程模型结构对比</h2>
 
-<!-- ============ §2 架构速览 ============ -->
-<h2 id="s2"><span class="num">2</span> 三种架构速览</h2>
-<p style="color:var(--muted);margin-bottom:20px">极简对比,只看关键差异。详细训练机制见后面"深入"章节。</p>
+<p>三种架构在 forward 过程中的结构差异，是理解 KV cache 开销的关键。</p>
 
-<div class="card">
-  <table>
-    <thead>
-      <tr>
-        <th style="width:20%">维度</th>
-        <th style="width:27%">Base(无 MTP)</th>
-        <th style="width:27%">GLM-5.2</th>
-        <th style="width:26%">Kimi K3</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td><b>MTP 层</b></td>
-        <td>无</td>
-        <td>1 层<br><span class="muted">3 步权重共享</span></td>
-        <td>1 层<br><span class="muted">主干 block 拷贝</span></td>
-      </tr>
-      <tr>
-        <td><b>参数增量</b></td>
-        <td>0%</td>
-        <td><b style="color:var(--blue)">+1.3%</b></td>
-        <td><b style="color:var(--purple)">+1%</b></td>
-      </tr>
-      <tr>
-        <td><b>草稿步数</b></td>
-        <td>0</td>
-        <td>3</td>
-        <td>7</td>
-      </tr>
-      <tr>
-        <td><b>KV 开销</b><br><span class="muted">(每 token)</span></td>
-        <td>主干 N 层</td>
-        <td>主干 N 层<br>+ MTP 1 层<br>+ 草稿 3×临时</td>
-        <td>主干 93 层<br>+ Draft 1 层<br>+ 草稿 7×临时</td>
-      </tr>
-      <tr>
-        <td><b>上下文损耗</b></td>
-        <td>0%</td>
-        <td><b style="color:var(--red)">~15%</b></td>
-        <td><b style="color:var(--red)">~25%</b></td>
-      </tr>
-      <tr>
-        <td><b>接受长度</b></td>
-        <td>1(无加速)</td>
-        <td><b style="color:var(--green)">2.76</b></td>
-        <td>未公开</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
+<style>
+.arch-compare{display:flex;gap:24px;margin:24px 0;flex-wrap:wrap}
+.arch-col{flex:1;min-width:280px;border:2px solid var(--border);border-radius:8px;padding:20px;background:var(--card)}
+.arch-col h4{margin:0 0 16px;text-align:center;font-size:16px;font-weight:700}
+.arch-col.base h4{color:#2563eb}
+.arch-col.glm h4{color:#dc2626}
+.arch-col.k3 h4{color:#9333ea}
 
-<div class="callout info">
-  <b>核心洞察</b>:参数增量很小(1-1.3%),但 KV cache 是<strong>按层×按token 累积</strong>的。<br>
-  • 权重:加载一次,静态<br>
-  • KV cache:每 token 每层都存,动态增长<br>
-  → 一个 128K 上下文的请求,MTP 层要额外存 128K×1 层的 K/V
-</div>
+.flow-box{background:#f5f5f4;border:2px solid var(--border2);border-radius:6px;padding:12px;margin:8px 0;text-align:center;font-size:13px;position:relative}
+.flow-box.input{background:#e0f2fe;border-color:#7dd3fc}
+.flow-box.backbone{background:#dbeafe;border-color:#93c5fd}
+.flow-box.mtp{background:#fee2e2;border-color:#fca5a5;font-weight:600}
+.flow-box.draft{background:#f3e8ff;border-color:#d8b4fe;font-weight:600}
+.flow-box.verify{background:#fef3c7;border-color:#fcd34d}
+.flow-box.output{background:#d1fae5;border-color:#6ee7b7;font-weight:600}
 
-<!-- ============ §3 推理动态过程 ============ -->
-<h2 id="s3"><span class="num">3</span> 推理时的 KV 动态变化</h2>
-<p style="color:var(--muted);margin-bottom:20px">以 GLM-5.2 为例,展开一次 decode 请求的内部时间线。</p>
+.kv-badge{display:inline-block;background:#ef4444;color:#fff;font-size:10px;padding:2px 6px;border-radius:3px;margin-left:6px;font-weight:600}
+.kv-temp{background:#f97316}
+
+.arrow{text-align:center;color:var(--muted);font-size:20px;margin:4px 0}
+.multi-arrow{display:flex;justify-content:space-around;margin:4px 0}
+.multi-arrow span{color:var(--muted);font-size:18px}
+
+.summary-box{background:#f0f9ff;border-left:4px solid #2563eb;padding:12px;margin-top:12px;font-size:12px;line-height:1.6}
+</style>
 
 <div class="card">
-  <div class="steps">
-    <div class="step">
-      <b>主干 forward</b>:读取 prompt KV,生成下一个 hidden state<br>
-      KV 占用:+1 位置 × N 层(主干)
-    </div>
-    <div class="step">
-      <b>MTP 草稿展开</b>:用 MTP 层迭代 3 次,预测 t+1, t+2, t+3<br>
-      KV 占用:+3 位置 × 1 层(MTP 临时,验证后释放)
-    </div>
-    <div class="step">
-      <b>主干验证</b>:用主干并行验证 3 个草稿 token<br>
-      KV 占用:+3 位置 × N 层(主干,用一次 forward 的成本)
-    </div>
-    <div class="step">
-      <b>接受判定</b>:逐 token 判定 accept/reject<br>
-      • 接受的 token KV 永久保留(主干)<br>
-      • 拒绝的释放<br>
-      • MTP 临时 KV 全部释放<br>
-      → 实际产出 2-3 tokens(GLM accept=2.76)
-    </div>
-  </div>
+<div class="arch-compare">
+
+<!-- Base -->
+<div class="arch-col base">
+<h4>Base（无 MTP）</h4>
+<div class="flow-box input">Input Token</div>
+<div class="arrow">↓</div>
+<div class="flow-box">Embedding</div>
+<div class="arrow">↓</div>
+<div class="flow-box backbone">
+  Layer 1<span class="kv-badge">KV</span><br>
+  Layer 2<span class="kv-badge">KV</span><br>
+  ...<br>
+  Layer N<span class="kv-badge">KV</span>
+</div>
+<div class="arrow">↓</div>
+<div class="flow-box">LM Head</div>
+<div class="arrow">↓</div>
+<div class="flow-box output">1 token</div>
+<div class="summary-box">
+  <strong>KV 开销：</strong><br>
+  N 层 × 序列长度
+</div>
 </div>
 
-<div class="callout warn">
-  <b>关键点</b>:草稿 KV 虽然"临时",但验证前必须预占槽位。<br>
-  • 系统按 <strong>最坏情况</strong> 分配显存(所有草稿同时存在)<br>
-  • 即使 accept rate 高,pool 也要扣掉这部分<br>
-  → 这就是上下文减小的根本原因
+<!-- GLM-5.2 -->
+<div class="arch-col glm">
+<h4>GLM-5.2（MTP）</h4>
+<div class="flow-box input">Input Token</div>
+<div class="arrow">↓</div>
+<div class="flow-box">Embedding</div>
+<div class="arrow">↓</div>
+<div class="flow-box backbone">
+  Layer 1<span class="kv-badge">KV</span><br>
+  Layer 2<span class="kv-badge">KV</span><br>
+  ...<br>
+  Layer N<span class="kv-badge">KV</span>
+</div>
+<div class="arrow">↓</div>
+<div class="flow-box">hidden state h</div>
+<div class="arrow">↓</div>
+<div class="flow-box mtp">
+  MTP Layer<span class="kv-badge kv-temp">KV临时</span><br>
+  <em style="font-size:11px">(权重共享 × 3步)</em>
+</div>
+<div class="multi-arrow">
+  <span>↓</span><span>↓</span><span>↓</span>
+</div>
+<div class="flow-box">t+1  t+2  t+3<br><em style="font-size:11px">(草稿)</em></div>
+<div class="arrow">↓</div>
+<div class="flow-box verify">
+  主干并行验证<br>
+  <em style="font-size:11px">(3×N层临时槽位)</em>
+</div>
+<div class="arrow">↓</div>
+<div class="flow-box output">2-3 tokens<br><em style="font-size:11px">(accept=2.76)</em></div>
+<div class="summary-box">
+  <strong>KV 开销：</strong><br>
+  N层 × 序列长度<br>
+  + 1层(MTP) × 序列长度<br>
+  + 3 × N层临时槽位
+</div>
 </div>
 
-<!-- ============ §4 深入(可选) ============ -->
-<h2 id="s4"><span class="num">4</span> 深入:GLM vs K3 训练与验证差异</h2>
-<p style="color:var(--muted);margin-bottom:16px">技术读者可展开,不影响理解"为什么上下文减小"。</p>
+<!-- Kimi K3 -->
+<div class="arch-col k3">
+<h4>Kimi K3（树形投机）</h4>
+<div class="flow-box input">Input Token</div>
+<div class="arrow">↓</div>
+<div class="flow-box">Embedding</div>
+<div class="arrow">↓</div>
+<div class="flow-box backbone">
+  Layer 1<span class="kv-badge">KV</span> →Draft<br>
+  ...<br>
+  Layer 31<span class="kv-badge">KV</span> →Draft<br>
+  ...<br>
+  Layer 93<span class="kv-badge">KV</span> →Draft
+</div>
+<div class="arrow">↓</div>
+<div class="flow-box">多层级特征融合</div>
+<div class="arrow">↓</div>
+<div class="flow-box draft">
+  Draft Layer<span class="kv-badge kv-temp">KV临时</span><br>
+  <em style="font-size:11px">(独立训练)</em>
+</div>
+<div class="arrow">↓</div>
+<div class="flow-box">
+  树形展开<br>
+  <em style="font-size:11px">(top-K=10, 7步)</em>
+</div>
+<div class="arrow">↓</div>
+<div class="flow-box">top-63 节点</div>
+<div class="arrow">↓</div>
+<div class="flow-box verify">
+  主干并行验证<br>
+  <em style="font-size:11px">(63×93层临时槽位)</em><br>
+  <em style="font-size:11px">(tree_mask)</em>
+</div>
+<div class="arrow">↓</div>
+<div class="flow-box output">多 tokens<br><em style="font-size:11px">(树形接受率更高)</em></div>
+<div class="summary-box">
+  <strong>KV 开销：</strong><br>
+  93层 × 序列长度<br>
+  + 1层(Draft) × 序列长度<br>
+  + 63 × 93层临时槽位
+</div>
+</div>
 
-<details>
-  <summary>🔍 GLM-5.2 权重共享机制</summary>
-  <h3 style="margin-top:16px">训练计算图(3 层展开,权重绑定)</h3>
-  <div class="code" style="display:block;padding:12px;line-height:1.8">
-token → [主干 N 层] → h<br>
-&nbsp;&nbsp;└→ [MTP·W] → t+1<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└→ [MTP·W] → t+2<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└→ [MTP·W] → t+3<br>
-<span style="color:var(--muted)">↑ 同一份权重 W,迭代展开 3 次</span>
+</div>
+</div>
+
+<div class="note">
+<strong>对比要点：</strong>
+<ul style="margin-top:8px">
+  <li><strong>Base：</strong>最简单，只有主干 N 层，无额外开销</li>
+  <li><strong>GLM-5.2：</strong>MTP 层权重共享，线性 3 步草稿，临时槽位 = 3×N</li>
+  <li><strong>Kimi K3：</strong>Draft 层独立训练，树形 63 节点并行验证，临时槽位 = 63×93（远大于线性）</li>
+  <li><strong>关键差异：</strong>树形投机的临时 KV 槽位需求是线性投机的 10+ 倍，这解释了为什么 K3 的上下文损耗（25%）大于 GLM-5.2（15%）</li>
+</ul>
+</div>
+
+<h3 style="margin-top:40px">内部细节：Transformer Layer 与 MTP Layer 架构</h3>
+
+<style>
+.detail-compare{display:flex;gap:24px;margin:24px 0;flex-wrap:wrap}
+.detail-col{flex:1;min-width:320px;border:2px solid var(--border);border-radius:8px;padding:20px;background:var(--card)}
+.detail-col h5{margin:0 0 16px;text-align:center;font-size:15px;font-weight:700;color:#0891b2}
+
+.layer-box{border:2px solid var(--border2);border-radius:6px;padding:16px;margin:12px 0;background:#fafaf9}
+.layer-title{font-weight:700;margin-bottom:12px;color:var(--text);font-size:14px}
+.component{background:#fff;border:1px solid var(--border);border-radius:4px;padding:8px;margin:6px 0;font-size:12px}
+.component.attn{border-left:3px solid #3b82f6}
+.component.ffn{border-left:3px solid #10b981}
+.component.norm{border-left:3px solid #8b5cf6}
+.kv-store{background:#fef2f2;border-left:3px solid #ef4444;padding:8px;margin:8px 0;font-size:11px;font-weight:600}
+
+.mtp-iterate{background:#fff5f5;border:2px dashed #f87171;border-radius:6px;padding:12px;margin:12px 0}
+.iterate-step{background:#fff;border:1px solid #fca5a5;border-radius:4px;padding:6px;margin:4px 0;font-size:11px}
+</style>
+
+<div class="card">
+<div class="detail-compare">
+
+<!-- Standard Transformer Layer -->
+<div class="detail-col">
+<h5>标准 Transformer Layer</h5>
+<div class="layer-box">
+  <div class="layer-title">Input: x (hidden state)</div>
+  
+  <div class="component norm">
+    LayerNorm
   </div>
-  <p style="margin-top:12px"><b>优势</b>:省参数(只多 1 层),但接受率高(2.76 > DeepSeek-V3 的 2.55)</p>
-</details>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="component attn">
+    <strong>Multi-Head Attention</strong><br>
+    Q = xW<sub>Q</sub>, K = xW<sub>K</sub>, V = xW<sub>V</sub><br>
+    Attention(Q, K, V)
+  </div>
+  <div class="kv-store">
+    → KV cache: 存储 K, V 张量
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div style="text-align:center;font-size:12px;color:var(--muted)">+ Residual</div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="component norm">
+    LayerNorm
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="component ffn">
+    <strong>Feed-Forward Network</strong><br>
+    FFN(x) = W<sub>2</sub> · GELU(W<sub>1</sub> · x)
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div style="text-align:center;font-size:12px;color:var(--muted)">+ Residual</div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="layer-title">Output: x' (next hidden state)</div>
+</div>
 
-<details style="margin-top:16px">
-  <summary>🔍 Kimi K3 两阶段训练</summary>
-  <h3 style="margin-top:16px">阶段 1:预训练 MTP</h3>
-  <p>在全量语料上,用 shifted target 训练(标准 next-token 预测)</p>
-  <h3>阶段 2:后训练蒸馏</h3>
-  <p>冻结主干,只调 Draft 层。展开 7 步模拟推理:</p>
-  <div class="code" style="display:block;padding:12px;line-height:1.8">
-step1: 吃主干第 1/4/末层特征(多层级融合)<br>
-step2~7: 吃 draft 自己上一步输出<br>
-<br>
-损失 = −log Σ_v min(p_v, q_v)<br>
-<span style="color:var(--muted)">↑ 直接对齐接收率,不用 KL 代理</span>
+<div style="background:#e0f2fe;padding:10px;border-radius:6px;margin-top:12px;font-size:12px">
+  <strong>每层每 token 都需要：</strong><br>
+  · 存储 K: (batch, heads, seq_len, d_k)<br>
+  · 存储 V: (batch, heads, seq_len, d_v)
+</div>
+</div>
+
+<!-- MTP Layer -->
+<div class="detail-col">
+<h5>MTP Layer（GLM-5.2）</h5>
+<div class="layer-box">
+  <div class="layer-title">Input: h (from backbone)</div>
+  
+  <div class="mtp-iterate">
+    <div style="font-weight:700;margin-bottom:8px;color:#dc2626">权重共享迭代 (3步)</div>
+    
+    <div class="iterate-step">
+      <strong>Step 1:</strong> h → MTP Layer → token<sub>t+1</sub>
+    </div>
+    <div class="iterate-step">
+      <strong>Step 2:</strong> concat(h, emb(token<sub>t+1</sub>)) → MTP Layer → token<sub>t+2</sub>
+    </div>
+    <div class="iterate-step">
+      <strong>Step 3:</strong> concat(h, emb(token<sub>t+1</sub>), emb(token<sub>t+2</sub>)) → MTP Layer → token<sub>t+3</sub>
+    </div>
+    
+    <div style="margin-top:8px;font-size:10px;color:var(--muted)">
+      ↑ 同一份权重 W<sub>MTP</sub>，迭代使用 3 次
+    </div>
+  </div>
+  
+  <div class="component norm">
+    LayerNorm
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="component attn">
+    <strong>Multi-Head Attention</strong><br>
+    与标准 Transformer 相同
+  </div>
+  <div class="kv-store">
+    → KV cache (临时): 验证后释放
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="component ffn">
+    Feed-Forward Network
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="component">
+    LM Head → Logits
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="layer-title">Output: 3 个草稿 tokens</div>
+</div>
+
+<div style="background:#fee2e2;padding:10px;border-radius:6px;margin-top:12px;font-size:12px">
+  <strong>KV 开销：</strong><br>
+  · MTP 层本身: 1层 × seq_len<br>
+  · 草稿迭代: 3 步 × 1层 (临时)<br>
+  · 总计: 4层 等价开销
+</div>
+</div>
+
+<!-- Draft Layer (Kimi K3) -->
+<div class="detail-col">
+<h5>Draft Layer（Kimi K3）</h5>
+<div class="layer-box">
+  <div class="layer-title">Input: 多层级特征融合</div>
+  
+  <div style="background:#f3e8ff;padding:10px;border-radius:4px;margin:10px 0;font-size:12px">
+    <strong>特征融合：</strong><br>
+    h = Concat(
+      <span style="color:#9333ea">h<sub>layer1</sub></span>,
+      <span style="color:#9333ea">h<sub>layer31</sub></span>,
+      <span style="color:#9333ea">h<sub>layer93</sub></span>
+    )
+  </div>
+  
+  <div class="component norm">
+    LayerNorm
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="component attn">
+    <strong>Multi-Head Attention</strong><br>
+    独立训练的参数
+  </div>
+  <div class="kv-store">
+    → KV cache (临时): 验证后释放
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="component ffn">
+    Feed-Forward Network
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div class="component">
+    LM Head → Logits
+  </div>
+  <div class="arrow" style="font-size:14px">↓</div>
+  
+  <div style="background:#faf5ff;border:2px solid #d8b4fe;border-radius:6px;padding:10px;margin:10px 0">
+    <strong style="color:#9333ea">树形展开：</strong><br>
+    <div style="font-size:11px;margin-top:6px">
+      · 每步选 top-K=10 候选<br>
+      · 展开 7 步，每层剪枝<br>
+      · 全局选 top-63 节点<br>
+      · tree_mask: 分支间不可见
+    </div>
+  </div>
+  
+  <div class="layer-title">Output: 63 个候选 tokens</div>
+</div>
+
+<div style="background:#faf5ff;padding:10px;border-radius:6px;margin-top:12px;font-size:12px">
+  <strong>KV 开销：</strong><br>
+  · Draft 层本身: 1层 × seq_len<br>
+  · 树形候选: 63 节点 × 1层 (临时)<br>
+  · 总计: 64层 等价开销
+</div>
+</div>
+
+</div>
+</div>
+
+<div class="warning">
+<strong>关键洞察：</strong>
+<ul style="margin-top:8px">
+  <li><strong>MTP 层与主干层结构相同：</strong>都是 Transformer block，都需要缓存 KV</li>
+  <li><strong>权重共享的价值：</strong>GLM-5.2 只增加 1 层参数，但迭代 3 次生成 3 个 tokens</li>
+  <li><strong>多层级特征融合：</strong>K3 的 Draft 层同时利用浅层、中层、深层信息</li>
+  <li><strong>树形 vs 线性：</strong>树形需要为 63 个节点预分配 KV，线性只需 3 个</li>
+</ul>
+</div>
+
   </div>
   <p style="margin-top:12px"><b>优势</b>:多层级特征 + 直接优化接收率 → 更准,但参数开销略高</p>
 </details>
