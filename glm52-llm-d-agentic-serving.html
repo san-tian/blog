@@ -94,9 +94,6 @@
 </ol>
 <p>这意味着传统的"把模型装在 N 卡上"的部署方式，既无法装下这么长的 KV 缓存，也无法在请求突发的瞬间保持低延迟。</p>
 
-<blockquote style="border-left:3px solid #f6ad55; background:#fffaf0; padding:12px 16px; margin:20px 0; font-size:14.5px;">
-<strong>术语说明</strong>：全文使用 <code>xPyD</code> 表示 x 个 prefill 实例 + y 个 decode 实例；<code>DEP16</code> 表示 TP=1、DP=16、专家并行 16 GPU。例如 <code>3P1D</code> = 3 个 prefill + 1 个 decode，合计 64 GPU。
-</blockquote>
 
 <h2>架构选择：六项 llm-d 能力的组合</h2>
 <p>llm-d 的 agentic-serving 路径是 <strong>"从工作负载出发，把所需能力组合成部署"</strong>。针对 GLM-5.2 在 H200 上的智能体负载，组合了六项能力：</p>
