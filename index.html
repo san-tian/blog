@@ -6,12 +6,13 @@
 <title>san-tian 的技术 blog</title>
 <style>
   :root {
-    --bg: #0d1117;
-    --card: #161b22;
-    --border: #30363d;
-    --text: #c9d1d9;
-    --text-dim: #8b949e;
-    --accent: #58a6ff;
+    --bg: #ffffff;
+    --text: #111111;
+    --text-dim: rgba(0,0,0,0.55);
+    --text-faint: rgba(0,0,0,0.35);
+    --border: rgba(0,0,0,0.08);
+    --accent: #2563eb;
+    --accent-soft: rgba(37,99,235,0.06);
   }
   * { box-sizing: border-box; }
   body {
@@ -22,42 +23,44 @@
     margin: 0;
     padding: 0;
   }
-  .container { max-width: 720px; margin: 0 auto; padding: 64px 24px; }
-  h1 { color: #f0f6fc; font-size: 1.8em; margin: 0 0 8px; }
-  .subtitle { color: var(--text-dim); font-size: 0.95em; margin: 0 0 40px; }
+  .container { max-width: 720px; margin: 0 auto; padding: 96px 24px 120px; }
+  h1 { font-size: 2em; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.02em; }
+  .subtitle { color: var(--text-dim); font-size: 1em; margin: 0 0 64px; }
+
   .post {
     display: block;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 20px 24px;
-    margin: 16px 0;
+    padding: 32px 0;
+    border-top: 1px solid var(--border);
     text-decoration: none;
     color: var(--text);
-    transition: border-color 0.15s, transform 0.15s;
+    transition: background 0.15s;
   }
-  .post:hover { border-color: var(--accent); transform: translateY(-1px); }
-  .post .title { color: #f0f6fc; font-weight: 600; font-size: 1.1em; margin-bottom: 6px; }
-  .post .desc { color: var(--text-dim); font-size: 0.9em; }
-  .post .tag {
+  .post:last-of-type { border-bottom: 1px solid var(--border); }
+  .post:hover { background: var(--accent-soft); }
+  .post .title { font-size: 1.25em; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.01em; }
+  .post:hover .title { color: var(--accent); }
+  .post .desc { color: var(--text-dim); font-size: 0.92em; line-height: 1.7; }
+  .post .meta { margin-top: 14px; }
+  .tag {
     display: inline-block;
     margin-right: 8px;
-    padding: 2px 8px;
-    border-radius: 4px;
+    padding: 3px 14px;
+    border-radius: 999px;
     font-size: 0.72em;
-    background: rgba(88,166,255,0.1);
-    color: var(--accent);
-    border: 1px solid rgba(88,166,255,0.3);
-    vertical-align: middle;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
   }
+  .post:hover .tag { border-color: rgba(37,99,235,0.3); color: var(--accent); }
+
   .footer {
-    margin-top: 48px;
+    margin-top: 80px;
     padding-top: 24px;
     border-top: 1px solid var(--border);
-    color: var(--text-dim);
+    color: var(--text-faint);
     font-size: 0.85em;
   }
-  .footer a { color: var(--text-dim); }
+  .footer a { color: var(--text-dim); text-decoration: none; }
+  .footer a:hover { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -65,32 +68,10 @@
   <h1>san-tian 的技术 blog</h1>
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
-  <a class="post" href="why-decode-needs-no-l2-cache.html">
-    <div class="title">为什么 PD 分离中，decode 不需要二级缓存？</div>
-    <div class="desc">一次被源码与硬件双重纠正的技术复盘 —— SGLang PD 分离架构里 DecodeKVCacheOffloadManager 的机制、路径 A/B 的源码对比，以及 8×IB 事实带来的带宽反转。</div>
-    <div style="margin-top:10px">
-      <span class="tag">SGLang</span>
-      <span class="tag">PD 分离</span>
-      <span class="tag">KV Cache</span>
-      <span class="tag">源码复盘</span>
-    </div>
-  </a>
-
-  <a class="post" href="glm52-llm-d-agentic-serving.html">
-    <div class="title">在 H200 上服务 GLM-5.2 智能体负载：llm-d 的工程实践与成本测算</div>
-    <div class="desc">编译自 llm-d 官方博客。GLM-5.2 + H200 智能体负载的六项能力组合（MLA / Wide-EP / 前缀路由 / CPU 卸载 / P-D 分池 / MTP），含 64 GPU 参考扫描、成本测算与六条调参经验法则。</div>
-    <div style="margin-top:10px">
-      <span class="tag">llm-d</span>
-      <span class="tag">GLM-5.2</span>
-      <span class="tag">Wide-EP</span>
-      <span class="tag">成本测算</span>
-    </div>
-  </a>
-
   <a class="post" href="mtp-kv-cache-viz.html">
     <div class="title">MTP 为什么会让上下文减小？权重结构与 KV cache 开销图解（GLM-5.2 vs Kimi K3）</div>
-    <div class="desc">带完整 SVG 图解 + EAGLE-3 核心代码引用（cnets.py topK_genrate）：MTP 权重只是“多 1 层”，但 KV cache 才是大头 —— 从模型结构、草稿树算法、显存公式到工程优化五层展开，回答“为什么加了 MTP 上下文就变小”。</div>
-    <div style="margin-top:10px">
+    <div class="desc">带完整 SVG 图解 + EAGLE-3 核心代码引用（cnets.py topK_genrate）：MTP 权重只是"多 1 层"，但 KV cache 才是大头 —— 从模型结构、草稿树算法、显存公式到工程优化五层展开，回答"为什么加了 MTP 上下文就变小"。</div>
+    <div class="meta">
       <span class="tag">MTP</span>
       <span class="tag">GLM-5.2</span>
       <span class="tag">Kimi K3</span>
@@ -99,8 +80,30 @@
     </div>
   </a>
 
+  <a class="post" href="glm52-llm-d-agentic-serving.html">
+    <div class="title">在 H200 上服务 GLM-5.2 智能体负载：llm-d 的工程实践与成本测算</div>
+    <div class="desc">编译自 llm-d 官方博客。GLM-5.2 + H200 智能体负载的六项能力组合（MLA / Wide-EP / 前缀路由 / CPU 卸载 / P-D 分池 / MTP），含 64 GPU 参考扫描、成本测算与六条调参经验法则。</div>
+    <div class="meta">
+      <span class="tag">llm-d</span>
+      <span class="tag">GLM-5.2</span>
+      <span class="tag">Wide-EP</span>
+      <span class="tag">成本测算</span>
+    </div>
+  </a>
+
+  <a class="post" href="why-decode-needs-no-l2-cache.html">
+    <div class="title">为什么 PD 分离中，decode 不需要二级缓存？</div>
+    <div class="desc">一次被源码与硬件双重纠正的技术复盘 —— SGLang PD 分离架构里 DecodeKVCacheOffloadManager 的机制、路径 A/B 的源码对比，以及 8×IB 事实带来的带宽反转。</div>
+    <div class="meta">
+      <span class="tag">SGLang</span>
+      <span class="tag">PD 分离</span>
+      <span class="tag">KV Cache</span>
+      <span class="tag">源码复盘</span>
+    </div>
+  </a>
+
   <div class="footer">
-    源仓库：<a href="https://github.com/san-tian/blog">github.com/san-tian/blog</a> · Markdown 源稿供 agent 读取：<a href="https://raw.githubusercontent.com/san-tian/blog/main/pd-decode-kvcache-offload.md">raw...pd-decode-kvcache-offload.md</a>
+    源仓库：<a href="https://github.com/san-tian/blog">github.com/san-tian/blog</a>
   </div>
 </div>
 </body>
