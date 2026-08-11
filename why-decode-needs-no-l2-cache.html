@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>为什么 PD 分离中，decode 不需要二级缓存？</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --card-2: #1c232c;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent-2: #f0883e;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --code-bg: #0d1117;
+    --inline-code-bg: #1f2933;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    margin: 0;
+    padding: 0;
+    font-size: 16px;
+  }
+  .container {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 48px 24px 96px;
+  }
+  header.hero {
+    text-align: center;
+    margin-bottom: 56px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+  }
+  header.hero h1 {
+    font-size: 2.1em;
+    font-weight: 700;
+    line-height: 1.3;
+    color: #f0f6fc;
+    margin: 0 0 16px;
+  }
+  header.hero .subtitle {
+    color: var(--text-dim);
+    font-size: 1em;
+    margin: 0 auto;
+    max-width: 620px;
+  }
+  header.hero .meta {
+    margin-top: 20px;
+    color: var(--text-dim);
+    font-size: 0.85em;
+  }
+  header.hero .meta span {
+    display: inline-block;
+    padding: 4px 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    margin: 0 4px;
+  }
+  h2 {
+    color: #f0f6fc;
+    font-size: 1.5em;
+    font-weight: 650;
+    margin: 56px 0 20px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 {
+    color: #f0f6fc;
+    font-size: 1.18em;
+    font-weight: 600;
+    margin: 36px 0 14px;
+  }
+  h4 {
+    color: var(--text);
+    font-size: 1.02em;
+    font-weight: 600;
+    margin: 24px 0 10px;
+  }
+  p { margin: 14px 0; }
+  strong { color: #f0f6fc; font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  code {
+    font-family: "JetBrains Mono", "Fira Code", "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+    background: var(--inline-code-bg);
+    color: #f0883e;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    margin: 18px 0;
+    font-size: 0.85em;
+    line-height: 1.6;
+  }
+  pre code {
+    background: none;
+    color: var(--text);
+    padding: 0;
+    border-radius: 0;
+    font-size: 1em;
+  }
+  /* syntax highlight tokens (lightweight) */
+  .tok-cmt { color: #8b949e; font-style: italic; }
+  .tok-str { color: #a5d6ff; }
+  .tok-kw  { color: #ff7b72; }
+  .tok-fn  { color: #d2a8ff; }
+  .tok-num { color: #79c0ff; }
+
+  blockquote {
+    margin: 20px 0;
+    padding: 14px 20px;
+    border-left: 4px solid var(--accent);
+    background: var(--card);
+    border-radius: 0 8px 8px 0;
+    color: var(--text);
+  }
+  blockquote.correction { border-left-color: var(--red); }
+  blockquote.correction::before {
+    content: "✗ 纠正";
+    display: block;
+    color: var(--red);
+    font-weight: 700;
+    font-size: 0.85em;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  blockquote.confirm { border-left-color: var(--green); }
+  blockquote.confirm::before {
+    content: "✓ 源码确认";
+    display: block;
+    color: var(--green);
+    font-weight: 700;
+    font-size: 0.85em;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  blockquote.uncertain { border-left-color: var(--yellow); }
+  blockquote.uncertain::before {
+    content: "⚠ 诚实标注";
+    display: block;
+    color: var(--yellow);
+    font-weight: 700;
+    font-size: 0.85em;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 20px 0;
+    font-size: 0.92em;
+    display: block;
+    overflow-x: auto;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 10px 14px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--card-2);
+    color: #f0f6fc;
+    font-weight: 600;
+  }
+  tr:nth-child(even) td { background: var(--card); }
+  td code, th code { font-size: 0.85em; }
+
+  ul, ol { padding-left: 1.5em; }
+  li { margin: 6px 0; }
+
+  .callout-summary {
+    background: linear-gradient(135deg, #161b22 0%, #1c232c 100%);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin: 32px 0;
+  }
+  .callout-summary h3 {
+    margin-top: 0;
+    color: var(--accent);
+  }
+  .callout-summary .point {
+    display: flex;
+    gap: 12px;
+    margin: 12px 0;
+  }
+  .callout-summary .point .badge {
+    flex-shrink: 0;
+    width: 70px;
+    text-align: center;
+    padding: 3px 0;
+    border-radius: 4px;
+    font-size: 0.75em;
+    font-weight: 700;
+    height: fit-content;
+  }
+  .badge.ok { background: rgba(63,185,80,0.15); color: var(--green); border: 1px solid rgba(63,185,80,0.3); }
+  .badge.no { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.3); }
+  .badge.q  { background: rgba(210,153,34,0.15); color: var(--yellow); border: 1px solid rgba(210,153,34,0.3); }
+
+  .flow-diagram {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin: 24px 0;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.82em;
+    line-height: 1.7;
+    overflow-x: auto;
+    white-space: pre;
+    color: var(--text);
+  }
+
+  .toc {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 40px 0;
+  }
+  .toc h3 { margin: 0 0 12px; color: var(--accent); font-size: 1em; }
+  .toc ol { margin: 0; padding-left: 1.3em; }
+  .toc li { margin: 4px 0; font-size: 0.92em; }
+  .toc a { color: var(--text); }
+  .toc a:hover { color: var(--accent); }
+
+  footer {
+    margin-top: 80px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.85em;
+    text-align: center;
+  }
+  .anchor-target { padding-top: 20px; margin-top: -20px; }
+
+  @media (max-width: 640px) {
+    .container { padding: 24px 16px 64px; }
+    header.hero h1 { font-size: 1.6em; }
+    pre { font-size: 0.78em; }
+    table { font-size: 0.82em; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header class="hero">
+  <h1>为什么 PD 分离中，decode 不需要二级缓存？</h1>
+  <div class="subtitle">一次被源码与硬件双重纠正的技术复盘 —— SGLang PD 分离架构里 DecodeKVCacheOffloadManager 的机制、路径 A/B 的源码对比，以及 8×IB 事实带来的带宽反转</div>
+  <div class="meta">
+    <span>SGLang v0.5.14</span>
+    <span>MI300X ×8</span>
+    <span>GLM-5.2 FP8</span>
+    <span>8× HDR IB</span>
+  </div>
+</header>
+
+<div class="callout-summary">
+  <h3>结论先行</h3>
+  <div class="point">
+    <span class="badge ok">机制</span>
+    <div>SGLang <strong>确实有</strong> decode 专用的二级缓存机制（<code>DecodeKVCacheOffloadManager</code>），支持把 decode 增量 KV offload 到 host DRAM（L2）再落 NVMe（L3），下个请求命中时通过专用流 layer-wise overlap 加载回来。源码完整存在，不是"框架不支持"。</div>
+  </div>
+  <div class="point">
+    <span class="badge no">带宽</span>
+    <div>这套部署有 <strong>8 张 IB 网卡</strong>，开启 <code>SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER</code> 后 8 个 CP rank 并行传输，路径 A（跨机 RDMA）聚合带宽 <strong>~200 GB/s</strong>，远高于路径 B（本机 H2D，~50-64 GB/s）。8×IB 下路径 A 已经很快，decode 二级缓存的边际收益可能不足以抵消开销。</div>
+  </div>
+  <div class="point">
+    <span class="badge q">实测</span>
+    <div>具体在什么消息大小下路径 A/B 谁快，<strong>无法仅凭源码断言</strong>，需要实测确认。本文所有带宽数字为硬件规格理论值。</div>
+  </div>
+</div>
+
+<div class="toc">
+  <h3>目录</h3>
+  <ol>
+    <li><a href="#s1">先把 cache 结构搞清楚</a></li>
+    <li><a href="#s2">两条路径的源码实现</a></li>
+    <li><a href="#s3">带宽对比 —— 被硬件事实纠正</a></li>
+    <li><a href="#s4">DecodeKVCacheOffloadManager 的完整机制</a></li>
+    <li><a href="#s5">接收侧：路径 B 的 restore 状态机</a></li>
+    <li><a href="#s6">整个流程的闭环</a></li>
+    <li><a href="#s7">那为什么这套部署 decode 没开</a></li>
+    <li><a href="#s8">复盘：每一步纠正踩在什么取舍上</a></li>
+  </ol>
+</div>
+
+<h2 class="anchor-target" id="s1">一、先把 cache 结构搞清楚</h2>
+
+<h3>误解：HiCache 的二级是 NVMe 硬盘</h3>
+<p>部署脚本里 prefill 的配置：</p>
+<pre><code>--enable-hierarchical-cache --hicache-ratio 1
+--hicache-write-policy write_back --hicache-mem-layout page_first
+--hicache-storage-backend file --file-storage-path /root/hicache
+
+export SGLANG_HICACHE_FILE_BACKEND_MAX_SIZE="200G"</code></pre>
+<p>看起来二级介质就是 NVMe 文件。但这只是<strong>这个部署的选择</strong>，不是 HiCache 框架的全貌。</p>
+
+<h3>源码确认：HiCache 是三层结构，L2 默认是 host DRAM</h3>
+<p>看 <code>decode_kvcache_offload_manager.py</code> 的初始化：</p>
+<pre><code><span class="tok-cmt"># L2：host DRAM pool（MLA 用 MLATokenToKVPoolHost）</span>
+self.decode_host_mem_pool = MLATokenToKVPoolHost(
+    kv_cache,
+    server_args.hicache_ratio,        <span class="tok-cmt"># L2 大小 = ratio × L1 GPU pool</span>
+    server_args.hicache_size,
+    self.page_size,
+    server_args.hicache_mem_layout,
+)
+<span class="tok-cmt"># L3：可选的 storage backend</span>
+self.cache_controller = HiCacheController(
+    mem_pool_host=self.decode_host_mem_pool,              <span class="tok-cmt"># ← L2 = host DRAM</span>
+    storage_backend=server_args.hicache_storage_backend,  <span class="tok-cmt"># ← L3 = file/nixl/mooncake...</span>
+)</code></pre>
+
+<table>
+<tr><th>层级</th><th>介质</th><th>控制参数</th><th>说明</th></tr>
+<tr><td><strong>L1</strong></td><td>GPU HBM</td><td><code>--mem-fraction-static</code></td><td>显存 KV pool，活跃请求的 KV 常驻这里</td></tr>
+<tr><td><strong>L2</strong></td><td>host DRAM（CPU 内存）</td><td><code>--hicache-ratio</code>（默认 2.0）</td><td><strong>默认就有，不依赖 storage backend</strong>；page-locked pinned memory</td></tr>
+<tr><td><strong>L3</strong>（可选）</td><td>NVMe 文件 / Mooncake / NIXL / HF3FS / ...</td><td><code>--hicache-storage-backend</code></td><td>8 种可选 backend，全是外部/分布式存储</td></tr>
+</table>
+
+<p><code>backend_factory.py</code> 注册的 L3 backend 有 8 种：<code>file</code>、<code>nixl</code>、<code>mooncake</code>、<code>hf3fs</code>、<code>aibrix</code>、<code>eic</code>、<code>simm</code>、<code>mori</code> —— <strong>没有一种是"CPU 内存"</strong>，因为 CPU 内存已经是 L2 了。</p>
+
+<blockquote class="correction">
+<p>之前把"二级缓存 = NVMe"当成唯一可能，是错的。L2 默认是 host DRAM，NVMe 只是 L3 选项之一。vLLM 也有类似设计（<code>--cpu-offload-gb</code>、<code>--kv_offloading_backend native</code>）。</p>
+</blockquote>
+
+<h2 class="anchor-target" id="s2">二、两条路径的源码实现</h2>
+
+<p>定义要对比的两条路径：</p>
+<ul>
+<li><strong>路径 A</strong>：prefill GPU → Mooncake RDMA → decode GPU（跨机取 KV）</li>
+<li><strong>路径 B</strong>：decode 本机 host DRAM（L2）→ H2D → decode GPU（本机取已缓存的 KV）</li>
+</ul>
+
+<h3>路径 A：Mooncake RDMA 的三段串行</h3>
+<p>源码：<code>mooncake/conn.py</code> + <code>common/staging_buffer.py</code> + <code>mooncake_transfer_engine.py</code></p>
+
+<h4>Step 1：Prefill 侧 gather（GPU kernel）</h4>
+<p><code>_gather_all_layers_*</code> 在 prefill 的 <code>_gather_stream</code> 上，用 Triton fused kernel 或 <code>gather_kv_head_slices</code>，把分散在 prefill KV pool 不同 page 里的目标 KV，<strong>按层 gather 到一段连续的 staging buffer</strong>。这是 GPU 上的 scatter→contiguous 重排。</p>
+
+<h4>Step 2：RDMA 传输（GPU→GPU）</h4>
+<pre><code><span class="tok-cmt"># mooncake/conn.py</span>
+ret = self.engine.batch_transfer_sync(
+    mooncake_session_id, list(src_addrs), list(dst_addrs), list(lengths)
+)</code></pre>
+<p><code>register_memory</code> 注册的是 <strong>GPU 显存指针</strong>（<code>kv_data_ptrs</code> 来自 <code>get_contiguous_buf_infos()</code>，内存种类标记 <code>VRAM</code>），所以是 <strong>GPU-to-GPU 的 RDMA 直传</strong>（GPUDirect-RDMA），数据不进 host。</p>
+
+<h4>Step 3：Decode 侧 scatter（staging→pool）</h4>
+<p>RDMA 写到 decode 机器上预注册的 staging buffer（GPU 显存），<code>staging_buffer.py</code> 里 <code>_gather_stream.wait_stream</code> 之后，把 staging buffer 里的连续数据 scatter 写回 decode 自己 KV pool 的对应 page 位置。</p>
+
+<p><strong>路径 A 延迟 = gather（GPU kernel） + RDMA（网络） + scatter（GPU kernel）</strong>，三段串行，且 gather/scatter 会抢 prefill/decode 的 SM。</p>
+
+<h3>路径 B：L2 restore 的单段 + layer-wise overlap</h3>
+<p>源码：<code>cache_controller.py:743</code> 的 <code>load()</code> + <code>start_loading()</code> + <code>pool_host/mla.py:224</code> 的 <code>load_to_device_per_layer</code></p>
+
+<h4>Step 1：命中查询 + 专用流加载</h4>
+<pre><code><span class="tok-cmt"># cache_controller.py</span>
+with device_module.stream(self.load_stream):
+    for i in range(self.layer_num):
+        self.mem_pool_host.load_to_device_per_layer(...)   <span class="tok-cmt"># L2 → L1</span>
+        producer_event.complete(i)   <span class="tok-cmt"># 每层完成记录 event</span></code></pre>
+
+<h4>Step 2：传输 kernel（自定义，nontemporal）</h4>
+<p><code>sgl-kernel/csrc/kvcacheio/transfer.cu</code> 里的 kernel 不是 <code>cudaMemcpy</code>，而是自定义 kernel：</p>
+<pre><code><span class="tok-cmt">// CUDA 路径</span>
+asm volatile(<span class="tok-str">"ld.global.nc.b64 %0,[%1];"</span> ...);   <span class="tok-cmt">// non-temporal load</span>
+asm volatile(<span class="tok-str">"st.global.cg.b64 [%0],%1;"</span> ...);   <span class="tok-cmt">// write-combining store</span>
+
+<span class="tok-cmt">// ROCm 路径</span>
+uint64_t tmp = __builtin_nontemporal_load(src + j);
+__builtin_nontemporal_store(tmp, dst + j);</code></pre>
+<p>用 nontemporal 传输绕过 L2 cache，不污染 cache，直达显存。</p>
+
+<h4>Step 3：layer-wise overlap（关键）</h4>
+<p><code>LayerDoneCounter</code> + <code>LayerLoadingEvent</code>（<code>cache_controller.py:64-115</code>）：</p>
+<pre><code>class LayerLoadingEvent:
+    def complete(self, layer_index):
+        self.load_events[layer_index].record()   <span class="tok-cmt"># 每层加载完记录</span>
+    def wait(self, layer_index):
+        device_module.current_stream().wait_event(self.load_events[layer_index])
+        <span class="tok-cmt"># 计算侧等对应层就绪，加载 layer N+1 和计算 layer N 并行</span></code></pre>
+<p><strong>路径 B 延迟 = Σ 每层 H2D，但 layer-wise overlap 后 ≈ max(单层 H2D, 单层 attention) × 层数</strong>。专用 <code>load_stream</code> 不抢 attention 计算流，无 gather/scatter。</p>
+
+<h3>路径 B 的结构优势（源码可确认）</h3>
+<table>
+<tr><th>维度</th><th>路径 A</th><th>路径 B</th></tr>
+<tr><td>串行阶段</td><td>3 段（gather + RDMA + scatter）</td><td>1 段（H2D）+ overlap</td></tr>
+<tr><td>GPU kernel 抢 SM</td><td>gather/scatter 抢 prefill/decode SM</td><td>无，专用 <code>load_stream</code></td></tr>
+<tr><td>与计算重叠</td><td>RDMA 可与下段 prefill 重叠</td><td>layer-wise 与 attention 重叠</td></tr>
+<tr><td>cache 污染</td><td>正常访问</td><td>nontemporal，不污染 L2</td></tr>
+</table>
+
+<blockquote class="confirm">
+<p><strong>源码层面的结构性事实（可靠）</strong>：路径 B 有三个机制优势 —— 无 gather/scatter、专用流不抢 SM、layer-wise overlap 隐藏延迟。</p>
+</blockquote>
+
+<h2 class="anchor-target" id="s3">三、带宽对比 —— 被硬件事实纠正的关键部分</h2>
+
+<h3>错误版本：按单条 IB 算</h3>
+<p>最初按"单条 HDR IB 200 Gbps = 25 GB/s"算，得出"路径 B 的 H2D PCIe 带宽（~50-64 GB/s）是路径 A 的 2 倍"。<strong>这是错的。</strong></p>
+
+<h3>纠正：这套部署有 8 张 IB，而且 SGLang 在用多卡并行传输</h3>
+<p><strong>部署确认</strong>：<code>deployment-guide.md</code> 写明"InfiniBand RDMA 网络（8 个 IB 设备 mlx5_ib0~ib7）"。</p>
+<p><strong>源码确认多卡并行</strong>：脚本开了 <code>SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER=1</code>：</p>
+<pre><code><span class="tok-cmt"># common/conn.py:166</span>
+self.enable_all_cp_ranks_for_transfer = (
+    envs.SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER.get()  <span class="tok-cmt"># ← 你们开了</span>
+    or cp_sharded_prefill
+    or hybrid_decode_pulls_all_ranks
+)
+<span class="tok-cmt"># conn.py:186 注释：
+# When SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER is True,
+# all CP ranks participate in KV transfer</span></code></pre>
+<p>prefill 用了 CP8（Context Parallel 8 卡）+ <code>--enable-dsa-prefill-cp-layersplit</code>，8 个 CP rank 各起一个 transfer engine。Mooncake 侧 <code>get_ib_devices_for_gpu(ib_device, gpu_id)</code> 按 GPU 取对应 IB 设备（<code>mooncake_transfer_engine.py:130</code>）。8 条 IB 口并行传输。</p>
+
+<h3>修正后的带宽对比</h3>
+<table>
+<tr><th></th><th>路径 A（RDMA，8×IB 并行）</th><th>路径 B（H2D，单机 PCIe）</th></tr>
+<tr><td>单链路峰值</td><td>HDR IB 200 Gbps ≈ 25 GB/s</td><td>PCIe Gen5 x16 ~50-64 GB/s</td></tr>
+<tr><td>并行链路数</td><td><strong>8</strong>（每 CP rank 一个 engine + IB 口）</td><td>8 GPU 各有 PCIe，但<strong>到同一 host DRAM 汇聚</strong></td></tr>
+<tr><td>聚合峰值</td><td><strong>~200 GB/s</strong>（8×25，理论）</td><td>~50-64 GB/s（host DRAM 带宽是瓶颈）</td></tr>
+<tr><td>实际可持续</td><td>受拓扑/top-of-rack 限制</td><td>受 host DRAM 带宽和 PCIe 根复合体限制</td></tr>
+</table>
+
+<blockquote class="correction">
+<p><strong>第二个纠正（重要）</strong>：8×IB 聚合后，路径 A 带宽（~200 GB/s）远高于路径 B（~50-64 GB/s）。之前说"路径 B 带宽是 A 的 2 倍"完全反了。带宽维度路径 A 占优。</p>
+</blockquote>
+
+<h3>净较量：取决于负载特征</h3>
+<ul>
+<li><strong>小消息</strong>（短前缀，几 MB）：路径 A 的 gather/scatter kernel launch + RDMA per-WR 开销占比大，有效带宽远低于峰值；路径 B 的 layer-wise overlap 优势凸显 → <strong>路径 B 可能赢</strong></li>
+<li><strong>大消息</strong>（长前缀，几十 MB+）：路径 A 的 8×IB 聚合带宽优势放大，gather/scatter 占比下降 → <strong>路径 A 可能赢</strong></li>
+<li><strong>跨机 vs 本机</strong>：路径 A 跨机器，路径 B 本机 —— 跨机器的 RTT 和 bootstrap 是路径 A 独有开销</li>
+</ul>
+
+<blockquote class="uncertain">
+<p>具体在什么消息大小下路径 A/B 谁快，<strong>无法仅凭源码断言</strong>，需要实测。</p>
+</blockquote>
+
+<h2 class="anchor-target" id="s4">四、DecodeKVCacheOffloadManager 的完整机制</h2>
+
+<p>这是 decode 侧独有的组件，只在 <code>--disaggregation-decode-enable-offload-kvcache</code> 开启时创建。源码：<code>disaggregation/decode_kvcache_offload_manager.py</code>（352 行）。</p>
+
+<h3>开启条件</h3>
+<pre><code><span class="tok-cmt"># server_args.py:6759</span>
+if self.disaggregation_decode_enable_offload_kvcache:
+    if self.disaggregation_mode != "decode":   <span class="tok-cmt"># 必须 decode 模式</span>
+        raise ValueError(...)
+    if self.hicache_storage_backend is None:   <span class="tok-cmt"># 必须配 L3 backend</span>
+        raise ValueError(...)</code></pre>
+
+<p>需要<strong>两个开关配合</strong>才能形成闭环：</p>
+<table>
+<tr><th>开关</th><th>作用</th><th>阶段</th></tr>
+<tr><td><code>--disaggregation-decode-enable-offload-kvcache</code> + <code>--hicache-storage-backend file</code></td><td>开 offload manager（写回侧：GPU→L2→L3）</td><td>decode 过程中</td></tr>
+<tr><td><code>--disaggregation-decode-enable-radix-cache</code> + <code>--enable-hierarchical-cache</code></td><td>开 <code>enable_decode_hicache</code>（接收侧：L3→L2→GPU）</td><td>下个请求进 decode 时</td></tr>
+</table>
+
+<h3>触发时机：每步 decode 之后</h3>
+<pre><code><span class="tok-cmt"># batch_result_processor.py:945</span>
+if self.server_args.disaggregation_decode_enable_offload_kvcache:
+    if not self.decode_offload_manager.offload_kv_cache(req):
+        self.decode_offload_manager.finalize_release_on_finish(req)</code></pre>
+
+<h3>offload_kv_cache 核心流程</h3>
+
+<h4>Step 1：计算增量边界</h4>
+<pre><code>all_tokens = req.origin_input_ids + req.output_ids[:-1]
+prefill_offloaded_len = len(req.origin_input_ids) // page_size * page_size
+
+incremental_new = incremental_total - state.inc_len       <span class="tok-cmt"># 减去已 offload 的</span>
+incremental_aligned_len = incremental_new // stride * stride  <span class="tok-cmt"># 按 stride 对齐</span></code></pre>
+<p>关键设计：<strong>decode offload 的是"增量部分"，prefill 段不动</strong>。prefill 段的 KV 是从 prefill 实例传来的，请求结束时才释放。</p>
+
+<h4>Step 2：异步 write（GPU→host）</h4>
+<pre><code>host_indices = self.cache_controller.write(
+    device_indices=incremental_indices.long(),
+    node_id=ack_id,
+)   <span class="tok-cmt"># 异步 D2H，在专用 write_stream 上</span></code></pre>
+
+<h4>Step 3：登记 inflight，推进进度</h4>
+<pre><code>self._mark_offload_started(req.rid)
+self.ongoing_offload[ack_id] = (req, host_indices, incremental_tokens, ...)
+state.inc_len += incremental_aligned_len   <span class="tok-cmt"># 立即推进，下次只算新的</span></code></pre>
+
+<h3>两级异步流水线</h3>
+<p>每个 decode 调度 tick 调用 <code>check_offload_progress</code>（<code>decode.py:2189</code>），驱动两级流水线：</p>
+
+<h4>Stage 1：GPU→host（L2）完成检查</h4>
+<pre><code>ack = self.cache_controller.ack_write_queue.pop(0)
+ack.finish_event.synchronize()   <span class="tok-cmt"># 等 write_stream 的 CUDA event（专用流，不阻塞 forward）</span>
+<span class="tok-cmt"># → 触发下一级</span>
+last_hash = self._trigger_backup(req, host_indices, incremental_tokens, ...)</code></pre>
+
+<h4>Stage 2：host→L3（NVMe）备份，然后释放 host</h4>
+<pre><code>def _trigger_backup(self, req, host_indices, incremental_tokens, ...):
+    page_hashes = self._compute_prefix_hash(incremental_tokens, prior_hash)
+    ack_id = self.cache_controller.write_storage(
+        host_indices, incremental_tokens, hash_value=page_hashes,
+    )   <span class="tok-cmt"># 异步写 NVMe</span>
+
+<span class="tok-cmt"># L3 写完后释放 host 内存</span>
+def _check_backup_progress(self, finish_count):
+    ...
+    self.decode_host_mem_pool.free(host_indices)   <span class="tok-cmt"># L3 写完，host 还回去</span></code></pre>
+<p><strong>两级流水线</strong>：GPU→host（L2）→L3（NVMe）→释放 host。L3 是兜底，L2 是临时区。host 内存用完就还，所以 L2 不需要很大（默认 ratio 2×）。</p>
+
+<h3>链式 hash：让 L3 可被未来请求命中</h3>
+<pre><code>def _compute_prefix_hash(self, tokens, prior_hash=""):
+    for offset in range(0, len(tokens), self.page_size):
+        last_hash = self.cache_controller.get_hash_str(page_tokens, last_hash)
+        page_hashes.append(last_hash)</code></pre>
+<p>每个 page 的 hash = <code>hash(prev_hash, page_tokens)</code>，是<strong>链式前缀 hash</strong>。未来请求前缀相同则 hash 一致，L3 能按 hash 查到。这就是为什么 offload 到 L3 后还能被复用 —— 按前缀 hash 存，不是按 rid 存。</p>
+
+<h3>请求结束：延迟释放 + 尾部处理</h3>
+<p><code>_release_finished_req</code> 里，源码注释说得很清楚：</p>
+<pre><code><span class="tok-cmt"># Prefill-aligned GPU slots are freed at request finish in
+# _release_finished_req, NOT here. The decoding request
+# continues to attend to those slots via req_to_token; freeing
+# them mid-decode races with concurrent admission, which can
+# reuse the slots and produce cross-pollinated KV reads.</span></code></pre>
+<ul>
+<li><strong>GPU 显存</strong>：请求结束时才释放（因为 decode 每步 attention 还在用，提前释放会 race）</li>
+<li><strong>host/L3 里的 KV</strong>：<strong>不释放</strong>，成为前缀缓存留给未来请求命中 —— 这正是 offload 的目的</li>
+</ul>
+
+<h3>与 decode forward 的并发关系</h3>
+<div class="flow-diagram">decode forward stream:   ──[attention N]──[attention N+1]──[attention N+2]──
+                              │                │
+                              ▼                ▼
+offload write_stream:     ──[D2H page A]──[D2H page B]──[D2H page C]──  (专用流，不抢 SM)
+                              │                │
+                              ▼                ▼
+backup thread:            ──[host→NVMe A]──[host→NVMe B]──[host→NVMe C]──  (后台线程，纯 IO)</div>
+<ul>
+<li><code>write_stream</code> 独立 CUDA stream，nontemporal 不污染 cache</li>
+<li>backup 是后台线程，纯 IO</li>
+<li>forward 流只在 <code>check_offload_progress</code> 里 <code>synchronize</code> 等 ack 的 CUDA event，而 event 在 write_stream 上，和 forward 并行</li>
+</ul>
+<p>所以 offload 的 DMA 延迟被藏在 decode forward 计算里。</p>
+
+<h2 class="anchor-target" id="s5">五、接收侧：路径 B 的 restore 状态机</h2>
+
+<p>下个请求进 decode 时，如何走路径 B 取回缓存的前缀 KV。源码：<code>disaggregation/decode_hicache_mixin.py</code>。</p>
+
+<h3>前缀匹配：三层命中</h3>
+<pre><code>@dataclass
+class DecodePrefixMatch:
+    prefix_indices: torch.Tensor     <span class="tok-cmt"># L1 GPU 显存已有</span>
+    l2_host_hit_length: int          <span class="tok-cmt"># L2 host DRAM 已有</span>
+    l3_storage_hit_length: int      <span class="tok-cmt"># L3 NVMe 已有</span>
+
+    @property
+    def needs_local_restore(self) -> bool:
+        return self.decode_prefix_len > self.l1_prefix_len</code></pre>
+<p><code>_build_decode_prefix_match</code> 依次查 L1 → L2 → L3，得到三层命中长度。</p>
+
+<h3>L3→L2 预取</h3>
+<pre><code>def _start_hicache_prefetch(self, req, prefix_match):
+    self.tree_cache.prefetch_from_storage(
+        req.rid, node, suffix, last_hash, prefix_keys
+    )</code></pre>
+
+<h3>L2→L1 restore 状态机</h3>
+<p><code>_process_hicache_local_restores</code> 三阶段推进：</p>
+<pre><code><span class="tok-cmt"># Phase A：推进在途 DMA 到 READY</span>
+for dr in active:
+    if dr.hicache_restored_node is not None and \
+       self.tree_cache.is_load_back_event_done(dr.hicache_load_consumer_index):
+        dr.hicache_restore_status = HiCacheRestoreResult.READY
+
+<span class="tok-cmt"># Phase B：排新 load_back（如果有空槽）</span>
+queued = [dr for dr in active if ... and self._try_hicache_queue_load_back(dr)]
+
+<span class="tok-cmt"># Phase C：启动合并 DMA，绑定 consumer_index</span>
+consumer_index = self.tree_cache.ready_to_load_host_cache()</code></pre>
+
+<h3>HiCacheRestoreGatedKVReceiver：闸住 poll</h3>
+<pre><code>class HiCacheRestoreGatedKVReceiver:
+    def poll(self) -> KVPoll:
+        poll = self.decode_req.kv_receiver.poll()   <span class="tok-cmt"># 先看路径 A 的 RDMA 完没完成</span>
+        if (poll == KVPoll.Success
+            and self.decode_req.hicache_restore_status == HiCacheRestoreResult.PENDING):
+            return KVPoll.Transferring   <span class="tok-cmt"># 路径 A 完了但路径 B 没完，继续等</span>
+        return poll</code></pre>
+<p><strong>关键</strong>：路径 A 和路径 B 是并行的 —— RDMA 传差量的同时，L2/L3 restore 取命中部分。两者都 READY 才算完成。</p>
+
+<h2 class="anchor-target" id="s6">六、整个流程的闭环</h2>
+
+<p>把写回侧和接收侧合起来看，就是"减少从 prefill 传输"的完整闭环：</p>
+<div class="flow-diagram">请求 1 进入 decode
+  ├─ 路径 B（L2/L3 restore）：命中前缀部分
+  └─ 路径 A（Mooncake RDMA）：未命中部分，从 prefill 传
+
+请求 1 decode 过程中
+  └─ DecodeKVCacheOffloadManager：每步增量 KV → L2 → L3（NVMe）
+
+请求 1 结束
+  ├─ GPU 显存：释放
+  └─ L2/L3 里的 KV：留着（按前缀 hash 索引）
+
+请求 2 进入 decode（共享前缀）
+  └─ 路径 B 命中 → 直接从 L2/L3 取，不走路径 A  ← 这就是"减少传输"</div>
+
+<blockquote class="confirm">
+<p>最初的直觉"decode 用二级缓存减少从 prefill 的传输"在<strong>机制层面是对的</strong>。<code>DecodeKVCacheOffloadManager</code> + <code>decode_hicache_mixin</code> 就是为此设计的 —— 请求 1 把增量 KV 存下来，请求 2 命中前缀时走路径 B 而非路径 A。</p>
+</blockquote>
+
+<h2 class="anchor-target" id="s7">七、那为什么这套部署 decode 没开？</h2>
+
+<p>把所有事实摆出来，按可信度排：</p>
+
+<h3>1. 8×IB 下路径 A 已经够快（最可能）</h3>
+<p>路径 A 聚合带宽 ~200 GB/s（8×IB），路径 B 受 host DRAM 带宽限制（~50-64 GB/s）。当路径 A 已经很快时，decode offload 的收益 —— 即"省下的路径 A 传输"换成"路径 B 加载" —— 带宽上不占优，且要额外付 offload 写回开销（D2H + host→NVMe）。<strong>边际收益可能不足以抵消开销</strong>。</p>
+
+<h3>2. 镜像版本的特性成熟度</h3>
+<p>镜像 <code>v0.5.14-pr47</code> + CjiW fork 补丁。<code>DecodeKVCacheOffloadManager</code> 在 main 分支是较新特性，测试文件还在 <code>test/registered/</code> 下。这个 fork 基于 v0.5.14，可能没有这套代码，或未在 ROCm/MI300X 上验证。</p>
+<p><strong>验证方法</strong>：</p>
+<pre><code>docker run --rm b200routeraca.azurecr.io/mindverse/sglang:v0.5.14-pr47 \
+  python3 -m sglang.launch_server --help 2>&1 | grep -i "offload-kvcache"</code></pre>
+
+<h3>3. 配置复杂度</h3>
+<p>要调 <code>num-reserved-decode-tokens</code>、<code>hicache-ratio</code>、stride 等，调不好影响 decode 吞吐，部署时可能先没启用。</p>
+
+<h3>怎么开（如果镜像支持）</h3>
+<pre><code><span class="tok-cmt"># 接收侧 restore（路径 B）</span>
+--enable-hierarchical-cache \
+--hicache-ratio 2 \                          <span class="tok-cmt"># L2 host DRAM = 2× GPU pool</span>
+--hicache-mem-layout page_first \
+
+<span class="tok-cmt"># 写回侧（offload manager）</span>
+--hicache-storage-backend file \
+--file-storage-path /nvme/hicache \
+--disaggregation-decode-enable-offload-kvcache \
+--num-reserved-decode-tokens 128 \</code></pre>
+
+<pre><code><span class="tok-cmt"># 环境变量</span>
+export SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR="/nvme/hicache"
+export SGLANG_HICACHE_FILE_BACKEND_MAX_SIZE="200G"
+export SGLANG_HICACHE_FILE_BACKEND_MIN_FREE_SPACE="10G"
+<span class="tok-cmt"># 可选：调 offload 粒度</span>
+<span class="tok-cmt"># export SGLANG_HICACHE_DECODE_OFFLOAD_STRIDE=128</span></code></pre>
+
+<h2 class="anchor-target" id="s8">八、复盘：每一步纠正踩在什么取舍上</h2>
+
+<table>
+<tr><th>轮次</th><th>我的错误论断</th><th>被什么纠正</th><th>暴露的真实取舍</th></tr>
+<tr>
+<td>1</td>
+<td>"decode 每步读 KV，NVMe 会拖延迟"</td>
+<td>你指出二级缓存可以是 CPU 内存</td>
+<td>NVMe（L3）和 host DRAM（L2）是不同介质，延迟差几十倍</td>
+</tr>
+<tr>
+<td>2</td>
+<td>"RDMA 比 NVMe load 快"</td>
+<td>你指出有 8 张 IB</td>
+<td>单条 IB vs 8×IB 聚合，带宽差 8 倍</td>
+</tr>
+<tr>
+<td>3</td>
+<td>"路径 B 带宽是 A 的 2 倍"</td>
+<td>8×IB 事实（同上）</td>
+<td>按单链路算 vs 按聚合算，结论反转</td>
+</tr>
+<tr>
+<td>4</td>
+<td>"decode 没开是因为框架不支持"</td>
+<td>源码确认 <code>DecodeKVCacheOffloadManager</code> 存在</td>
+<td>框架支持 ≠ 部署开启，配置选择背后是带宽权衡</td>
+</tr>
+</table>
+
+<p><strong>核心教训</strong>：技术分析不能只看源码机制，还得看实际硬件配置。源码告诉你"机制上能不能做"，硬件告诉你"做了划不划算"。8×IB 这个事实，把"机制上路径 B 更优"的结论直接反转成"带宽上路径 A 更优"。</p>
+
+<p>另外一个教训：<strong>诚实标注不确定处比强行给结论更值钱</strong>。最初几轮为了支持"你的直觉对"，不断往"路径 B 更快"方向找证据，但带宽事实不支持。承认"取决于负载特征、需实测"才是诚实的。</p>
+
+<h2>附录：关键源码文件索引</h2>
+<table>
+<tr><th>文件</th><th>作用</th><th>关键行</th></tr>
+<tr><td><code>disaggregation/decode_kvcache_offload_manager.py</code></td><td>decode offload manager 主体</td><td>111 <code>offload_kv_cache</code></td></tr>
+<tr><td><code>managers/cache_controller.py</code></td><td>HiCacheController，管 L2↔L3 读写</td><td>743 <code>load</code>、<code>start_loading</code></td></tr>
+<tr><td><code>mem_cache/pool_host/mla.py</code></td><td>host DRAM pool，<code>load_to_device_per_layer</code></td><td>224</td></tr>
+<tr><td><code>mem_cache/storage/backend_factory.py</code></td><td>8 种 L3 backend 注册</td><td>195-235</td></tr>
+<tr><td><code>disaggregation/decode_hicache_mixin.py</code></td><td>接收侧 restore 状态机</td><td>99、240</td></tr>
+<tr><td><code>disaggregation/mooncake/conn.py</code></td><td>路径 A 的 RDMA 传输</td><td>579 <code>batch_transfer_sync</code></td></tr>
+<tr><td><code>disaggregation/common/staging_buffer.py</code></td><td>路径 A 的 gather/scatter</td><td>340</td></tr>
+<tr><td><code>sgl-kernel/csrc/kvcacheio/transfer.cu</code></td><td>L2→L1 的 nontemporal 传输 kernel</td><td>33</td></tr>
+<tr><td><code>distributed/device_communicators/mooncake_transfer_engine.py</code></td><td>Mooncake engine，8×IB 按 GPU 取设备</td><td>130</td></tr>
+<tr><td><code>disaggregation/common/conn.py</code></td><td><code>SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER</code> 多卡并行</td><td>166、186</td></tr>
+</table>
+
+<footer>
+  <p>本文基于 SGLang main 分支源码 + 实际部署脚本分析。镜像 <code>v0.5.14-pr47</code> 的具体支持情况需上机验证。所有带宽数字为硬件规格理论值，实际可持续带宽需实测。</p>
+  <p style="margin-top:8px;">Deployment Workspace · blog/pd-decode-kvcache-offload</p>
+</footer>
+
+</div>
+</body>
+</html>
