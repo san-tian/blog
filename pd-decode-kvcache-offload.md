@@ -1,32 +1,26 @@
-# PD 分离架构里,decode 到底要不要开二级 KV 缓存?
+# PD 分离架构中 decode 二级 KV 缓存的机制与带宽权衡
 
-> 本文基于 SGLang 源码与实际部署配置,分析 decode 侧二级 KV 缓存的机制与带宽取舍。最终答案不是"该开"或"不该开",而是"为什么这套部署没开、以及什么条件下开才划算"。
+在 PD 分离部署中，decode 侧是否需要开启二级 KV 缓存取决于两个因素：**机制支持**与**带宽权衡**。SGLang 的 `DecodeKVCacheOffloadManager` 提供了完整的 L2（host DRAM）+ L3（NVMe/分布式存储）支持，但在 8×IB 聚合带宽（~200 GB/s）远高于单机 H2D（~50-64 GB/s）的环境下，跨机 RDMA 传输（路径 A）已经足够快，decode 本地缓存的边际收益可能不足以抵消 offload 开销。
 
-## 背景：什么是 PD 分离
+**核心结论**：
+
+- **机制**：SGLang decode 侧有完整的二级缓存机制（`DecodeKVCacheOffloadManager`），支持 GPU → host DRAM → NVMe/分布式存储三层架构，下次命中时通过专用流 layer-wise overlap 恢复
+- **带宽**：8×IB 并行传输（`SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER=1`）下，路径 A（跨机 RDMA）聚合带宽 ~200 GB/s，远高于路径 B（本机 H2D）~50-64 GB/s。带宽维度路径 A 占优
+- **权衡**：decode offload 需额外付出 D2H + host→storage 写回开销。在路径 A 已足够快的前提下，边际收益可能为负。具体临界点取决于消息大小、前缀命中率、负载特征，需实测确认
+
+本文基于 SGLang v0.5.14 源码与实际部署配置，分析 decode 侧二级缓存的机制实现与带宽权衡。所有带宽数字为硬件规格理论值。
+
+---
+
+## PD 分离基础
 
 LLM 推理的一次请求分两阶段：**prefill**（处理整段输入 prompt，算出 KV cache，计算重、延迟高）和 **decode**（逐个生成输出 token，每步都要读全部历史 KV，计算轻、对延迟敏感）。传统单实例同时做两件事，要按更苛刻的那个分配显存，且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。
 
 **PD 分离（Prefill-Decode Disaggregation）**把这两阶段拆到不同实例上：prefill 实例专心算 prompt，算完把 KV 通过 RDMA 传给 decode 实例；decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。
 
-## 缘起：一个看似简单的问题
-
-我们的 PD 分离部署(MI300X ×8 + 8× HDR InfiniBand,GLM-5.2 FP8,SGLang v0.5.14 + CjiW fork)里,prefill 实例开了 `--enable-hierarchical-cache`(HiCache),decode 实例只开了 `--disaggregation-decode-enable-radix-cache`,没开任何二级缓存。
-
-最初的疑问是:**为什么 decode 不用二级缓存,来减少从 prefill 的 KV 传输?**
-
-直觉上,如果 decode 本地缓存了前缀 KV,下次命中就不用从 prefill 传了,应该更快。这个直觉对吗?
-
-**结论先行**:
-
-- 机制层面:SGLang 确实有 decode 专用的二级缓存机制(`DecodeKVCacheOffloadManager`),支持把 decode 增量 KV offload 到 host DRAM(L2)再落 NVMe(L3),并能在下个请求命中时通过专用流 layer-wise overlap 加载回来。源码完整存在。
-- 带宽层面:这套部署有 **8 张 IB 网卡**,开启 `SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER` 后 8 个 CP rank 并行传输,路径 A(跨机 RDMA)聚合带宽(~200 GB/s)远高于路径 B(本机 H2D,~50-64 GB/s)。在 8×IB 下路径 A 已经很快,decode 二级缓存的边际收益可能不足以抵消开销。
-- 未实测部分:具体在什么消息大小下路径 A/B 谁快,需要实测确认,不能仅凭源码断言。本文所有带宽数字为硬件规格理论值。
-
-下面是完整推导过程。
-
 ---
 
-## 一、先把 cache 结构搞清楚
+## HiCache 三层架构
 
 ### HiCache 是三层结构
 
@@ -78,7 +72,7 @@ self.cache_controller = HiCacheController(
 
 ---
 
-## 二、两条路径的源码实现
+## 两条路径的源码实现
 
 定义清楚要对比的两条路径:
 
@@ -170,7 +164,7 @@ class LayerLoadingEvent:
 
 ---
 
-## 三、带宽对比:8×IB 聚合下的实际取舍
+## 带宽对比：8×IB 聚合下的实际取舍
 
 PD 分离的 KV 传输不走单条 IB 链路。开启 `SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER` 后,8 个 CP rank 并行传输,路径 A 的聚合带宽远高于路径 B。
 
@@ -211,7 +205,7 @@ prefill 用了 CP8(Context Parallel 8 卡)+ `--enable-dsa-prefill-cp-layersplit`
 
 ---
 
-## 四、DecodeKVCacheOffloadManager 的完整机制
+## DecodeKVCacheOffloadManager 的完整机制
 
 这是 decode 侧独有的组件,只在 `--disaggregation-decode-enable-offload-kvcache` 开启时创建。源码:`disaggregation/decode_kvcache_offload_manager.py`(352 行)。
 
@@ -372,7 +366,7 @@ backup thread:            ──[host→NVMe A]──[host→NVMe B]──[host�
 
 ---
 
-## 五、接收侧:路径 B 的 restore 状态机
+## 接收侧：路径 B 的 restore 状态机
 
 下个请求进 decode 时,如何走路径 B 取回缓存的前缀 KV。源码:`disaggregation/decode_hicache_mixin.py`。
 
@@ -452,7 +446,7 @@ decode_req.req.prefix_indices = torch.cat(
 
 ---
 
-## 六、整个流程的闭环
+## 整个流程的闭环
 
 把写回侧和接收侧合起来看,就是"减少从 prefill 传输"的完整闭环:
 
@@ -476,7 +470,7 @@ decode_req.req.prefix_indices = torch.cat(
 
 ---
 
-## 七、那为什么这套部署 decode 没开?(最终结论)
+## 部署决策：为什么 decode 没开二级缓存
 
 ### 可能的原因(按可信度排)
 

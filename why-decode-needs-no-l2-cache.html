@@ -287,8 +287,8 @@
 <div class="container">
 
 <header class="hero">
-  <h1>为什么 PD 分离中，decode 不需要二级缓存？</h1>
-  <div class="subtitle">SGLang PD 分离架构里 DecodeKVCacheOffloadManager 的机制、路径 A/B 的源码对比，以及 8×IB 带宽下的实际取舍</div>
+  <h1>PD 分离架构中 decode 二级 KV 缓存的机制与带宽权衡</h1>
+  <div class="subtitle">SGLang DecodeKVCacheOffloadManager 实现分析与 8×IB 聚合帯宽下的部署决策</div>
   <div class="meta">
     <span>SGLang v0.5.14</span>
     <span>MI300X ×8</span>
@@ -297,26 +297,26 @@
   </div>
 </header>
 
-<div class="background">
-  <h3>背景：什么是 PD 分离</h3>
-  <p>LLM 推理的一次请求分两阶段：<strong>prefill</strong>（处理整段输入 prompt，算出 KV cache，计算重、延迟高）和 <strong>decode</strong>（逐个生成输出 token，每步都要读全部历史 KV，计算轻、对延迟敏感）。传统单实例同时做两件事，要按更苛刻的那个分配显存，且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。</p>
-  <p><strong>PD 分离（Prefill-Decode Disaggregation）</strong>把这两阶段拆到不同实例上：prefill 实例专心算 prompt，算完把 KV 通过 RDMA 传给 decode 实例；decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。</p>
-</div>
-
 <div class="callout-summary">
-  <h3>结论先行</h3>
+  <h3>核心结论</h3>
   <div class="point">
     <span class="badge ok">机制</span>
-    <div>SGLang <strong>确实有</strong> decode 专用的二级缓存机制（<code>DecodeKVCacheOffloadManager</code>），支持把 decode 增量 KV offload 到 host DRAM（L2）再落 NVMe（L3），下个请求命中时通过专用流 layer-wise overlap 加载回来。源码完整存在，不是"框架不支持"。</div>
+    <div>SGLang decode 侧有完整的二级缓存机制（<code>DecodeKVCacheOffloadManager</code>），支持 GPU → host DRAM → NVMe/分布式存储三层架构，下次命中时通过专用流 layer-wise overlap 恢复。</div>
   </div>
   <div class="point">
     <span class="badge no">带宽</span>
-    <div>这套部署有 <strong>8 张 IB 网卡</strong>，开启 <code>SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER</code> 后 8 个 CP rank 并行传输，路径 A（跨机 RDMA）聚合带宽 <strong>~200 GB/s</strong>，远高于路径 B（本机 H2D，~50-64 GB/s）。8×IB 下路径 A 已经很快，decode 二级缓存的边际收益可能不足以抵消开销。</div>
+    <div>8×IB 并行传输（<code>SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER=1</code>）下，路径 A（跨机 RDMA）聚合带宽 <strong>~200 GB/s</strong>，远高于路径 B（本机 H2D）~50-64 GB/s。带宽维度路径 A 占优。</div>
   </div>
   <div class="point">
-    <span class="badge q">实测</span>
-    <div>具体在什么消息大小下路径 A/B 谁快，<strong>无法仅凭源码断言</strong>，需要实测确认。本文所有带宽数字为硬件规格理论值。</div>
+    <span class="badge q">权衡</span>
+    <div>decode offload 需额外付出 D2H + host→storage 写回开销。在路径 A 已足够快的前提下，边际收益可能为负。具体临界点取决于消息大小、前缀命中率、负载特征，需实测确认。本文所有带宽数字为硬件规格理论值。</div>
   </div>
+</div>
+
+<div class="background">
+  <h3>PD 分离基础</h3>
+  <p>LLM 推理的一次请求分两阶段：<strong>prefill</strong>（处理整段输入 prompt，算出 KV cache，计算重、延迟高）和 <strong>decode</strong>（逐个生成输出 token，每步都要读全部历史 KV，计算轻、对延迟敏感）。传统单实例同时做两件事，要按更苛刻的那个分配显存，且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。</p>
+  <p><strong>PD 分离（Prefill-Decode Disaggregation）</strong>把这两阶段拆到不同实例上：prefill 实例专心算 prompt，算完把 KV 通过 RDMA 传给 decode 实例；decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。</p>
 </div>
 
 <div class="toc">
@@ -644,7 +644,7 @@ consumer_index = self.tree_cache.ready_to_load_host_cache()</code></pre>
 <p>最初的直觉"decode 用二级缓存减少从 prefill 的传输"在<strong>机制层面是对的</strong>。<code>DecodeKVCacheOffloadManager</code> + <code>decode_hicache_mixin</code> 就是为此设计的 —— 请求 1 把增量 KV 存下来，请求 2 命中前缀时走路径 B 而非路径 A。</p>
 </blockquote>
 
-<h2 class="anchor-target" id="s7">七、那为什么这套部署 decode 没开？</h2>
+<h2 class="anchor-target" id="s7">部署决策：为什么 decode 没开二级缓存</h2>
 
 <h3>1. 8×IB 下路径 A 已经够快（最可能）</h3>
 <p>路径 A 聚合带宽 ~200 GB/s（8×IB），路径 B 受 host DRAM 带宽限制（~50-64 GB/s）。当路径 A 已经很快时，decode offload 的收益 —— 即"省下的路径 A 传输"换成"路径 B 加载" —— 带宽上不占优，且要额外付 offload 写回开销（D2H + host→NVMe）。<strong>边际收益可能不足以抵消开销</strong>。</p>
