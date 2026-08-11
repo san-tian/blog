@@ -1,16 +1,14 @@
-# PD 分离架构里,decode 到底要不要开二级 KV 缓存?——一次被源码和硬件双重纠正的技术复盘
+# PD 分离架构里,decode 到底要不要开二级 KV 缓存?
 
-> 这是一个真实发生的技术讨论复盘。最初的一个直觉问题,在源码核查和硬件事实的双重纠正下,推翻了好几次结论。最终答案不是"该开"或"不该开",而是"为什么这套部署没开、以及什么条件下开才划算"。记录下来,因为每一步纠正都踩在一个真实的设计取舍上。
+> 本文基于 SGLang 源码与实际部署配置,分析 decode 侧二级 KV 缓存的机制与带宽取舍。最终答案不是"该开"或"不该开",而是"为什么这套部署没开、以及什么条件下开才划算"。
 
-## 背景:什么是 PD 分离
+## 背景：什么是 PD 分离
 
-LLM 推理的一次请求分两阶段:**prefill**(处理整段输入 prompt,算出 KV cache,计算重、延迟高)和 **decode**(逐个生成输出 token,每步都要读全部历史 KV,计算轻、对延迟敏感)。传统单实例同时做两件事,要按更苛刻的那个分配显存,且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。
+LLM 推理的一次请求分两阶段：**prefill**（处理整段输入 prompt，算出 KV cache，计算重、延迟高）和 **decode**（逐个生成输出 token，每步都要读全部历史 KV，计算轻、对延迟敏感）。传统单实例同时做两件事，要按更苛刻的那个分配显存，且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。
 
-**PD 分离(Prefill-Decode Disaggregation)**把这两阶段拆到不同实例上:prefill 实例专心算 prompt,算完把 KV 通过 RDMA 传给 decode 实例;decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。我们这套部署是 8× MI300X + 8× HDR InfiniBand,prefill 开 `CP8`(8 卡 Context Parallel)+ `--enable-dsa-prefill-cp-layersplit`,decode 开 `--disaggregation-decode-enable-radix-cache`,KV 跨机传输走 Mooncake over IB。
+**PD 分离（Prefill-Decode Disaggregation）**把这两阶段拆到不同实例上：prefill 实例专心算 prompt，算完把 KV 通过 RDMA 传给 decode 实例；decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。
 
-> 术语:`P/D` = prefill/decode 分离 · `KV cache` = attention 的历史状态张量 · `TTFT` = 首 token 延迟 · `HiCache` = SGLang 的多级 KV 缓存 · `mooncake` = KV 传输引擎
-
-## 缘起:一个看似简单的问题
+## 缘起：一个看似简单的问题
 
 我们的 PD 分离部署(MI300X ×8 + 8× HDR InfiniBand,GLM-5.2 FP8,SGLang v0.5.14 + CjiW fork)里,prefill 实例开了 `--enable-hierarchical-cache`(HiCache),decode 实例只开了 `--disaggregation-decode-enable-radix-cache`,没开任何二级缓存。
 
@@ -18,19 +16,19 @@ LLM 推理的一次请求分两阶段:**prefill**(处理整段输入 prompt,算�
 
 直觉上,如果 decode 本地缓存了前缀 KV,下次命中就不用从 prefill 传了,应该更快。这个直觉对吗?
 
-**结论先行(最终版,带诚实标注)**:
+**结论先行**:
 
 - 机制层面:SGLang 确实有 decode 专用的二级缓存机制(`DecodeKVCacheOffloadManager`),支持把 decode 增量 KV offload 到 host DRAM(L2)再落 NVMe(L3),并能在下个请求命中时通过专用流 layer-wise overlap 加载回来。源码完整存在。
 - 带宽层面:这套部署有 **8 张 IB 网卡**,开启 `SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER` 后 8 个 CP rank 并行传输,路径 A(跨机 RDMA)聚合带宽(~200 GB/s)远高于路径 B(本机 H2D,~50-64 GB/s)。在 8×IB 下路径 A 已经很快,decode 二级缓存的边际收益可能不足以抵消开销。
-- 未实测部分:具体在什么消息大小下路径 A/B 谁快,需要实测确认,不能仅凭源码断言。
+- 未实测部分:具体在什么消息大小下路径 A/B 谁快,需要实测确认,不能仅凭源码断言。本文所有带宽数字为硬件规格理论值。
 
 下面是完整推导过程。
 
 ---
 
-## 一、先把 cache 结构搞清楚(纠正第一个误解)
+## 一、先把 cache 结构搞清楚
 
-### 误解:HiCache 的二级是 NVMe 硬盘
+### HiCache 是三层结构
 
 部署脚本里 prefill 的配置:
 
@@ -46,11 +44,7 @@ LLM 推理的一次请求分两阶段:**prefill**(处理整段输入 prompt,算�
 export SGLANG_HICACHE_FILE_BACKEND_MAX_SIZE="200G"
 ```
 
-看起来二级介质就是 NVMe 文件。但这只是**这个部署的选择**,不是 HiCache 框架的全貌。
-
-### 源码确认:HiCache 是三层结构,L2 默认是 host DRAM
-
-看 `python/sglang/srt/disaggregation/decode_kvcache_offload_manager.py` 的初始化:
+但 HiCache 的 L2 默认是 host DRAM,NVMe 文件只是 L3 的一个选项。看 `python/sglang/srt/disaggregation/decode_kvcache_offload_manager.py` 的初始化:
 
 ```python
 # L2:host DRAM pool(MLA 用 MLATokenToKVPoolHost)
@@ -80,7 +74,7 @@ self.cache_controller = HiCacheController(
 
 所以"CPU 内存做二级缓存"在 SGLang 里是**默认且独立**的 L2 层,不是某个 backend 选项。vLLM 也有类似设计(`--cpu-offload-gb`、`--kv_offloading_backend native`)。
 
-> **第一个纠正**:之前把"二级缓存 = NVMe"当成唯一可能,是错的。L2 默认是 host DRAM,NVMe 只是 L3 选项之一。
+> L2 默认是 host DRAM,NVMe 只是 L3 选项之一。vLLM 也有类似设计(`--cpu-offload-gb`、`--kv_offloading_backend native`)。
 
 ---
 
@@ -490,8 +484,6 @@ decode_req.req.prefix_indices = torch.cat(
 
 ## 七、那为什么这套部署 decode 没开?(最终结论)
 
-把所有事实摆出来:
-
 ### 可能的原因(按可信度排)
 
 1. **8×IB 下路径 A 已经够快(最可能)**
@@ -553,21 +545,6 @@ export SGLANG_HICACHE_FILE_BACKEND_MIN_FREE_SPACE="10G"
 > **注意**:路径 B 的 restore 指标(`ack_load_queue` 的 timing event)在监控脚本里没有对应 Prometheus metric,需要在 decode 机器上看 SGLang 日志里的 hicache load timing,或加 metric。
 
 ---
-
-## 八、复盘:每一步纠正踩在什么取舍上
-
-这次讨论最有价值的不是最终结论,而是每一步纠正都踩在一个真实的设计取舍上:
-
-| 轮次 | 我的错误论断 | 被什么纠正 | 暴露的真实取舍 |
-|---|---|---|---|
-| 1 | "decode 每步读 KV,NVMe 会拖延迟" | 你指出二级缓存可以是 CPU 内存 | NVMe(L3)和 host DRAM(L2)是不同介质,延迟差几十倍 |
-| 2 | "RDMA 比 NVMe load 快" | 你指出有 8 张 IB | 单条 IB vs 8×IB 聚合,带宽差 8 倍 |
-| 3 | "路径 B 带宽是 A 的 2 倍" | 8×IB 事实(同上) | 按单链路算 vs 按聚合算,结论反转 |
-| 4 | "decode 没开是因为框架不支持" | 源码确认 `DecodeKVCacheOffloadManager` 存在 | 框架支持 ≠ 部署开启,配置选择背后是带宽权衡 |
-
-**核心教训**:技术分析不能只看源码机制,还得看实际硬件配置。源码告诉你"机制上能不能做",硬件告诉你"做了划不划算"。8×IB 这个事实,把"机制上路径 B 更优"的结论直接反转成"带宽上路径 A 更优"。
-
-另外一个教训:**诚实标注不确定处比强行给结论更值钱**。最初几轮我为了支持"你的直觉对",不断往"路径 B 更快"方向找证据,但带宽事实不支持。承认"取决于负载特征、需实测"才是诚实的。
 
 ---
 
