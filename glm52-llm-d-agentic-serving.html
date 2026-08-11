@@ -153,6 +153,46 @@
 <tr><td>MHA（64 KV 头 × 256 维）</td><td>~2.5 MB</td><td>约 57×</td></tr>
 <tr><td>GQA（8 KV 头 × 256 维）</td><td>~313 KB</td><td>约 7×</td></tr>
 <tr><td><strong>MLA（512 潜在 + 64 RoPE）</strong></td><td><strong>~44 KB</strong></td><td><strong>1×</strong></td></tr>
+
+<details style="margin:20px 0; border:1px solid var(--border); border-radius:8px; padding:16px; background:var(--card-2);">
+<summary style="cursor:pointer; font-weight:600; color:var(--accent); user-select:none;"><strong>📊 图示:三种方案的 KV 缓存结构对比</strong></summary>
+<pre style="background:var(--code-bg); padding:16px; border-radius:6px; overflow-x:auto; margin-top:12px; font-size:13px; line-height:1.4;">
+┌─────────────────────────────────────────────────────────────┐
+│  MHA (Multi-Head Attention) - 每层 32 KB                    │
+├─────────────────────────────────────────────────────────────┤
+│  ┌───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┐     │
+│  │K₀ │K₁ │K₂ │...│K₆₃│V₀ │V₁ │V₂ │...│V₆₃│           │  64个KV头  │
+│  └───┴───┴───┴───┴───┴───┴───┴───┴───┴───┘           │  各128维   │
+│  每个头独立存储,无共享                                 │  → 2.5 MB  │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  GQA (Grouped Query Attention) - 每层 4 KB                  │
+├─────────────────────────────────────────────────────────────┤
+│  ┌───┬───┬───┬───┬───┬───┬───┬───┐                         │
+│  │K₀ │K₁ │...│K₇ │V₀ │V₁ │...│V₇ │      8组共享           │
+│  └───┴───┴───┴───┴───┴───┴───┴───┘      每组服务8个Q头    │
+│     ↑   ↑         ↑                      → 313 KB          │
+│     8个Q头共享1个KV                                         │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  MLA (Multi-head Latent Attention) - 每层 576 B            │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────────────┬──────────┐                        │
+│  │   c_t (潜在向量)      │  RoPE    │   压缩表征              │
+│  │      512 元素         │ 64 元素  │   所有头共享            │
+│  └──────────────────────┴──────────┘   → 44 KB             │
+│          ↓ 推理时低秩投影                                    │
+│     W_K·c_t → K₀..K₆₃, W_V·c_t → V₀..V₆₃                   │
+└─────────────────────────────────────────────────────────────┘
+</pre>
+<p style="margin-top:12px; font-size:14px;"><strong>关键差异</strong>:
+<br>• <strong>MHA</strong>:每个头独立存 K 和 V,灵活但冗余大
+<br>• <strong>GQA</strong>:多个 Q 头共享一组 KV,减少存储但仍按头分开
+<br>• <strong>MLA</strong>:所有头共享一个压缩的潜在向量,存储最小但<strong>无法沿头分片</strong>
+</p>
+</details>
 </table>
 <p>存储语义可以写成伪代码：</p>
 <pre><code># MLA：每次只缓存潜在向量 + 共享 RoPE
@@ -172,6 +212,37 @@ KV_cache[token][layer] = {
 <p><strong>关键后果</strong>：TP=8 不再<em>分摊</em> KV 缓存，而是<strong>复制 8 份</strong>。跨节点 TP 的 all-reduce 开销也更贵 —— 每层要做两次"列并行 → 行并行 → all-reduce"（因为后面还接 MoE）。</p>
 </blockquote>
 <p>实测上，聚合 TP=8 单节点 8 份副本，单节点总物理 KV 约 200 GiB，其中绝大部分是冗余副本。</p>
+
+<details style="margin:20px 0; border:1px solid var(--border); border-radius:8px; padding:16px; background:var(--card-2);">
+<summary style="cursor:pointer; font-weight:600; color:var(--accent); user-select:none;"><strong>📊 图示:TP=8 为什么会复制 KV</strong></summary>
+<pre style="background:var(--code-bg); padding:16px; border-radius:6px; overflow-x:auto; margin-top:12px; font-size:13px; line-height:1.4;">
+MHA/GQA 下的 TP=8 (可分片):
+┌────────────────────────────────────────────────────────┐
+│64 KV 头按 head 维度分片给 8 个 rank                    │
+├────────────────────────────────────────────────────────┤
+│ Rank0: K₀..K₇ + V₀..V₇   (8 heads, 1/8 KV)                │
+│ Rank1: K₈..K₁₅ + V₈..V₁₅  (8 heads, 1/8 KV)                │
+│  ...                                                      │
+│ Rank7: K₅₆..K₆₃ + V₅₆..V₆₃ (8 heads, 1/8 KV)                │
+│                                                              │
+│ ✅ 每个 rank 只持有自己那份 KV,总量 = 1×                    │
+└────────────────────────────────────────────────────────┘
+
+MLA 下的 TP=8 (不可分片):
+┌────────────────────────────────────────────────────────┐
+│c_t 是一个不可分的完整向量 (512 元素)                 │
+├────────────────────────────────────────────────────────┤
+│ Rank0: c_t[0..511] + rope[0..63]  (完整 KV)              │
+│ Rank1: c_t[0..511] + rope[0..63]  (完整 KV, 复制!)         │
+│  ...                                                      │
+│ Rank7: c_t[0..511] + rope[0..63]  (完整 KV, 复制!)         │
+│                                                              │
+│ ❌ 每个 rank 必须持有完整 c_t,总量 = 8×                    │
+│ ❌ 单节点物理 KV ~200 GiB (大部分是冗余副本)           │
+└────────────────────────────────────────────────────────┘
+</pre>
+<p style="margin-top:12px; font-size:14px;"><strong>为什么不能分片</strong>:c_t 是所有 64 个头的压缩表征,任何一个头都需要完整的 c_t 才能还原出 K/V。把 c_t 按元素切分给不同 rank 会破坏这个表征的语义。</p>
+</details>
 
 <h3>三、Wide-EP —— 换一个分法</h3>
 <p>既然 TP 行不通，llm-d 选择的方案是 <strong>Wide-EP（Wide Expert Parallelism）</strong>。它不是单一技术，而是两种并行的组合：</p>
@@ -214,6 +285,58 @@ KV_cache[token][layer] = {
 </ol>
 <p>这样每个 rank 只需持有自己那份专家权重。在 Wide-EP 的实测布局中，<strong>每个 GPU 只承担约 65 GiB 权重</strong>（对比 TP=8 的 89.5 GiB），省下约 25 GiB 用于 KV。</p>
 <p>GLM-5.2 的部署用 <strong>DeepEP</strong> 处理 token 的 all-to-all 派发，用 <code>deep_gemm</code> 跑专家计算。通信走 NVLink（节点内）+ InfiniBand（节点间）。</p>
+
+<details style="margin:20px 0; border:1px solid var(--border); border-radius:8px; padding:16px; background:var(--card-2);">
+<summary style="cursor:pointer; font-weight:600; color:var(--accent); user-select:none;"><strong>📊 图示:Wide-EP 单层 forward 数据流</strong></summary>
+<pre style="background:var(--code-bg); padding:16px; border-radius:6px; overflow-x:auto; margin-top:12px; font-size:13px; line-height:1.4;">
+DEP16 单层工作流 (数据并行注意力 + 专家并行 MoE):
+
+输入 tokens ──────────┐
+                      │
+                      ▼
+        ┌─────────────────────────┐
+        │  1. MLA Attention (DP)  │  ← 每个 rank 处理不同 batch
+        │     每 rank 独立计算    │     KV 写入本地 HBM
+        └─────────────┬───────────┘
+                      │ attn_out
+                      ▼
+        ┌─────────────────────────┐
+        │  2. MoE Gate            │  为每个 token 选 top-k 专家
+        │     routing = gate(x)   │  routing: [token → expert_id]
+        └─────────────┬───────────┘
+                      │
+                      ▼
+        ┌─────────────────────────┐
+        │  3. DeepEP all-to-all   │  把 token 派发到持有对应
+        │     dispatch tokens     │  专家的 rank (跨节点 IB)
+        └─────────────┬───────────┘
+                      │
+         ┌────────────┼────────────┐
+         │            │            │
+         ▼            ▼            ▼
+    ┌────────┐  ┌────────┐  ┌────────┐
+    │Expert₀ │  │Expert₁ │  │Expert₁₅│  ← 16个rank各持16个专家
+    │ Rank0  │  │ Rank1  │  │ Rank15 │    权重分散,省显存
+    └────┬───┘  └────┬───┘  └────┬───┘
+         │            │            │
+         └────────────┼────────────┘
+                      │
+                      ▼
+        ┌─────────────────────────┐
+        │  4. DeepEP all-to-all   │  把计算结果送回原 rank
+        │     combine results     │
+        └─────────────┬───────────┘
+                      │
+                      ▼
+                 输出 → 下一层
+
+关键特性:
+• 注意力: 0 次 all-reduce (DP,不是 TP)
+• MoE: 1 次 all-to-all dispatch + 1 次 combine
+• KV: 本地独立,不跨 rank 复制
+• 权重: 65 GiB/GPU (vs TP=8 的 89.5 GiB)
+</pre>
+</details>
 
 <h3>四、"Wide" 的含义</h3>
 <p>历史上，EP 通常被限制在<strong>单节点内</strong>（节点内 NVLink 带宽充裕、延迟低）。"Wide" 则是把 EP 扩展到<strong>跨多个节点</strong>，借助 InfiniBand 通信。</p>
