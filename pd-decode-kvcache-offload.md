@@ -170,22 +170,16 @@ class LayerLoadingEvent:
 
 ---
 
-## 三、带宽对比(被硬件事实纠正的关键部分)
+## 三、带宽对比:8×IB 聚合下的实际取舍
 
-### 错误版本:按单条 IB 算
-
-最初几轮我按"单条 HDR IB 200 Gbps = 25 GB/s"算,得出"路径 B 的 H2D PCIe 带宽(~50-64 GB/s)是路径 A 的 2 倍"。**这是错的**。
-
-### 纠正:这套部署有 8 张 IB,而且 SGLang 在用多卡并行传输
-
-**部署确认**:`deployment-guide.md` 写明"InfiniBand RDMA 网络(8 个 IB 设备 mlx5_ib0~ib7)"。
+PD 分离的 KV 传输不走单条 IB 链路。开启 `SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER` 后,8 个 CP rank 并行传输,路径 A 的聚合带宽远高于路径 B。
 
 **源码确认多卡并行**:脚本开了 `SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER=1`:
 
 ```python
 # common/conn.py:166
 self.enable_all_cp_ranks_for_transfer = (
-    envs.SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER.get()  # ← 你们开了
+    envs.SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER.get()
     or cp_sharded_prefill
     or hybrid_decode_pulls_all_ranks
 )
@@ -196,7 +190,7 @@ self.enable_all_cp_ranks_for_transfer = (
 
 prefill 用了 CP8(Context Parallel 8 卡)+ `--enable-dsa-prefill-cp-layersplit`,8 个 CP rank 各起一个 transfer engine。Mooncake 侧 `get_ib_devices_for_gpu(ib_device, gpu_id)` 按 GPU 取对应 IB 设备(`mooncake_transfer_engine.py:130`)。8 条 IB 口并行传输。
 
-### 修正后的带宽对比
+### 带宽对比
 
 | | 路径 A(RDMA,8×IB 并行) | 路径 B(H2D,单机 PCIe) |
 |---|---|---|
@@ -205,7 +199,7 @@ prefill 用了 CP8(Context Parallel 8 卡)+ `--enable-dsa-prefill-cp-layersplit`
 | 聚合峰值 | **~200 GB/s**(8×25,理论) | ~50-64 GB/s(host DRAM 带宽是瓶颈) |
 | 实际可持续 | 受拓扑/top-of-rack 限制 | 受 host DRAM 带宽和 PCIe 根复合体限制 |
 
-> **第二个纠正(重要)**:8×IB 聚合后,路径 A 带宽(~200 GB/s)远高于路径 B(~50-64 GB/s)。之前说"路径 B 带宽是 A 的 2 倍"完全反了。带宽维度路径 A 占优。
+带宽维度路径 A 占优:8×IB 聚合后 ~200 GB/s 远高于路径 B 的 ~50-64 GB/s。
 
 ### 净较量:取决于负载特征
 
@@ -213,7 +207,7 @@ prefill 用了 CP8(Context Parallel 8 卡)+ `--enable-dsa-prefill-cp-layersplit`
 - **大消息**(长前缀,几十 MB+):路径 A 的 8×IB 聚合带宽优势放大,gather/scatter 占比下降 → **路径 A 可能赢**
 - **跨机 vs 本机**:路径 A 跨机器,路径 B 本机——跨机器的 RTT 和 bootstrap 是路径 A 独有开销
 
-> **未实测部分(诚实标注)**:具体在什么消息大小下路径 A/B 谁快,无法仅凭源码断言,需要实测。
+> 具体在什么消息大小下路径 A/B 谁快,无法仅凭源码断言,需要实测。
 
 ---
 
