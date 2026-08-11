@@ -6,10 +6,10 @@
 <title>MTP 权重结构与上下文影响图解 · GLM-5.2 vs Kimi K3</title>
 <style>
   :root{
-    --bg:#ffffff; --panel:#ffffff; --panel2:#f5f7fa;
-    --border:#e5e7eb; --border2:#d1d5db;
-    --text:#111111; --muted:#6b7280; --dim:#9ca3af;
-    --blue:#2563eb; --green:#16a34a; --orange:#d97706; --red:#dc2626; --purple:#7c3aed; --cyan:#0891b2; --pink:#db2777;
+    --bg:#fafaf9; --panel:#ffffff; --panel2:#f8f8f7;
+    --border:#e7e5e4; --border2:#d6d3d1;
+    --text:#1c1917; --muted:#78716c; --dim:#a8a29e;
+    --blue:#1d4ed8; --green:#059669; --orange:#d97706; --red:#dc2626; --purple:#7c3aed; --cyan:#0891b2; --pink:#db2777;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html{scroll-behavior:smooth}
@@ -18,11 +18,11 @@
 
   /* Header */
   .hero{text-align:center;padding:48px 0 40px}
-  h1{font-size:34px;font-weight:800;margin-bottom:12px;background:linear-gradient(135deg,#2563eb 0%,#3b82f6 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-0.5px}
+  h1{font-size:34px;font-weight:800;margin-bottom:12px;background:linear-gradient(135deg,#1d4ed8 0%,#2563eb 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-0.5px}
   .hero .sub{color:var(--muted);font-size:15px;max-width:680px;margin:0 auto}
   .hero .pills{display:flex;gap:10px;justify-content:center;margin-top:18px;flex-wrap:wrap}
   .pill{padding:5px 14px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid}
-  .pill-glm{background:rgba(37,99,235,.06);color:#2563eb;border-color:rgba(37,99,235,.25)}
+  .pill-glm{background:rgba(29,78,216,.06);color:#1d4ed8;border-color:rgba(29,78,216,.25)}
   .pill-k3{background:rgba(124,58,237,.06);color:#7c3aed;border-color:rgba(124,58,237,.25)}
   .pill-base{background:rgba(0,0,0,.04);color:#6b7280;border-color:rgba(0,0,0,.12)}
 
@@ -33,19 +33,19 @@
   h3{font-size:17px;font-weight:600;margin:28px 0 14px;color:var(--cyan)}
   .lead{color:var(--muted);font-size:14px;margin-bottom:20px;line-height:1.7}
 
-  .card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:28px;margin:20px 0;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:28px;margin:20px 0;box-shadow:0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.03)}
   .card.grid2{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start}
   @media(max-width:760px){.card.grid2{grid-template-columns:1fr}}
 
   .tag{display:inline-block;padding:3px 12px;border-radius:999px;font-size:11px;font-weight:600;margin-left:8px;vertical-align:middle}
-  .tag-glm{background:rgba(37,99,235,.06);color:#2563eb;border:1px solid rgba(37,99,235,.25)}
+  .tag-glm{background:rgba(29,78,216,.06);color:#1d4ed8;border:1px solid rgba(29,78,216,.25)}
   .tag-k3{background:rgba(124,58,237,.06);color:#7c3aed;border:1px solid rgba(124,58,237,.25)}
   .tag-red{background:rgba(220,38,38,.06);color:#dc2626;border:1px solid rgba(220,38,38,.25)}
   .tag-purple{background:rgba(124,58,237,.06);color:#7c3aed;border:1px solid rgba(124,58,237,.25)}
 
   /* formula */
   .formula{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.2);padding:3px 7px;border-radius:5px;color:#7c3aed;font-size:13px}
-  .code-box{background:#f8fafc;border:1px solid #e2e8f0;padding:14px 18px;border-radius:10px;margin:16px 0;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.9;color:#334155}
+  .code-box{background:#f8fafc;border:1px solid #e2e8f0;padding:14px 18px;border-radius:10px;margin:16px 0;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.9;color:#1e293b}
   .code-box.purple{background:#faf5ff;border-color:#ede9fe;color:#4c1d95}
   .code-box b{color:var(--blue)}
   .code-box.purple b{color:var(--purple)}

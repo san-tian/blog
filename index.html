@@ -6,13 +6,15 @@
 <title>san-tian 的技术 blog</title>
 <style>
   :root {
-    --bg: #ffffff;
-    --text: #111111;
-    --text-dim: rgba(0,0,0,0.55);
-    --text-faint: rgba(0,0,0,0.35);
-    --border: rgba(0,0,0,0.08);
-    --accent: #2563eb;
-    --accent-soft: rgba(37,99,235,0.06);
+    --bg: #fafaf9;
+    --card: #ffffff;
+    --text: #1c1917;
+    --text-dim: #78716c;
+    --text-faint: #a8a29e;
+    --border: #e7e5e4;
+    --border-hover: #d6d3d1;
+    --accent: #1d4ed8;
+    --accent-soft: rgba(29,78,216,0.08);
   }
   * { box-sizing: border-box; }
   body {
@@ -24,33 +26,55 @@
     padding: 0;
   }
   .container { max-width: 720px; margin: 0 auto; padding: 96px 24px 120px; }
-  h1 { font-size: 2em; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.02em; }
-  .subtitle { color: var(--text-dim); font-size: 1em; margin: 0 0 64px; }
+  h1 { font-size: 2em; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.02em; color: var(--text); }
+  .subtitle { color: var(--text-dim); font-size: 0.98em; margin: 0 0 64px; line-height: 1.6; }
 
   .post {
     display: block;
-    padding: 32px 0;
+    padding: 28px 0;
     border-top: 1px solid var(--border);
     text-decoration: none;
     color: var(--text);
-    transition: background 0.15s;
+    transition: all 0.2s ease;
   }
   .post:last-of-type { border-bottom: 1px solid var(--border); }
-  .post:hover { background: var(--accent-soft); }
-  .post .title { font-size: 1.25em; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.01em; }
+  .post:hover { 
+    padding-left: 12px;
+    border-left: 3px solid var(--accent);
+    background: linear-gradient(90deg, var(--accent-soft) 0%, transparent 100%);
+  }
+  .post .title { 
+    font-size: 1.2em; 
+    font-weight: 600; 
+    margin-bottom: 10px; 
+    letter-spacing: -0.01em;
+    color: var(--text);
+    transition: color 0.2s;
+  }
   .post:hover .title { color: var(--accent); }
-  .post .desc { color: var(--text-dim); font-size: 0.92em; line-height: 1.7; }
+  .post .desc { 
+    color: var(--text-dim); 
+    font-size: 0.9em; 
+    line-height: 1.65;
+  }
   .post .meta { margin-top: 14px; }
   .tag {
     display: inline-block;
     margin-right: 8px;
-    padding: 3px 14px;
-    border-radius: 999px;
-    font-size: 0.72em;
-    border: 1px solid var(--border);
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 0.7em;
+    font-weight: 500;
+    background: #f5f5f4;
     color: var(--text-dim);
+    border: 1px solid transparent;
+    transition: all 0.2s;
   }
-  .post:hover .tag { border-color: rgba(37,99,235,0.3); color: var(--accent); }
+  .post:hover .tag { 
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: rgba(29,78,216,0.15);
+  }
 
   .footer {
     margin-top: 80px;
@@ -59,7 +83,7 @@
     color: var(--text-faint);
     font-size: 0.85em;
   }
-  .footer a { color: var(--text-dim); text-decoration: none; }
+  .footer a { color: var(--text-dim); text-decoration: none; transition: color 0.2s; }
   .footer a:hover { color: var(--accent); }
 </style>
 </head>
