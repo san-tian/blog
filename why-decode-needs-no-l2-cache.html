@@ -6,19 +6,19 @@
 <title>为什么 PD 分离中，decode 不需要二级缓存？</title>
 <style>
   :root {
-    --bg: #0d1117;
-    --card: #161b22;
-    --card-2: #1c232c;
-    --border: #30363d;
-    --text: #c9d1d9;
-    --text-dim: #8b949e;
-    --accent: #58a6ff;
-    --accent-2: #f0883e;
-    --green: #3fb950;
-    --red: #f85149;
-    --yellow: #d29922;
-    --code-bg: #0d1117;
-    --inline-code-bg: #1f2933;
+    --bg: #ffffff;
+    --card: #ffffff;
+    --card-2: #f5f7fa;
+    --border: #e5e7eb;
+    --text: #111111;
+    --text-dim: #6b7280;
+    --accent: #2563eb;
+    --accent-2: #2563eb;
+    --green: #16a34a;
+    --red: #dc2626;
+    --yellow: #d97706;
+    --code-bg: #ffffff;
+    --inline-code-bg: #f1f5f9;
   }
   * { box-sizing: border-box; }
   body {
@@ -45,7 +45,7 @@
     font-size: 2.1em;
     font-weight: 700;
     line-height: 1.3;
-    color: #f0f6fc;
+    color: #111111;
     margin: 0 0 16px;
   }
   header.hero .subtitle {
@@ -68,7 +68,7 @@
     margin: 0 4px;
   }
   h2 {
-    color: #f0f6fc;
+    color: #111111;
     font-size: 1.5em;
     font-weight: 650;
     margin: 56px 0 20px;
@@ -76,7 +76,7 @@
     border-bottom: 1px solid var(--border);
   }
   h3 {
-    color: #f0f6fc;
+    color: #111111;
     font-size: 1.18em;
     font-weight: 600;
     margin: 36px 0 14px;
@@ -88,14 +88,14 @@
     margin: 24px 0 10px;
   }
   p { margin: 14px 0; }
-  strong { color: #f0f6fc; font-weight: 600; }
+  strong { color: #111111; font-weight: 600; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
   code {
     font-family: "JetBrains Mono", "Fira Code", "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
     background: var(--inline-code-bg);
-    color: #f0883e;
+    color: #2563eb;
     padding: 2px 6px;
     border-radius: 4px;
     font-size: 0.88em;
@@ -118,7 +118,7 @@
     font-size: 1em;
   }
   /* syntax highlight tokens (lightweight) */
-  .tok-cmt { color: #8b949e; font-style: italic; }
+  .tok-cmt { color: #6b7280; font-style: italic; }
   .tok-str { color: #a5d6ff; }
   .tok-kw  { color: #ff7b72; }
   .tok-fn  { color: #d2a8ff; }
@@ -179,7 +179,7 @@
   }
   th {
     background: var(--card-2);
-    color: #f0f6fc;
+    color: #111111;
     font-weight: 600;
   }
   tr:nth-child(even) td { background: var(--card); }
@@ -209,7 +209,7 @@
     margin-right: 4px;
   }
   .callout-summary {
-    background: linear-gradient(135deg, #161b22 0%, #1c232c 100%);
+    background: linear-gradient(135deg, #ffffff 0%, #f5f7fa 100%);
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 24px 28px;
@@ -288,7 +288,7 @@
 
 <header class="hero">
   <h1>为什么 PD 分离中，decode 不需要二级缓存？</h1>
-  <div class="subtitle">一次被源码与硬件双重纠正的技术复盘 —— SGLang PD 分离架构里 DecodeKVCacheOffloadManager 的机制、路径 A/B 的源码对比，以及 8×IB 事实带来的带宽反转</div>
+  <div class="subtitle">SGLang PD 分离架构里 DecodeKVCacheOffloadManager 的机制、路径 A/B 的源码对比，以及 8×IB 带宽下的实际取舍</div>
   <div class="meta">
     <span>SGLang v0.5.14</span>
     <span>MI300X ×8</span>
@@ -300,8 +300,7 @@
 <div class="background">
   <h3>背景：什么是 PD 分离</h3>
   <p>LLM 推理的一次请求分两阶段：<strong>prefill</strong>（处理整段输入 prompt，算出 KV cache，计算重、延迟高）和 <strong>decode</strong>（逐个生成输出 token，每步都要读全部历史 KV，计算轻、对延迟敏感）。传统单实例同时做两件事，要按更苛刻的那个分配显存，且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。</p>
-  <p><strong>PD 分离（Prefill-Decode Disaggregation）</strong>把这两阶段拆到不同实例上：prefill 实例专心算 prompt，算完把 KV 通过 RDMA 传给 decode 实例；decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。我们这套部署是 8× MI300X + 8× HDR InfiniBand，prefill 开 <code>CP8</code>（8 卡 Context Parallel）+ <code>--enable-dsa-prefill-cp-layersplit</code>，decode 开 <code>--disaggregation-decode-enable-radix-cache</code>，KV 跨机传输走 Mooncake over IB。</p>
-  <p class="term">术语：<code>P/D</code> = prefill/decode 分离 · <code>KV cache</code> = attention 的历史状态张量 · <code>TTFT</code> = 首 token 延迟 · <code>HiCache</code> = SGLang 的多级 KV 缓存 · <code>mooncake</code> = KV 传输引擎</p>
+  <p><strong>PD 分离（Prefill-Decode Disaggregation）</strong>把这两阶段拆到不同实例上：prefill 实例专心算 prompt，算完把 KV 通过 RDMA 传给 decode 实例；decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。</p>
 </div>
 
 <div class="callout-summary">
@@ -330,23 +329,19 @@
     <li><a href="#s5">接收侧：路径 B 的 restore 状态机</a></li>
     <li><a href="#s6">整个流程的闭环</a></li>
     <li><a href="#s7">那为什么这套部署 decode 没开</a></li>
-    <li><a href="#s8">复盘：每一步纠正踩在什么取舍上</a></li>
   </ol>
 </div>
 
 <h2 class="anchor-target" id="s1">一、先把 cache 结构搞清楚</h2>
 
-<h3>误解：HiCache 的二级是 NVMe 硬盘</h3>
-<p>部署脚本里 prefill 的配置：</p>
+<h3>HiCache 是三层结构</h3>
+<p>部署脚本里 prefill 的配置用 NVMe 文件做 L3：</p>
 <pre><code>--enable-hierarchical-cache --hicache-ratio 1
 --hicache-write-policy write_back --hicache-mem-layout page_first
 --hicache-storage-backend file --file-storage-path /root/hicache
 
 export SGLANG_HICACHE_FILE_BACKEND_MAX_SIZE="200G"</code></pre>
-<p>看起来二级介质就是 NVMe 文件。但这只是<strong>这个部署的选择</strong>，不是 HiCache 框架的全貌。</p>
-
-<h3>源码确认：HiCache 是三层结构，L2 默认是 host DRAM</h3>
-<p>看 <code>decode_kvcache_offload_manager.py</code> 的初始化：</p>
+<p>但 HiCache 的 L2 默认是 host DRAM，NVMe 文件只是 L3 的一个选项。看 <code>decode_kvcache_offload_manager.py</code> 的初始化：</p>
 <pre><code><span class="tok-cmt"># L2：host DRAM pool（MLA 用 MLATokenToKVPoolHost）</span>
 self.decode_host_mem_pool = MLATokenToKVPoolHost(
     kv_cache,
@@ -370,8 +365,8 @@ self.cache_controller = HiCacheController(
 
 <p><code>backend_factory.py</code> 注册的 L3 backend 有 8 种：<code>file</code>、<code>nixl</code>、<code>mooncake</code>、<code>hf3fs</code>、<code>aibrix</code>、<code>eic</code>、<code>simm</code>、<code>mori</code> —— <strong>没有一种是"CPU 内存"</strong>，因为 CPU 内存已经是 L2 了。</p>
 
-<blockquote class="correction">
-<p>之前把"二级缓存 = NVMe"当成唯一可能，是错的。L2 默认是 host DRAM，NVMe 只是 L3 选项之一。vLLM 也有类似设计（<code>--cpu-offload-gb</code>、<code>--kv_offloading_backend native</code>）。</p>
+<blockquote class="confirm">
+<p>L2 默认是 host DRAM，NVMe 只是 L3 选项之一。vLLM 也有类似设计（<code>--cpu-offload-gb</code>、<code>--kv_offloading_backend native</code>）。</p>
 </blockquote>
 
 <h2 class="anchor-target" id="s2">二、两条路径的源码实现</h2>
@@ -444,17 +439,13 @@ __builtin_nontemporal_store(tmp, dst + j);</code></pre>
 <p><strong>源码层面的结构性事实（可靠）</strong>：路径 B 有三个机制优势 —— 无 gather/scatter、专用流不抢 SM、layer-wise overlap 隐藏延迟。</p>
 </blockquote>
 
-<h2 class="anchor-target" id="s3">三、带宽对比 —— 被硬件事实纠正的关键部分</h2>
+<h2 class="anchor-target" id="s3">三、带宽对比：8×IB 聚合下的实际取舍</h2>
 
-<h3>错误版本：按单条 IB 算</h3>
-<p>最初按"单条 HDR IB 200 Gbps = 25 GB/s"算，得出"路径 B 的 H2D PCIe 带宽（~50-64 GB/s）是路径 A 的 2 倍"。<strong>这是错的。</strong></p>
-
-<h3>纠正：这套部署有 8 张 IB，而且 SGLang 在用多卡并行传输</h3>
-<p><strong>部署确认</strong>：<code>deployment-guide.md</code> 写明"InfiniBand RDMA 网络（8 个 IB 设备 mlx5_ib0~ib7）"。</p>
-<p><strong>源码确认多卡并行</strong>：脚本开了 <code>SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER=1</code>：</p>
+<p>PD 分离的 KV 传输不是走单条 IB 链路。开启 <code>SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER</code> 后，8 个 CP rank 并行传输，路径 A 的聚合带宽远高于路径 B。</p>
+<p><strong>源码确认多卡并行</strong>：</p>
 <pre><code><span class="tok-cmt"># common/conn.py:166</span>
 self.enable_all_cp_ranks_for_transfer = (
-    envs.SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER.get()  <span class="tok-cmt"># ← 你们开了</span>
+    envs.SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER.get()
     or cp_sharded_prefill
     or hybrid_decode_pulls_all_ranks
 )
@@ -463,7 +454,6 @@ self.enable_all_cp_ranks_for_transfer = (
 # all CP ranks participate in KV transfer</span></code></pre>
 <p>prefill 用了 CP8（Context Parallel 8 卡）+ <code>--enable-dsa-prefill-cp-layersplit</code>，8 个 CP rank 各起一个 transfer engine。Mooncake 侧 <code>get_ib_devices_for_gpu(ib_device, gpu_id)</code> 按 GPU 取对应 IB 设备（<code>mooncake_transfer_engine.py:130</code>）。8 条 IB 口并行传输。</p>
 
-<h3>修正后的带宽对比</h3>
 <table>
 <tr><th></th><th>路径 A（RDMA，8×IB 并行）</th><th>路径 B（H2D，单机 PCIe）</th></tr>
 <tr><td>单链路峰值</td><td>HDR IB 200 Gbps ≈ 25 GB/s</td><td>PCIe Gen5 x16 ~50-64 GB/s</td></tr>
@@ -472,9 +462,7 @@ self.enable_all_cp_ranks_for_transfer = (
 <tr><td>实际可持续</td><td>受拓扑/top-of-rack 限制</td><td>受 host DRAM 带宽和 PCIe 根复合体限制</td></tr>
 </table>
 
-<blockquote class="correction">
-<p><strong>第二个纠正（重要）</strong>：8×IB 聚合后，路径 A 带宽（~200 GB/s）远高于路径 B（~50-64 GB/s）。之前说"路径 B 带宽是 A 的 2 倍"完全反了。带宽维度路径 A 占优。</p>
-</blockquote>
+<p>带宽维度路径 A 占优：8×IB 聚合后 ~200 GB/s 远高于路径 B 的 ~50-64 GB/s。</p>
 
 <h3>净较量：取决于负载特征</h3>
 <ul>
@@ -658,8 +646,6 @@ consumer_index = self.tree_cache.ready_to_load_host_cache()</code></pre>
 
 <h2 class="anchor-target" id="s7">七、那为什么这套部署 decode 没开？</h2>
 
-<p>把所有事实摆出来，按可信度排：</p>
-
 <h3>1. 8×IB 下路径 A 已经够快（最可能）</h3>
 <p>路径 A 聚合带宽 ~200 GB/s（8×IB），路径 B 受 host DRAM 带宽限制（~50-64 GB/s）。当路径 A 已经很快时，decode offload 的收益 —— 即"省下的路径 A 传输"换成"路径 B 加载" —— 带宽上不占优，且要额外付 offload 写回开销（D2H + host→NVMe）。<strong>边际收益可能不足以抵消开销</strong>。</p>
 
@@ -690,40 +676,6 @@ export SGLANG_HICACHE_FILE_BACKEND_MAX_SIZE="200G"
 export SGLANG_HICACHE_FILE_BACKEND_MIN_FREE_SPACE="10G"
 <span class="tok-cmt"># 可选：调 offload 粒度</span>
 <span class="tok-cmt"># export SGLANG_HICACHE_DECODE_OFFLOAD_STRIDE=128</span></code></pre>
-
-<h2 class="anchor-target" id="s8">八、复盘：每一步纠正踩在什么取舍上</h2>
-
-<table>
-<tr><th>轮次</th><th>我的错误论断</th><th>被什么纠正</th><th>暴露的真实取舍</th></tr>
-<tr>
-<td>1</td>
-<td>"decode 每步读 KV，NVMe 会拖延迟"</td>
-<td>你指出二级缓存可以是 CPU 内存</td>
-<td>NVMe（L3）和 host DRAM（L2）是不同介质，延迟差几十倍</td>
-</tr>
-<tr>
-<td>2</td>
-<td>"RDMA 比 NVMe load 快"</td>
-<td>你指出有 8 张 IB</td>
-<td>单条 IB vs 8×IB 聚合，带宽差 8 倍</td>
-</tr>
-<tr>
-<td>3</td>
-<td>"路径 B 带宽是 A 的 2 倍"</td>
-<td>8×IB 事实（同上）</td>
-<td>按单链路算 vs 按聚合算，结论反转</td>
-</tr>
-<tr>
-<td>4</td>
-<td>"decode 没开是因为框架不支持"</td>
-<td>源码确认 <code>DecodeKVCacheOffloadManager</code> 存在</td>
-<td>框架支持 ≠ 部署开启，配置选择背后是带宽权衡</td>
-</tr>
-</table>
-
-<p><strong>核心教训</strong>：技术分析不能只看源码机制，还得看实际硬件配置。源码告诉你"机制上能不能做"，硬件告诉你"做了划不划算"。8×IB 这个事实，把"机制上路径 B 更优"的结论直接反转成"带宽上路径 A 更优"。</p>
-
-<p>另外一个教训：<strong>诚实标注不确定处比强行给结论更值钱</strong>。最初几轮为了支持"你的直觉对"，不断往"路径 B 更快"方向找证据，但带宽事实不支持。承认"取决于负载特征、需实测"才是诚实的。</p>
 
 <h2>附录：关键源码文件索引</h2>
 <table>
