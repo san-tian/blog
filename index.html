@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>san-tian 的技术 blog</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    margin: 0;
+    padding: 0;
+  }
+  .container { max-width: 720px; margin: 0 auto; padding: 64px 24px; }
+  h1 { color: #f0f6fc; font-size: 1.8em; margin: 0 0 8px; }
+  .subtitle { color: var(--text-dim); font-size: 0.95em; margin: 0 0 40px; }
+  .post {
+    display: block;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 16px 0;
+    text-decoration: none;
+    color: var(--text);
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .post:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .post .title { color: #f0f6fc; font-weight: 600; font-size: 1.1em; margin-bottom: 6px; }
+  .post .desc { color: var(--text-dim); font-size: 0.9em; }
+  .post .tag {
+    display: inline-block;
+    margin-right: 8px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.72em;
+    background: rgba(88,166,255,0.1);
+    color: var(--accent);
+    border: 1px solid rgba(88,166,255,0.3);
+    vertical-align: middle;
+  }
+  .footer {
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.85em;
+  }
+  .footer a { color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>san-tian 的技术 blog</h1>
+  <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
+
+  <a class="post" href="why-decode-needs-no-l2-cache.html">
+    <div class="title">为什么 PD 分离中，decode 不需要二级缓存？</div>
+    <div class="desc">一次被源码与硬件双重纠正的技术复盘 —— SGLang PD 分离架构里 DecodeKVCacheOffloadManager 的机制、路径 A/B 的源码对比，以及 8×IB 事实带来的带宽反转。</div>
+    <div style="margin-top:10px">
+      <span class="tag">HTML</span>
+      <span class="tag">SGLang</span>
+      <span class="tag">PD 分离</span>
+      <span class="tag">KV Cache</span>
+    </div>
+  </a>
+
+  <a class="post" href="pd-decode-kvcache-offload.md">
+    <div class="title">PD 分离架构里，decode 到底要不要开二级 KV 缓存？（Markdown 源稿）</div>
+    <div class="desc">上面那篇 HTML 的 Markdown 源稿，GitHub 默认渲染。带完整源码行号引用。</div>
+    <div style="margin-top:10px">
+      <span class="tag">Markdown</span>
+      <span class="tag">源稿</span>
+    </div>
+  </a>
+
+  <div class="footer">
+    源仓库：<a href="https://github.com/san-tian/blog">github.com/san-tian/blog</a> ·
+    Raw（agent 读取）：<a href="https://raw.githubusercontent.com/san-tian/blog/main/pd-decode-kvcache-offload.md">raw...pd-decode-kvcache-offload.md</a>
+  </div>
+</div>
+</body>
+</html>
