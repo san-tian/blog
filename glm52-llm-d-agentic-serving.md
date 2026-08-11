@@ -26,9 +26,7 @@ SemiAnalysis 的 [Weka 追踪语料库](https://huggingface.co/datasets/semianal
 
 这意味着传统的"把模型装在 N 卡上"的部署方式,既无法装下这么长的 KV 缓存,也无法在请求突发的瞬间保持低延迟。
 
-## 术语约定:拓扑记号
-
-本文使用 `xPyD` 表示 `x` 个 prefill 实例 + `y` 个 decode 实例;`DEP16` 表示 TP=1、DP=16、专家并行 16 GPU。`3P1D` 即"3 个 prefill 实例 + 1 个 decode 实例,合计 64 GPU"。
+> **术语说明**:全文使用 `xPyD` 表示 x 个 prefill 实例 + y 个 decode 实例;`DEP16` 表示 TP=1、DP=16、专家并行 16 GPU。例如 `3P1D` = 3 个 prefill + 1 个 decode,合计 64 GPU。
 
 ## 架构选择:六项 llm-d 能力的组合
 
