@@ -2,6 +2,14 @@
 
 > 这是一个真实发生的技术讨论复盘。最初的一个直觉问题,在源码核查和硬件事实的双重纠正下,推翻了好几次结论。最终答案不是"该开"或"不该开",而是"为什么这套部署没开、以及什么条件下开才划算"。记录下来,因为每一步纠正都踩在一个真实的设计取舍上。
 
+## 背景:什么是 PD 分离
+
+LLM 推理的一次请求分两阶段:**prefill**(处理整段输入 prompt,算出 KV cache,计算重、延迟高)和 **decode**(逐个生成输出 token,每步都要读全部历史 KV,计算轻、对延迟敏感)。传统单实例同时做两件事,要按更苛刻的那个分配显存,且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。
+
+**PD 分离(Prefill-Decode Disaggregation)**把这两阶段拆到不同实例上:prefill 实例专心算 prompt,算完把 KV 通过 RDMA 传给 decode 实例;decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。我们这套部署是 8× MI300X + 8× HDR InfiniBand,prefill 开 `CP8`(8 卡 Context Parallel)+ `--enable-dsa-prefill-cp-layersplit`,decode 开 `--disaggregation-decode-enable-radix-cache`,KV 跨机传输走 Mooncake over IB。
+
+> 术语:`P/D` = prefill/decode 分离 · `KV cache` = attention 的历史状态张量 · `TTFT` = 首 token 延迟 · `HiCache` = SGLang 的多级 KV 缓存 · `mooncake` = KV 传输引擎
+
 ## 缘起:一个看似简单的问题
 
 我们的 PD 分离部署(MI300X ×8 + 8× HDR InfiniBand,GLM-5.2 FP8,SGLang v0.5.14 + CjiW fork)里,prefill 实例开了 `--enable-hierarchical-cache`(HiCache),decode 实例只开了 `--disaggregation-decode-enable-radix-cache`,没开任何二级缓存。

@@ -188,6 +188,26 @@
   ul, ol { padding-left: 1.5em; }
   li { margin: 6px 0; }
 
+  .background {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent-2);
+    border-radius: 0 12px 12px 0;
+    padding: 20px 28px;
+    margin: 32px 0;
+  }
+  .background h3 {
+    margin-top: 0;
+    color: var(--accent-2);
+    font-size: 1.05em;
+  }
+  .background p { margin: 10px 0; font-size: 0.96em; }
+  .background .term {
+    display: inline-block;
+    color: var(--text-dim);
+    font-size: 0.82em;
+    margin-right: 4px;
+  }
   .callout-summary {
     background: linear-gradient(135deg, #161b22 0%, #1c232c 100%);
     border: 1px solid var(--border);
@@ -276,6 +296,13 @@
     <span>8× HDR IB</span>
   </div>
 </header>
+
+<div class="background">
+  <h3>背景：什么是 PD 分离</h3>
+  <p>LLM 推理的一次请求分两阶段：<strong>prefill</strong>（处理整段输入 prompt，算出 KV cache，计算重、延迟高）和 <strong>decode</strong>（逐个生成输出 token，每步都要读全部历史 KV，计算轻、对延迟敏感）。传统单实例同时做两件事，要按更苛刻的那个分配显存，且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。</p>
+  <p><strong>PD 分离（Prefill-Decode Disaggregation）</strong>把这两阶段拆到不同实例上：prefill 实例专心算 prompt，算完把 KV 通过 RDMA 传给 decode 实例；decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。我们这套部署是 8× MI300X + 8× HDR InfiniBand，prefill 开 <code>CP8</code>（8 卡 Context Parallel）+ <code>--enable-dsa-prefill-cp-layersplit</code>，decode 开 <code>--disaggregation-decode-enable-radix-cache</code>，KV 跨机传输走 Mooncake over IB。</p>
+  <p class="term">术语：<code>P/D</code> = prefill/decode 分离 · <code>KV cache</code> = attention 的历史状态张量 · <code>TTFT</code> = 首 token 延迟 · <code>HiCache</code> = SGLang 的多级 KV 缓存 · <code>mooncake</code> = KV 传输引擎</p>
+</div>
 
 <div class="callout-summary">
   <h3>结论先行</h3>

@@ -57,6 +57,174 @@ llm-d 的 Wide-EP 路径对此的解法是: **数据并行注意力 + 专家并�
 
 本文使用 `xPyD` 表示 `x` 个 prefill 实例 + `y` 个 decode 实例;`DEP16` 表示 TP=1、DP=16、专家并行 16 GPU。`3P1D` 即"3 个 prefill 实例 + 1 个 decode 实例,合计 64 GPU"。
 
+## 深度解析:MLA 与 Wide-EP 是怎么做的
+
+前面提到 MLA 和 Wide-EP 是整套部署的根基 —— 没有它们,仓库级上下文根本装不下,单 GPU 上也没有足够容量去支撑高并发。下面把这两件事拆开讲清楚。
+
+### 一、MLA —— 为什么 KV 缓存能压到这么小
+
+#### 标准注意力的 KV 长什么样
+
+在标准多头注意力(MHA)里,每个 token 在每一层生成两个张量:**K**(key)和 **V**(value),形状都是 `[num_heads, head_dim]`。它们的"尺寸"由两个超参决定 —— 头数(如 64)和每头维度(如 128)。如果 KV 用 FP16 存储,每 token 每层的体积就是 `2 × num_heads × head_dim × 2 bytes`。
+
+GLM-5.2 是 78 层、64 KV 头的模型,若用标准 MHA,单 token 单层约 `64 × 128 × 2 × 2 = 32 KB`(FP16),全 78 层叠加约 2.5 MB。KV 还没算权重,光这部分就足以吞噬宝贵的 HBM。
+
+GQA(分组查询注意力)用更少的 KV 头共享 K/V,可把 KV 降到约 1/8,但仍然以"每个 KV 头一份完整 K/V 张量"的形式存储。
+
+#### MLA 的做法:压到一个潜在向量
+
+MLA(Multi-head Latent Attention,DeepSeek-V2 提出)的核心想法是 —— **不直接存 K 和 V,而是存一个压缩后的"潜在向量" `c_t`**,推理时再通过低秩投影把它还原成 K 和 V。
+
+GLM-5.2 的 MLA 每 token 每层只存:
+
+| 组件 | 大小(FP8 元素) | 说明 |
+| --- | --- | --- |
+| 潜在向量 `c_t` | 512 | 压缩后的低维表征 |
+| 共享 RoPE | 64 | 解耦的旋转位置编码,所有 head 共享 |
+| **合计** | **576** | 每层每 token 576 字节 |
+
+78 层叠加后,约 **44 KB/token**。下面按比例对比三种方案的 KV 占用:
+
+| 方案 | 单 token 78 层累积 KV | 相对 MLA |
+| --- | --- | --- |
+| MHA(64 KV 头 × 256 维) | ~2.5 MB | 约 57× |
+| GQA(8 KV 头 × 256 维) | ~313 KB | 约 7× |
+| **MLA(512 潜在 + 64 RoPE)** | **~44 KB** | **1×** |
+
+存储语义可以写成伪代码:
+
+```python
+# MLA:每次只缓存潜在向量 + 共享 RoPE
+KV_cache[token][layer] = {
+    c_t:        Tensor[512],   # 压缩后的潜在向量
+    rope_share: Tensor[64],    # 所有 head 共享的 RoPE
+}
+# 推理时:W_K · c_t + rope_share → K,W_V · c_t → V
+```
+
+### 二、MLA 与张量并行的不兼容
+
+MLA 让 KV 变小,但也让它**不能再被张量并行(TP)分片**。这是整篇文章的因果起点。
+
+#### 为什么 TP 分片不了 MLA 的 KV
+
+在标准 MHA/GQA 里,KV 缓存沿"头"维度是有结构的。比如 TP=8 时,可以按头把 64 个 KV 头分给 8 个 rank,每个 rank 只需缓存自己负责的那几个头的 K、V(约占总量的 1/8)。
+
+MLA 的 KV 缓存是一个**完整的潜在向量 `c_t`**,以及**所有 head 共享的 RoPE 项**。这两个张量**都没有"沿 head 分片"的维度** —— 不管你分多少 rank,每个 rank 都需要 `c_t` 的全部 512 个元素和 RoPE 的全部 64 个元素。
+
+> **关键后果**:TP=8 不再*分摊* KV 缓存,而是**复制 8 份**。跨节点 TP 的 all-reduce 开销也更贵 —— 每层要做两次"列并行 → 行并行 → all-reduce"(因为后面还接 MoE)。
+
+实测上,聚合 TP=8 单节点 8 份副本,单节点总物理 KV 约 200 GiB,其中绝大部分是冗余副本。
+
+### 三、Wide-EP —— 换一个分法
+
+既然 TP 行不通,llm-d 选择的方案是 **Wide-EP(Wide Expert Parallelism)**。它不是单一技术,而是两种并行的组合:
+
+- **注意力部分**:数据并行(DP attention)
+- **MoE 部分**:专家并行(EP MoE)
+
+#### 3.1 数据并行注意力:不复制 KV
+
+在数据并行注意力下:
+
+- 每个 GPU 都持有**完整的**注意力权重(W_Q、W_K、V 投影、MLA 的低秩矩阵等)
+- 不同 GPU 处理**不同的 token batch**(类似经典的数据并行)
+- 每个 GPU **只缓存自己处理过的 token 的 KV**
+
+也就是说:KV 缓存在每个 rank 上是**本地且独立**的,完全不需要在 rank 之间复制或分片。
+
+实测单 rank KV 容量:
+
+| 配置 | 单 rank KV 容量 |
+| --- | --- |
+| 聚合 TP=8(单节点) | 598K token(每 rank 25 GiB 副本) |
+| DEP8 prefill rank | 182K token |
+| **DEP16 prefill rank** | **958K – 990K token** |
+| DEP16 decode rank | 1,078K token |
+
+从单节点总 KV 看:
+
+| 布局 | 单节点总 KV |
+| --- | --- |
+| 聚合 TP=8 | 598K token(约 200 GiB 物理 KV,绝大部分是冗余副本) |
+| DEP8 | 1.77M token |
+| **DEP16(节点份额)** | **约 5.2M token** |
+
+#### 3.2 专家并行 MoE:把专家分散到不同 GPU
+
+GLM-5.2 是 744B 参数、激活 39B 的 MoE 模型。如果按 TP=8 把权重分给 8 个 rank,每个 rank 要承担约 **89.5 GiB** 的专家权重 —— 直接把留给 KV 的显存吃掉了。
+
+EP MoE 的做法:
+
+1. 不同 rank **持有不同的专家子集**(例如 256 个专家分给 16 个 rank,每个 rank 持 16 个)
+2. 推理时,token 通过门控网络选专家,然后通过 **all-to-all** 通信把 token 送到持有相应专家的 rank 上做计算
+3. 计算完成后,再通过 all-to-all 把结果送回原 rank
+
+这样每个 rank 只需持有自己那份专家权重。在 Wide-EP 的实测布局中,**每个 GPU 只承担约 65 GiB 权重**(对比 TP=8 的 89.5 GiB),省下约 25 GiB 用于 KV。
+
+GLM-5.2 的部署用 **DeepEP** 处理 token 的 all-to-all 派发,用 `deep_gemm` 跑专家计算。通信走 NVLink(节点内)+ InfiniBand(节点间)。
+
+### 四、"Wide" 的含义
+
+历史上,EP 通常被限制在**单节点内**(节点内 NVLink 带宽充裕、延迟低)。"Wide" 则是把 EP 扩展到**跨多个节点**,借助 InfiniBand 通信。
+
+实测中,宽度直接决定单 rank KV 容量上限:
+
+| 布局 | 每 rank KV | 备注 |
+| --- | --- | --- |
+| DEP8(单节点,8 GPU) | ~182K token | 更早触及 HBM 压力点 |
+| **DEP16(2 节点 × 8 GPU)** | **~990K token** | DEP8 的 5.4 倍 |
+
+宽度更大,意味着每 rank 上需要持有的专家权重更少(权重被分得更散),**省下来的显存可以全部留给 KV 缓存**。这是为什么在限长输入扫描中,DEP8 比 DEP16 更早触发 CPU 卸载。
+
+### 五、MLA + Wide-EP 如何协同
+
+把上面两块拼起来,GLM-5.2 在 H200 上的 prefill 实例每层工作流大致是:
+
+```python
+# 单层 prefill 工作流(在 DEP16 实例上,每层重复 78 次)
+def layer_forward(tokens, position_ids):
+    # 1) MLA 注意力 —— 数据并行,KV 写入本地 HBM
+    attn_out = mla_attention_dp(
+        tokens,
+        local_kv_cache   # 本 rank 的 KV,不跨 rank 复制
+    )
+
+    # 2) MoE 门控 —— 为每个 token 选 top-k 专家
+    routing = moe_gate(attn_out)    # [token → expert_id]
+
+    # 3) DeepEP all-to-all —— 把 token 派发到持有对应专家的 rank
+    dispatched = deep_ep.dispatch(attn_out, routing)
+
+    # 4) deep_gemm —— 在目标 rank 上跑专家计算
+    expert_out = deep_gemm(dispatched)
+
+    # 5) DeepEP all-to-all —— 把结果送回原 rank
+    output = deep_ep.combine(expert_out)
+
+    return output   # 进入下一层
+```
+
+整个过程**没有任何跨 rank 的 attention all-reduce**(因为是 DP,不是 TP),KV 始终在本地;**每层只有一次 MoE 的 all-to-all**。
+
+与 TP=8 的逐项对比:
+
+| 操作 / 资源 | 聚合 TP=8 | Wide-EP |
+| --- | --- | --- |
+| 注意力 all-reduce | 每层 2 次(列并行 + 行并行) | **0 次** |
+| 跨 rank 通信 | InfiniBand all-reduce × 2/层 | DeepEP all-to-all × 1/层(MoE) |
+| KV 复制份数 | 8 份 | **1 份** |
+| 单 rank 权重 | 89.5 GiB | **65.1 GiB** |
+| 单 rank 可用 KV 容量 | 少(被权重挤压) | **多**(权重更少 + KV 不复制) |
+
+代价是 MoE 的 all-to-all。但 DeepEP 对 NVLink + InfiniBand 做了专门优化,且 all-to-all 的数据量与 **token 数**线性相关,与 **KV 总量**无关 —— 恰好适合长上下文、短 batch 的智能体负载。
+
+### 六、因果链:一句话总结
+
+1. **MLA** 把 KV 缓存压到 44 KB/token,但也让 KV 不再能沿 head 维度分片 —— **TP 不再省 KV 显存**。
+2. **Wide-EP** 用 DP 注意力(让 KV 本地独立、不复制)+ EP MoE(把专家权重分散到各 rank),既省了权重显存、又避开了 TP 的 all-reduce 开销。
+3. **二者结合** 让每个 GPU 都能在 HBM 里塞下大量 KV 缓存(DEP16 rank 约 1M token),为仓库级上下文 + 高并发的智能体服务提供了物理基础。
+
 ## 容量与并发:输入侧的瓶颈
 
 ### 64 GPU `3P1D` 参考扫描
