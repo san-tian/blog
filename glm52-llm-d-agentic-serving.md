@@ -26,8 +26,6 @@ SemiAnalysis 的 [Weka 追踪语料库](https://huggingface.co/datasets/semianal
 
 这意味着传统的"把模型装在 N 卡上"的部署方式,既无法装下这么长的 KV 缓存,也无法在请求突发的瞬间保持低延迟。
 
-> **术语说明**:全文使用 `xPyD` 表示 x 个 prefill 实例 + y 个 decode 实例;`DEP16` 表示 TP=1、DP=16、专家并行 16 GPU。例如 `3P1D` = 3 个 prefill + 1 个 decode,合计 64 GPU。
-
 ## 架构选择:六项 llm-d 能力的组合
 
 llm-d 的 agentic-serving 路径是 **"从工作负载出发,把所需能力组合成部署"**。针对 GLM-5.2 在 H200 上的智能体负载,组合了六项能力:
