@@ -149,213 +149,182 @@
 
 <p>都是一个标准 Transformer decoder block。同构的部分是 LayerNorm、Multi-Head Attention、FFN、残差；不同的部分在输入、LM Head 是否共享、以及推理时怎么展开。</p>
 
-<div class="detail-compare">
+<style>
+.align-compare{display:grid;grid-template-columns:64px repeat(3,1fr);gap:4px 8px;align-items:stretch;margin:18px 0}
+.align-compare .hd{margin:0;padding:8px 4px;text-align:center;font-size:14px;font-weight:700;border-bottom:1px solid var(--border);line-height:1.3}
+.align-compare .hd.base{color:#2563eb}
+.align-compare .hd.glm{color:#dc2626}
+.align-compare .hd.k3{color:#9333ea}
+.arrow-row{grid-column:1/-1;text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0}
+.row-label{font-size:10.5px;color:var(--muted);text-align:right;align-self:center;line-height:1.3;padding-right:4px}
+.cell-box{background:#fff;border:1px solid var(--border);border-radius:4px;padding:7px 9px;font-size:12px;text-align:center;display:flex;align-items:center;justify-content:center;min-height:38px;line-height:1.35}
+.cell-empty{background:transparent;border:1px dashed transparent;min-height:38px}
+.cell-box.attn{border-left:3px solid #3b82f6;background:#eff6ff}
+.cell-box.ffn{border-left:3px solid #10b981;background:#f0fdf4}
+.cell-box.norm{border-left:3px solid #8b5cf6;background:#faf5ff;font-size:11.5px;color:var(--muted)}
+.cell-box.residual{background:transparent;border:none;color:var(--muted);font-size:11px;font-style:italic}
+.cell-box.kv{background:#fef2f2;border-left:3px solid #ef4444;font-weight:600;font-size:11.5px}
+.cell-box.input{background:#e0f2fe;border-left:3px solid #0891b2;font-weight:600;font-size:11.5px}
+.cell-box.fuse{background:#f3e8ff;border-left:3px solid #9333ea;font-weight:600;font-size:11px}
+.cell-box.head{background:#ecfdf5;border-left:3px solid #059669;font-weight:600;font-size:11.5px}
+.cell-box.output{background:#d1fae5;border-left:3px solid #059669;font-weight:600;font-size:11.5px}
+.cell-box.iterate{background:#fee2e2;border:1px dashed #f87171;font-size:11px;flex-direction:column;align-items:stretch;padding:6px}
+.cell-box.iterate.k3{background:#faf5ff;border-color:#d8b4fe}
+.iter-row{font-size:10.5px;padding:3px 6px;background:#fff;border:1px solid #fca5a5;border-radius:3px;margin:2px 0;text-align:center;line-height:1.4}
+.iter-row.k3{border-color:#d8b4fe}
+@media (max-width:780px){
+  .align-compare{grid-template-columns:48px repeat(3,1fr);font-size:10.5px}
+  .cell-box{font-size:11px;padding:5px 6px}
+  .row-label{font-size:9.5px}
+}
+</style>
 
-<!-- 主干层 -->
-<div class="detail-col">
-<h4 style="color:#2563eb">标准 Transformer Layer</h4>
-<div class="layer-grid">
-  <div class="row">
-    <div class="row-cell"><div class="cell-box input">输入：x<sub>i</sub>（上一层输出）</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Pre-Attn Norm</div>
-    <div class="row-cell"><div class="cell-box norm">LayerNorm</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Attention</div>
-    <div class="row-cell"><div class="cell-box attn"><strong>Multi-Head Attention</strong><br>Q,K,V = xW<sub>Q/K/V</sub></div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">KV</div>
-    <div class="row-cell"><div class="cell-box kv">→ 写 KV cache（常驻）</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Residual</div>
-    <div class="row-cell"><div class="cell-box residual">+ residual</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Pre-FFN Norm</div>
-    <div class="row-cell"><div class="cell-box norm">LayerNorm</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">FFN</div>
-    <div class="row-cell"><div class="cell-box ffn"><strong>Feed-Forward Network</strong><br>（MoE 模型这里是专家层）</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Residual</div>
-    <div class="row-cell"><div class="cell-box residual">+ residual</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-cell"><div class="cell-box output">输出：x<sub>i+1</sub></div></div>
-  </div>
-</div>
-</div>
+<div class="card">
+<div class="align-compare">
 
-<!-- MTP 层 -->
-<div class="detail-col">
-<h4 style="color:#dc2626">MTP Layer（GLM-5.2 式）</h4>
-<div class="layer-grid">
-  <div class="row">
-    <div class="row-cell"><div class="cell-box input">输入：h<sub>t</sub>（主干末层 hidden state）</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">投影</div>
-    <div class="row-cell"><div class="cell-box fuse">投影 + 拼上一步草稿 embedding</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Pre-Attn Norm</div>
-    <div class="row-cell"><div class="cell-box norm">LayerNorm</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Attention</div>
-    <div class="row-cell"><div class="cell-box attn"><strong>Multi-Head Attention</strong><br>（与主干层同构）</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">KV</div>
-    <div class="row-cell"><div class="cell-box kv">→ 写 KV cache（1 层常驻）</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Residual</div>
-    <div class="row-cell"><div class="cell-box residual">+ residual</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Pre-FFN Norm</div>
-    <div class="row-cell"><div class="cell-box norm">LayerNorm</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">FFN</div>
-    <div class="row-cell"><div class="cell-box ffn"><strong>Feed-Forward Network</strong></div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Residual</div>
-    <div class="row-cell"><div class="cell-box residual">+ residual</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">LM Head</div>
-    <div class="row-cell"><div class="cell-box head">共享 LM Head → logits</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">展开</div>
-    <div class="row-cell">
-      <div class="cell-box iterate">
-        <div>同一份权重 W<sub>MTP</sub> 迭代 3 次</div>
-        <div class="iter-row">Step 1: h<sub>t</sub> → W → t+1</div>
-        <div class="iter-row">Step 2: ⊕emb(t+1) → W → t+2</div>
-        <div class="iter-row">Step 3: ⊕emb(t+2) → W → t+3</div>
-      </div>
-    </div>
-  </div>
-</div>
-</div>
+<!-- header -->
+<div></div>
+<div class="hd base">标准 Transformer Layer</div>
+<div class="hd glm">MTP Layer（GLM-5.2 式）</div>
+<div class="hd k3">Draft Layer（Kimi K3 / EAGLE-3 式）</div>
 
-<!-- Draft 层 -->
-<div class="detail-col">
-<h4 style="color:#9333ea">Draft Layer（Kimi K3 / EAGLE-3 式）</h4>
-<div class="layer-grid">
-  <div class="row">
-    <div class="row-cell"><div class="cell-box input">输入：主干多层特征</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">投影</div>
-    <div class="row-cell"><div class="cell-box fuse">fuse(浅层, 中层, 末层) → 投影回 d<sub>model</sub></div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Pre-Attn Norm</div>
-    <div class="row-cell"><div class="cell-box norm">LayerNorm</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Attention</div>
-    <div class="row-cell"><div class="cell-box attn"><strong>Multi-Head Attention</strong><br>（独立训练的参数）</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">KV</div>
-    <div class="row-cell"><div class="cell-box kv">→ 写 KV cache（1 层常驻）</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Residual</div>
-    <div class="row-cell"><div class="cell-box residual">+ residual</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Pre-FFN Norm</div>
-    <div class="row-cell"><div class="cell-box norm">LayerNorm</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">FFN</div>
-    <div class="row-cell"><div class="cell-box ffn"><strong>Feed-Forward Network</strong></div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">Residual</div>
-    <div class="row-cell"><div class="cell-box residual">+ residual</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">LM Head</div>
-    <div class="row-cell"><div class="cell-box head">LM Head → logits</div></div>
-  </div>
-  <div class="arrow-cell">↓</div>
-  <div class="row">
-    <div class="row-label">展开</div>
-    <div class="row-cell">
-      <div class="cell-box iterate" style="border-color:#d8b4fe;background:#faf5ff">
-        <div>树形展开 7 步，每步 top-K</div>
-        <div class="iter-row" style="border-color:#d8b4fe">逐层剪枝，全局选 top-63 节点</div>
-        <div class="iter-row" style="border-color:#d8b4fe">主干用 tree_mask 一次 forward 验证</div>
-      </div>
-    </div>
-  </div>
+<!-- 输入 -->
+<div></div>
+<div class="cell-box input">输入：x<sub>i</sub><br><em style="font-size:10px">上一层输出</em></div>
+<div class="cell-box input">输入：h<sub>t</sub><br><em style="font-size:10px">主干末层 hidden state</em></div>
+<div class="cell-box input">输入：主干多层特征</div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- 投影 -->
+<div class="row-label">投影</div>
+<div class="cell-empty"></div>
+<div class="cell-box fuse">投影 + 拼上一步草稿 embedding</div>
+<div class="cell-box fuse">fuse(浅层, 中层, 末层)<br>→ 投影回 d<sub>model</sub></div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- Pre-Attn Norm -->
+<div class="row-label">Pre-Attn<br>Norm</div>
+<div class="cell-box norm">LayerNorm</div>
+<div class="cell-box norm">LayerNorm</div>
+<div class="cell-box norm">LayerNorm</div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- Attention -->
+<div class="row-label">Attention</div>
+<div class="cell-box attn"><strong>Multi-Head Attention</strong><br><em style="font-size:10.5px">Q,K,V = xW</em></div>
+<div class="cell-box attn"><strong>Multi-Head Attention</strong><br><em style="font-size:10.5px">与主干层同构</em></div>
+<div class="cell-box attn"><strong>Multi-Head Attention</strong><br><em style="font-size:10.5px">独立训练的参数</em></div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- KV cache -->
+<div class="row-label">KV<br>cache</div>
+<div class="cell-empty"></div>
+<div class="cell-box kv">→ 写 KV cache（1 层常驻）</div>
+<div class="cell-box kv">→ 写 KV cache（1 层常驻）</div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- Residual 1 -->
+<div class="row-label">Residual</div>
+<div class="cell-box residual">+ residual</div>
+<div class="cell-box residual">+ residual</div>
+<div class="cell-box residual">+ residual</div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- Pre-FFN Norm -->
+<div class="row-label">Pre-FFN<br>Norm</div>
+<div class="cell-box norm">LayerNorm</div>
+<div class="cell-box norm">LayerNorm</div>
+<div class="cell-box norm">LayerNorm</div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- FFN -->
+<div class="row-label">FFN</div>
+<div class="cell-box ffn"><strong>Feed-Forward Network</strong><br><em style="font-size:10.5px">MoE 模型此处是专家层</em></div>
+<div class="cell-box ffn"><strong>Feed-Forward Network</strong></div>
+<div class="cell-box ffn"><strong>Feed-Forward Network</strong></div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- Residual 2 -->
+<div class="row-label">Residual</div>
+<div class="cell-box residual">+ residual</div>
+<div class="cell-box residual">+ residual</div>
+<div class="cell-box residual">+ residual</div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- LM Head -->
+<div class="row-label">LM Head</div>
+<div class="cell-empty"></div>
+<div class="cell-box head">共享 LM Head → logits</div>
+<div class="cell-box head">LM Head → logits</div>
+
+<!-- arrow -->
+<div class="arrow-row">↓</div>
+
+<!-- 展开方式 -->
+<div class="row-label">展开</div>
+<div class="cell-empty"></div>
+<div class="cell-box iterate">
+  <div style="font-weight:600;margin-bottom:3px">同一份权重 W<sub>MTP</sub> 迭代 3 次</div>
+  <div class="iter-row">Step 1: h<sub>t</sub> → W → t+1</div>
+  <div class="iter-row">Step 2: ⊕emb(t+1) → W → t+2</div>
+  <div class="iter-row">Step 3: ⊕emb(t+2) → W → t+3</div>
 </div>
+<div class="cell-box iterate k3">
+  <div style="font-weight:600;margin-bottom:3px">树形展开 7 步，每步 top-K</div>
+  <div class="iter-row k3">逐层剪枝，全局选 top-63 节点</div>
+  <div class="iter-row k3">主干用 tree_mask 一次 forward 验证</div>
 </div>
 
-</div>
+<!-- arrow -->
+<div class="arrow-row">↓</div>
 
-<div class="summary-grid">
-  <div class="summary-box">
-    <strong>KV cache 形态</strong><br>
-    主干层：无（仅中间张量）<br>
-    MTP 层：1 层 × 序列长度<br>
-    + 草稿峰值：3 位置 × 1 层（主干按 3×N 层预留）
-  </div>
-  <div class="summary-box red">
-    <strong>权重共享</strong><br>
-    3 步共用 W<sub>MTP</sub><br>
-    参数只多 1 层
-  </div>
-  <div class="summary-box purple">
-    <strong>树形候选</strong><br>
-    整棵树的节点 × 1 层（主干按节点数 × N 层预留）<br>
-    远多于线性链
-  </div>
+<!-- Output -->
+<div></div>
+<div class="cell-box output">输出：x<sub>i+1</sub>（传下一层）</div>
+<div class="cell-box output">输出：1 个草稿 token</div>
+<div class="cell-box output">输出：候选 token 树</div>
+
 </div>
 
 <div class="note">
-<strong>同构部分横向对齐：</strong>LayerNorm、Attention、FFN、Residual 在三列同一行。<strong>差异部分在第一列的「输入」</strong>（主干吃上一层 vs MTP 吃主干末层 vs Draft 吃主干多层特征）、<strong>中间的「投影」</strong>、<strong>末尾的「LM Head」和「展开方式」</strong>。
+<strong>横向对齐的同构部分：</strong>Pre-Attn Norm、Attention、FFN、Residual 在三列的同一行（标签列写明）。<strong>差异部分：</strong>输入、投影、KV 写入、LM Head、展开方式——这些列之间不对齐，因为主干层没有这些组件，用空槽位代替。
+</div>
+</div>
+
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px">
+<div style="background:#f0f9ff;border-left:3px solid var(--blue);padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
+<strong>KV cache 形态</strong><br>
+主干层：无（仅中间张量）<br>
+MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
+</div>
+<div style="background:#fef2f2;border-left:3px solid #dc2626;padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
+<strong>权重共享</strong><br>
+3 步共用 W<sub>MTP</sub><br>
+参数只多 1 层
+</div>
+<div style="background:#faf5ff;border-left:3px solid #9333ea;padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
+<strong>树形候选</strong><br>
+整棵树节点 × 1 层（主干按节点数 × N 层预留）<br>
+远多于线性链
+</div>
 </div>
 <h3>1.3 它怎么训练出来</h3>
 
