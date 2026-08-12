@@ -147,7 +147,17 @@
 
 <h3>1.2 它的结构是什么</h3>
 
-<p>都是一个标准 Transformer decoder block。同构的部分是 LayerNorm、Multi-Head Attention、FFN、残差；不同的部分在输入、LM Head 是否共享、以及推理时怎么展开。</p>
+<p>都是一个标准 Transformer decoder block：LayerNorm → Multi-Head Attention → 残差 → LayerNorm → FFN → 残差。三者真正不同的只有两头：</p>
+<ul>
+  <li><strong>输入侧的“投影”行</strong>：把主干给的东西整成 attention 能吃的形状。
+    <ul>
+      <li>主干层：上一层直接给 x，不用投影。</li>
+      <li>MTP 层（GLM-5.2）：拿主干末层 hidden state h<sub>t</sub>，<strong>拼上一步草稿 token 的 embedding</strong>（h<sub>t</sub> ⊕ emb(上一草稿)），再线性投影回 d<sub>model</sub>。拼这个是为了让 MTP 知道“上一轮猜出了什么词”，从而接着往下猜。</li>
+      <li>Draft 层（Kimi K3 / EAGLE-3）：取主干多个层的 hidden state（如第 1/中/末层），<strong>拼接后线性投影</strong>回 d<sub>model</sub>。主干层的输出从左到右越来越抽象（低层偏 token、高层偏语义），多层级拼接让 draft 同时拿到不同粒度的信息，猜得更准。</li>
+    </ul>
+  </li>
+  <li><strong>末尾的“LM Head / 展开”</strong>：主干层输出 hidden state 给下一层；MTP/Draft 层过共享 LM Head 出 logits，再按自己的方式展开成多个草稿 token。</li>
+</ul>
 
 <style>
 .align-compare{display:grid;grid-template-columns:64px repeat(3,1fr);gap:4px 8px;align-items:stretch;margin:18px 0}
@@ -192,7 +202,7 @@
 <div></div>
 <div class="cell-box input">输入：x<sub>i</sub><br><em style="font-size:10px">上一层输出</em></div>
 <div class="cell-box input">输入：h<sub>t</sub><br><em style="font-size:10px">主干末层 hidden state</em></div>
-<div class="cell-box input">输入：主干多层特征</div>
+<div class="cell-box input">输入：主干多层 hidden state<br><em style="font-size:10px">取主干第 1/中/末层的 h</em></div>
 
 <!-- arrow -->
 <div class="arrow-row">↓</div>
@@ -200,7 +210,7 @@
 <!-- 投影 -->
 <div class="row-label">投影</div>
 <div class="cell-empty"></div>
-<div class="cell-box fuse">投影 + 拼上一步草稿 embedding</div>
+<div class="cell-box fuse">h<sub>t</sub> ⊕ emb(上一草稿)<br><em style="font-size:10px">线性投影回 d<sub>model</sub></em></div>
 <div class="cell-box fuse">fuse(浅层, 中层, 末层)<br>→ 投影回 d<sub>model</sub></div>
 
 <!-- arrow -->
