@@ -24,6 +24,8 @@ vLLM 官方文档的描述：
 
 ## 实测效果
 
+> 以下实测数据均引用自微信公众号文章[1]。
+
 **实验环境**：
 - 硬件：8 × 昇腾 910B4-32GB
 - 模型：Qwen3.6-27B-w8a8
@@ -249,18 +251,14 @@ TP8+DCP 的 TPOT 是 58.5 ms，TP4×2 是 104.5 ms，**领先 1.79 倍**。
 | 任何场景，SLO 卡 TTFT | **TP8×1，不开 DCP** | 16.5 s vs 20.5 / 22.8 s |
 | 缺显存 | **TP8×1 + DCP** | KV 容量翻倍 |
 
-## 关键洞察
+## 参考资料
 
-1. **重复存储是静默的**：没有报错或告警，唯一线索是启动日志里与手算不符的 KV 池容量
-2. **收益与代价分离**：TPOT 收益随上下文增长，TTFT 代价随并发增长，必须合并计算
-3. **显存收益无条件**：1.98 倍 KV 容量在任何长度、任何并发下都成立
-4. **布局优先于优化**：消除 TP8 冗余后，仍可能不如分片干净的 TP4×2
-5. **GQA 是结构性约束**：不是 vLLM 的实现缺陷，TensorRT-LLM 也有同样问题
+[1] DCP 实测:消除张量并行下的 KV Cache 重复存储,收益、代价与适用边界. 微信公众号. https://mp.weixin.qq.com/s/0M-_6lE6z87Sk67FaDrgkA
 
----
+[2] vLLM 官方文档：Context Parallel Deployment
 
-**参考资料**：
-- vLLM 官方文档：Context Parallel Deployment
-- vLLM 源码：`vllm/config/model.py`、`vllm/config/parallel.py`
-- TensorRT-LLM 文档：KV-cache replication 说明
-- vLLM PR #24864：GQA 支持
+[3] vLLM 源码：`vllm/config/model.py`、`vllm/config/parallel.py`
+
+[4] TensorRT-LLM 文档：KV-cache replication 说明
+
+[5] vLLM PR #24864：GQA 支持

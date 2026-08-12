@@ -117,6 +117,10 @@ When we continue to increase the tensor parallel size, the KV cache for each GPU
 
 <h2>实测效果</h2>
 
+<blockquote style="border-left-color: #0ea5e9;">
+<strong>数据来源</strong>：以下实测数据均引用自微信公众号文章<sup>[1]</sup>。
+</blockquote>
+
 <p><strong>实验环境</strong>：</p>
 <ul>
 <li>硬件：8 × 昇腾 910B4-32GB</li>
@@ -575,9 +579,18 @@ When we continue to increase the tensor parallel size, the KV cache for each GPU
 <div class="point"><span class="badge q">结构性约束</span><span>不是 vLLM 的实现缺陷，TensorRT-LLM 也有同样问题</span></div>
 </div>
 
+<h2>参考资料</h2>
+
+<ol style="line-height: 2;">
+<li>DCP 实测:消除张量并行下的 KV Cache 重复存储,收益、代价与适用边界. 微信公众号. <a href="https://mp.weixin.qq.com/s/0M-_6lE6z87Sk67FaDrgkA">https://mp.weixin.qq.com/s/0M-_6lE6z87Sk67FaDrgkA</a></li>
+<li>vLLM 官方文档：Context Parallel Deployment</li>
+<li>vLLM 源码：<code>vllm/config/model.py</code>、<code>vllm/config/parallel.py</code></li>
+<li>TensorRT-LLM 文档：KV-cache replication 说明</li>
+<li>vLLM PR #24864：GQA 支持</li>
+</ol>
+
 <footer>
-  <p>© 2026 | 基于微信公众号文章《DCP 实测:消除张量并行下的 KV Cache 重复存储,收益、代价与适用边界》整理</p>
-  <p>参考资料：vLLM 官方文档、vLLM 源码、TensorRT-LLM 文档</p>
+  <p>© 2026 | 本文实测数据引用自微信公众号文章<sup>[1]</sup></p>
 </footer>
 
 </div>
