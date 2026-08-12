@@ -418,105 +418,139 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 
 <h2>3. Forward 全流程对比</h2>
 
+<p>三列对比一次 decode 迭代里各自的步骤。同样的行表示同一类步骤，Base 没有的步骤留空槽位。流程从输入到输出只有一个方向，<strong>从上到下读</strong>。</p>
+
+<style>
+.fwd-compare{display:grid;grid-template-columns:88px repeat(3,1fr);gap:4px 8px;align-items:stretch;margin:18px 0}
+.fwd-compare .hd{margin:0;padding:8px 4px;text-align:center;font-size:14px;font-weight:700;border-bottom:1px solid var(--border);line-height:1.3}
+.fwd-compare .hd.base{color:#2563eb}
+.fwd-compare .hd.glm{color:#dc2626}
+.fwd-compare .hd.k3{color:#9333ea}
+.fwd-cell{background:#fff;border:1px solid var(--border);border-radius:4px;padding:7px 9px;font-size:12px;text-align:center;display:flex;align-items:center;justify-content:center;min-height:42px;line-height:1.4;flex-direction:column}
+.fwd-empty{background:transparent;border:1px dashed transparent;min-height:42px}
+.fwd-cell.input{background:#e0f2fe;border-left:3px solid #0891b2;font-weight:600}
+.fwd-cell.embed{background:#f1f5f9;border-left:3px solid #64748b}
+.fwd-cell.backbone{background:#dbeafe;border-left:3px solid #2563eb;font-weight:600}
+.fwd-cell.fuse{background:#f3e8ff;border-left:3px solid #9333ea;font-weight:600;font-size:11.5px}
+.fwd-cell.mtp{background:#fee2e2;border-left:3px solid #dc2626;font-weight:600;font-size:11.5px}
+.fwd-cell.draft{background:#f3e8ff;border-left:3px solid #9333ea;font-weight:600;font-size:11.5px}
+.fwd-cell.draft-step{background:#fef3c7;border-left:3px solid #d97706;font-size:11.5px}
+.fwd-cell.head{background:#ecfdf5;border-left:3px solid #059669;font-weight:600;font-size:11.5px}
+.fwd-cell.verify{background:#fff7ed;border-left:3px solid #ea580c;font-weight:600;font-size:11.5px}
+.fwd-cell.output{background:#d1fae5;border-left:3px solid #059669;font-weight:600}
+.fwd-cell .em{font-size:10.5px;color:var(--muted);font-weight:400;margin-top:2px}
+@media (max-width:780px){
+  .fwd-compare{grid-template-columns:56px repeat(3,1fr);font-size:10.5px}
+  .fwd-cell{font-size:11px;padding:5px 6px;min-height:36px}
+}
+</style>
+
 <div class="card">
-<div class="arch-compare">
+<div class="fwd-compare">
 
-<div class="arch-col base">
-<h4>Base（无 MTP）</h4>
-<div class="flow-box input">Input token</div>
-<div class="arrow">↓</div>
-<div class="flow-box">Embedding</div>
-<div class="arrow">↓</div>
-<div class="flow-box backbone">
-  Layer 1<span class="kv-badge">KV</span><br>
-  Layer 2<span class="kv-badge">KV</span><br>
-  ⋮<br>
-  Layer N<span class="kv-badge">KV</span>
-</div>
-<div class="arrow">↓</div>
-<div class="flow-box">LM Head</div>
-<div class="arrow">↓</div>
-<div class="flow-box output">1 token / 次</div>
-<div class="summary-box"><strong>KV：</strong>N 层 × 序列长度</div>
-</div>
+<!-- header -->
+<div></div>
+<div class="hd base">Base（无 MTP）</div>
+<div class="hd glm">线性投机（GLM-5.2）</div>
+<div class="hd k3">树形投机（Kimi K3）</div>
 
-<div class="arch-col glm">
-<h4>线性投机（GLM-5.2）</h4>
-<div class="flow-box input">Input token</div>
-<div class="arrow">↓</div>
-<div class="flow-box">Embedding</div>
-<div class="arrow">↓</div>
-<div class="flow-box backbone">
-  Layer 1<span class="kv-badge">KV</span><br>
-  ⋮<br>
-  Layer N<span class="kv-badge">KV</span>
-</div>
-<div class="arrow">↓</div>
-<div class="flow-box">末层 hidden state h</div>
-<div class="arrow">↓</div>
-<div class="flow-box mtp">
-  MTP Layer<span class="kv-badge">KV</span><br>
-  <em style="font-size:11px">同一权重迭代 3 步</em>
-</div>
-<div class="arrow">↓</div>
-<div class="flow-box">草稿 d<sub>1</sub> d<sub>2</sub> d<sub>3</sub></div>
-<div class="arrow">↓</div>
-<div class="flow-box verify">
-  主干一次 forward 验证<span class="kv-badge kv-temp">临时 KV</span><br>
-  <em style="font-size:11px">3 个位置 × N 层</em>
-</div>
-<div class="arrow">↓</div>
-<div class="flow-box output">接受前缀 + 1 免费 token</div>
-<div class="summary-box">
-  <strong>KV：</strong>N 层 × 序列长度<br>
-  + 1 层(MTP) × 序列长度<br>
-  + 3 位置 × N 层（峰值）
-</div>
-</div>
+<!-- Input -->
+<div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">Input</div>
+<div class="fwd-cell input">Input token</div>
+<div class="fwd-cell input">Input token</div>
+<div class="fwd-cell input">Input token</div>
 
-<div class="arch-col k3">
-<h4>树形投机（Kimi K3）</h4>
-<div class="flow-box input">Input token</div>
-<div class="arrow">↓</div>
-<div class="flow-box">Embedding</div>
-<div class="arrow">↓</div>
-<div class="flow-box backbone">
-  Layer 1<span class="kv-badge">KV</span> →fuse<br>
-  ⋮<br>
-  中层<span class="kv-badge">KV</span> →fuse<br>
-  ⋮<br>
-  末层<span class="kv-badge">KV</span> →fuse
-</div>
-<div class="arrow">↓</div>
-<div class="flow-box">多层特征融合</div>
-<div class="arrow">↓</div>
-<div class="flow-box draft">
-  Draft Layer<span class="kv-badge">KV</span><br>
-  <em style="font-size:11px">独立训练，展开 7 步</em>
-</div>
-<div class="arrow">↓</div>
-<div class="flow-box">候选 token 树（逐层剪枝）</div>
-<div class="arrow">↓</div>
-<div class="flow-box verify">
-  主干一次 forward + tree_mask<span class="kv-badge kv-temp">临时 KV</span><br>
-  <em style="font-size:11px">整棵树节点 × N 层</em>
-</div>
-<div class="arrow">↓</div>
-<div class="flow-box output">接受最长路径</div>
-<div class="summary-box">
-  <strong>KV：</strong>N 层 × 序列长度<br>
-  + 1 层(Draft) × 序列长度<br>
-  + 树节点数 × N 层（峰值）
-</div>
-</div>
+<div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
 
-</div>
+<!-- Embedding -->
+<div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">Embedding</div>
+<div class="fwd-cell embed">Embedding</div>
+<div class="fwd-cell embed">Embedding</div>
+<div class="fwd-cell embed">Embedding</div>
+
+<div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
+
+<!-- 主干 forward -->
+<div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">主干 forward<br>(KV cache)</div>
+<div class="fwd-cell backbone">主干 N 层<br><span class="em">→ 写 N 层 KV（常驻）</span></div>
+<div class="fwd-cell backbone">主干 N 层<br><span class="em">→ 写 N 层 KV（常驻）</span></div>
+<div class="fwd-cell backbone">主干 N 层<br><span class="em">→ 写 N 层 KV；同时抽多层给 Draft fuse</span></div>
+
+<div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
+
+<!-- 抽主干特征 -->
+<div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">抽主干<br>特征</div>
+<div class="fwd-empty"></div>
+<div class="fwd-cell fuse">取末层 h<sub>t</sub></div>
+<div class="fwd-cell fuse">多层 fuse → 投影回 d<sub>model</sub></div>
+
+<div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
+
+<!-- MTP / Draft forward -->
+<div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">MTP / Draft<br>forward</div>
+<div class="fwd-empty"></div>
+<div class="fwd-cell mtp">MTP Layer<br><span class="em">→ 写 1 层 KV；权重共享</span></div>
+<div class="fwd-cell draft">Draft Layer<br><span class="em">→ 写 1 层 KV；独立训练</span></div>
+
+<div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
+
+<!-- 草稿展开 -->
+<div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">草稿<br>展开</div>
+<div class="fwd-empty"></div>
+<div class="fwd-cell draft-step">线性链 d<sub>1</sub> d<sub>2</sub> d<sub>3</sub><br><span class="em">权重绑定 × 3 步</span></div>
+<div class="fwd-cell draft-step">候选 token 树<br><span class="em">逐层 top-K 剪枝 → top-63</span></div>
+
+<div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
+
+<!-- LM Head -->
+<div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">LM Head<br>→ logits</div>
+<div class="fwd-cell head">共享 LM Head<br><span class="em">→ 1 token logits</span></div>
+<div class="fwd-cell head">共享 LM Head<br><span class="em">→ 草稿 logits</span></div>
+<div class="fwd-cell head">LM Head<br><span class="em">→ 草稿 logits</span></div>
+
+<div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
+
+<!-- 主干验证 -->
+<div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">主干验证<br>(临时 KV)</div>
+<div class="fwd-empty"></div>
+<div class="fwd-cell verify">主干 1× forward<br><span class="em">3 位置 × N 层临时 KV</span></div>
+<div class="fwd-cell verify">主干 1× forward + tree_mask<br><span class="em">节点数 × N 层临时 KV</span></div>
+
+<div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
+
+<!-- 接受 → 输出 -->
+<div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">接受判定<br>→ 输出</div>
+<div class="fwd-cell output">1 token<br><span class="em">无加速</span></div>
+<div class="fwd-cell output">接受前缀 + 1 免费 token<br><span class="em">accept ≈ 2.76</span></div>
+<div class="fwd-cell output">接受最长路径<br><span class="em">树形接受率 &gt; 线性</span></div>
+
 </div>
 
 <div class="note">
-<strong>结构上唯一的新增是那一层</strong>，但显存上多出三块：MTP/Draft 层自己的常驻 KV、草稿生成时的中间 KV、以及主干验证阶段按最坏情况预留的槽位。第三块通常最大，且随草稿宽度（树的节点数）线性增长。
+<strong>对齐方式：</strong>9 个步骤行（Input / Embedding / 主干 forward / 抽主干特征 / MTP-Draft / 草稿展开 / LM Head / 主干验证 / 接受→输出）三列同步。<strong>Base 列在中间 4 个步骤留空</strong>（它没有草稿相关步骤）；<strong>GLM 和 K3 在「LM Head」和「主干验证」之间多走几步</strong>，因为投机解码需要 drafter 出草稿 + 主干验证。
+</div>
 </div>
 
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px">
+<div style="background:#f0f9ff;border-left:3px solid var(--blue);padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
+<strong>KV cache 总量</strong><br>
+Base：N 层 × seq_len<br>
+GLM：N + 1 层常驻 + 3×N 峰值<br>
+K3：93 + 1 层常驻 + 节点数×93 峰值
+</div>
+<div style="background:#fef2f2;border-left:3px solid #dc2626;padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
+<strong>草稿峰值大小</strong><br>
+GLM：3 个位置（线性链）<br>
+K3：63 个节点（树形）<br>
+→ K3 峰值是 GLM 的 ~21×
+</div>
+<div style="background:#faf5ff;border-left:3px solid #9333ea;padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
+<strong>输出分布</strong><br>
+三种路径输出分布完全相同<br>
+（投机采样的分布等价性证明）<br>
+只改变吐 token 的节奏
+</div>
+</div>
 <h2>4. 为什么不是"参数变多"导致的</h2>
 
 <table>
