@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MTP 为什么会让上下文减小?— KV cache 开销图解</title>
+<style>
+  :root{
+    --bg:#fafaf9; --card:#ffffff; --card2:#f8f8f7;
+    --border:#e7e5e4; --border2:#d6d3d1;
+    --text:#1c1917; --muted:#78716c; --dim:#a8a29e;
+    --blue:#1d4ed8; --green:#059669; --orange:#d97706; --red:#dc2626; --purple:#7c3aed; --cyan:#0891b2;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.7;padding:0}
+  .wrap{max-width:900px;margin:0 auto;padding:40px 24px 80px}
+  
+  .hero{text-align:center;padding:40px 0;border-bottom:2px solid var(--border)}
+  h1{font-size:32px;font-weight:700;margin-bottom:16px;color:var(--text);letter-spacing:-0.5px}
+  .subtitle{color:var(--muted);font-size:15px;max-width:600px;margin:0 auto 20px;line-height:1.6}
+  .pills{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+  .pill{padding:6px 14px;border-radius:20px;font-size:12px;font-weight:600;background:var(--card2);color:var(--muted);border:1px solid var(--border)}
+  
+  h2{font-size:24px;font-weight:700;margin:56px 0 20px;padding-bottom:12px;border-bottom:1px solid var(--border2);color:var(--text)}
+  h2 .num{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;background:var(--blue);color:#fff;font-size:14px;margin-right:10px}
+  h3{font-size:18px;font-weight:600;margin:32px 0 16px;color:var(--cyan)}
+  
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px;margin:24px 0;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  .tldr{background:linear-gradient(135deg,rgba(5,150,105,.08),rgba(8,145,178,.05));border-left:4px solid var(--green);font-size:16px;line-height:1.8}
+  .tldr b{color:var(--green)}
+  
+  .mem-bar{height:48px;border-radius:10px;overflow:hidden;border:1px solid var(--border2);display:flex;margin:12px 0;box-shadow:inset 0 1px 2px rgba(0,0,0,.05)}
+  .mem-seg{display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:700;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+  .seg-backbone{background:linear-gradient(180deg,#2f81f7,#1557b0)}
+  .seg-mtp{background:linear-gradient(180deg,#f85149,#a83028)}
+  .seg-draft{background:linear-gradient(180deg,#bc8cff,#7a4fb0)}
+  .seg-tree{background:linear-gradient(180deg,#d29922,#8a5a0a)}
+  .mem-label{font-size:13px;color:var(--muted);font-weight:600;margin-bottom:8px;display:flex;justify-content:space-between}
+  .mem-result{text-align:center;margin-top:8px;font-size:14px;font-weight:700;color:var(--text)}
+  
+  table{width:100%;border-collapse:collapse;margin:20px 0;font-size:14px}
+  th{background:var(--card2);padding:12px;text-align:left;font-weight:700;border-bottom:2px solid var(--border2)}
+  td{padding:12px;border-bottom:1px solid var(--border)}
+  tr:hover{background:rgba(29,78,216,.02)}
+  .muted{color:var(--muted);font-size:12px}
+  
+  .code{font-family:ui-monospace,monospace;background:var(--card2);padding:2px 6px;border-radius:4px;font-size:13px;color:var(--purple)}
+  .highlight{background:rgba(220,38,38,.08);padding:2px 6px;border-radius:4px;color:var(--red);font-weight:600}
+  
+  .steps{counter-reset:step}
+  .step{margin:20px 0;padding:16px 20px;background:var(--card);border-left:3px solid var(--blue);border-radius:0 8px 8px 0}
+  .step::before{counter-increment:step;content:"Step "counter(step);display:block;font-weight:700;color:var(--blue);margin-bottom:8px;font-size:13px}
+  
+  .callout{padding:16px 20px;margin:24px 0;border-radius:8px;font-size:14px;line-height:1.7}
+  .callout.info{background:rgba(29,78,216,.06);border-left:4px solid var(--blue)}
+  .callout.warn{background:rgba(220,38,38,.06);border-left:4px solid var(--red)}
+  
+  details{margin:24px 0;padding:20px;background:var(--card);border:1px solid var(--border);border-radius:10px}
+  summary{cursor:pointer;font-weight:700;color:var(--purple);font-size:16px;user-select:none}
+  summary:hover{color:var(--blue)}
+  details[open] summary{margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+  
+  .legend{display:flex;gap:20px;flex-wrap:wrap;margin:20px 0;font-size:13px;justify-content:center}
+  .leg{display:flex;align-items:center;gap:8px;color:var(--muted)}
+  .leg i{width:18px;height:18px;border-radius:4px;display:inline-block}
+  
+  .nav{position:sticky;top:0;background:rgba(250,250,249,.95);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);z-index:10;padding:10px 0}
+  .nav-inner{max-width:900px;margin:0 auto;padding:0 24px;display:flex;gap:16px;flex-wrap:wrap;font-size:13px}
+  .nav a{color:var(--muted);text-decoration:none;padding:4px 0;border-bottom:2px solid transparent;transition:.2s}
+  .nav a:hover{color:var(--blue);border-color:var(--blue)}
+  .brand{font-weight:700;color:var(--text);margin-right:auto}
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <div class="nav-inner">
+    <span class="brand">🧠 MTP 图解</span>
+    <a href="#tldr">TL;DR</a>
+    <a href="#s1">显存对比</a>
+    <a href="#s2">架构速览</a>
+    <a href="#s3">动态过程</a>
+    <a href="#s4">深入</a>
+    <a href="#opt">优化</a>
+    <a href="#conclusion">结论</a>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- HERO -->
+<div class="hero">
+  <h1>MTP 为什么会让上下文减小?</h1>
+  <p class="subtitle">GLM-5.2 vs Kimi K3 · KV cache 才是大头,不是权重大小</p>
+  <div class="pills">
+    <span class="pill">权重只多 1%</span>
+    <span class="pill">KV cache 吃掉 15-25% 显存</span>
+    <span class="pill">草稿树要预占槽位</span>
+  </div>
+</div>
+
+<!-- ============ TL;DR ============ -->
+<h2 id="tldr"><span class="num">0</span> 一句话回答</h2>
+<div class="card tldr">
+  MTP 层的 <b>KV cache</b> 和 <b>草稿树临时槽位</b> 吃掉了原本属于主干的显存 pool → 能容纳的上下文 token 数减少。<br><br>
+  <b>权重大小不是重点</b>:GLM-5.2 只多 1.3% 参数(1 层 MTP),Kimi K3 只多 1%(1 层 Draft)。<br>
+  <b>真正的大头</b>:KV cache — 每层每 token 都要存 K/V,MTP 层也是 Transformer,同样要缓存。草稿树虽然"验证后释放",但验证前必须预占槽位。
+</div>
+
+<!-- ============ §1 显存对比 ============ -->
+<h2 id="s1"><span class="num">1</span> 显存分配对比 — 一图看懂</h2>
+<p style="color:var(--muted);margin-bottom:20px">三条横向条形图,直接看到被 MTP "吃掉"的部分。注意:这里展示的是 <strong>KV cache pool 分配</strong>,不是权重大小。</p>
+
+<div class="card">
+  <h3>🟦 Base(无 MTP)</h3>
+  <div class="mem-label"><span>KV cache pool 分配</span><span style="color:var(--green)">100% 给主干</span></div>
+  <div class="mem-bar">
+    <div class="mem-seg seg-backbone" style="width:100%">主干 N 层 KV cache</div>
+  </div>
+  <div class="mem-result">max_context = 128K tokens</div>
+
+  <h3 style="margin-top:32px">🟥 GLM-5.2(MTP 开启)</h3>
+  <div class="mem-label"><span>KV cache pool 分配</span><span style="color:var(--red)">压缩 ~15%</span></div>
+  <div class="mem-bar">
+    <div class="mem-seg seg-backbone" style="width:74%">主干</div>
+    <div class="mem-seg seg-mtp" style="width:12%">MTP 层</div>
+    <div class="mem-seg seg-tree" style="width:14%">草稿树(3步)</div>
+  </div>
+  <div class="mem-result">max_context ≈ 109K <span class="muted">(压缩 15%)</span></div>
+
+  <h3 style="margin-top:32px">🟪 Kimi K3(MTP 开启)</h3>
+  <div class="mem-label"><span>KV cache pool 分配</span><span style="color:var(--red)">压缩 ~25%</span></div>
+  <div class="mem-bar">
+    <div class="mem-seg seg-backbone" style="width:68%">主干</div>
+    <div class="mem-seg seg-draft" style="width:14%">Draft 层</div>
+    <div class="mem-seg seg-tree" style="width:18%">草稿树(7步)</div>
+  </div>
+  <div class="mem-result">max_context ≈ 96K <span class="muted">(压缩 25%)</span></div>
+
+  <div class="legend">
+    <div class="leg"><i style="background:linear-gradient(180deg,#2f81f7,#1557b0)"></i>主干 KV</div>
+    <div class="leg"><i style="background:linear-gradient(180deg,#f85149,#a83028)"></i>MTP 层 KV</div>
+    <div class="leg"><i style="background:linear-gradient(180deg,#bc8cff,#7a4fb0)"></i>Draft 层 KV</div>
+    <div class="leg"><i style="background:linear-gradient(180deg,#d29922,#8a5a0a)"></i>草稿树临时槽</div>
+  </div>
+</div>
+
+<div class="callout warn">
+  <b>被吃掉的显存来自哪里?</b><br>
+  ① <span class="highlight">MTP/Draft 层 KV cache</span>:每个序列位置都要缓存(和主干一样)<br>
+  ② <span class="highlight">草稿树临时槽位</span>:验证前预占,验证后回收 — 但总量不为零,系统按最坏情况分配<br>
+  → 主干 KV pool 被压缩 → max_total_tokens ↓ → 上下文减小
+</div>
+
+<!-- ============ §2 架构速览 ============ -->
+<h2 id="s2"><span class="num">2</span> 三种架构速览</h2>
+<p style="color:var(--muted);margin-bottom:20px">极简对比,只看关键差异。详细训练机制见后面"深入"章节。</p>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:20%">维度</th>
+        <th style="width:27%">Base(无 MTP)</th>
+        <th style="width:27%">GLM-5.2</th>
+        <th style="width:26%">Kimi K3</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>MTP 层</b></td>
+        <td>无</td>
+        <td>1 层<br><span class="muted">3 步权重共享</span></td>
+        <td>1 层<br><span class="muted">主干 block 拷贝</span></td>
+      </tr>
+      <tr>
+        <td><b>参数增量</b></td>
+        <td>0%</td>
+        <td><b style="color:var(--blue)">+1.3%</b></td>
+        <td><b style="color:var(--purple)">+1%</b></td>
+      </tr>
+      <tr>
+        <td><b>草稿步数</b></td>
+        <td>0</td>
+        <td>3</td>
+        <td>7</td>
+      </tr>
+      <tr>
+        <td><b>KV 开销</b><br><span class="muted">(每 token)</span></td>
+        <td>主干 N 层</td>
+        <td>主干 N 层<br>+ MTP 1 层<br>+ 草稿 3×临时</td>
+        <td>主干 93 层<br>+ Draft 1 层<br>+ 草稿 7×临时</td>
+      </tr>
+      <tr>
+        <td><b>上下文损耗</b></td>
+        <td>0%</td>
+        <td><b style="color:var(--red)">~15%</b></td>
+        <td><b style="color:var(--red)">~25%</b></td>
+      </tr>
+      <tr>
+        <td><b>接受长度</b></td>
+        <td>1(无加速)</td>
+        <td><b style="color:var(--green)">2.76</b></td>
+        <td>未公开</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="callout info">
+  <b>核心洞察</b>:参数增量很小(1-1.3%),但 KV cache 是<strong>按层×按token 累积</strong>的。<br>
+  • 权重:加载一次,静态<br>
+  • KV cache:每 token 每层都存,动态增长<br>
+  → 一个 128K 上下文的请求,MTP 层要额外存 128K×1 层的 K/V
+</div>
+
+<!-- ============ §3 推理动态过程 ============ -->
+<h2 id="s3"><span class="num">3</span> 推理时的 KV 动态变化</h2>
+<p style="color:var(--muted);margin-bottom:20px">以 GLM-5.2 为例,展开一次 decode 请求的内部时间线。</p>
+
+<div class="card">
+  <div class="steps">
+    <div class="step">
+      <b>主干 forward</b>:读取 prompt KV,生成下一个 hidden state<br>
+      KV 占用:+1 位置 × N 层(主干)
+    </div>
+    <div class="step">
+      <b>MTP 草稿展开</b>:用 MTP 层迭代 3 次,预测 t+1, t+2, t+3<br>
+      KV 占用:+3 位置 × 1 层(MTP 临时,验证后释放)
+    </div>
+    <div class="step">
+      <b>主干验证</b>:用主干并行验证 3 个草稿 token<br>
+      KV 占用:+3 位置 × N 层(主干,用一次 forward 的成本)
+    </div>
+    <div class="step">
+      <b>接受判定</b>:逐 token 判定 accept/reject<br>
+      • 接受的 token KV 永久保留(主干)<br>
+      • 拒绝的释放<br>
+      • MTP 临时 KV 全部释放<br>
+      → 实际产出 2-3 tokens(GLM accept=2.76)
+    </div>
+  </div>
+</div>
+
+<div class="callout warn">
+  <b>关键点</b>:草稿 KV 虽然"临时",但验证前必须预占槽位。<br>
+  • 系统按 <strong>最坏情况</strong> 分配显存(所有草稿同时存在)<br>
+  • 即使 accept rate 高,pool 也要扣掉这部分<br>
+  → 这就是上下文减小的根本原因
+</div>
+
+<!-- ============ §4 深入(可选) ============ -->
+<h2 id="s4"><span class="num">4</span> 深入:GLM vs K3 训练与验证差异</h2>
+<p style="color:var(--muted);margin-bottom:16px">技术读者可展开,不影响理解"为什么上下文减小"。</p>
+
+<details>
+  <summary>🔍 GLM-5.2 权重共享机制</summary>
+  <h3 style="margin-top:16px">训练计算图(3 层展开,权重绑定)</h3>
+  <div class="code" style="display:block;padding:12px;line-height:1.8">
+token → [主干 N 层] → h<br>
+&nbsp;&nbsp;└→ [MTP·W] → t+1<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└→ [MTP·W] → t+2<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└→ [MTP·W] → t+3<br>
+<span style="color:var(--muted)">↑ 同一份权重 W,迭代展开 3 次</span>
+  </div>
+  <p style="margin-top:12px"><b>优势</b>:省参数(只多 1 层),但接受率高(2.76 > DeepSeek-V3 的 2.55)</p>
+</details>
+
+<details style="margin-top:16px">
+  <summary>🔍 Kimi K3 两阶段训练</summary>
+  <h3 style="margin-top:16px">阶段 1:预训练 MTP</h3>
+  <p>在全量语料上,用 shifted target 训练(标准 next-token 预测)</p>
+  <h3>阶段 2:后训练蒸馏</h3>
+  <p>冻结主干,只调 Draft 层。展开 7 步模拟推理:</p>
+  <div class="code" style="display:block;padding:12px;line-height:1.8">
+step1: 吃主干第 1/4/末层特征(多层级融合)<br>
+step2~7: 吃 draft 自己上一步输出<br>
+<br>
+损失 = −log Σ_v min(p_v, q_v)<br>
+<span style="color:var(--muted)">↑ 直接对齐接收率,不用 KL 代理</span>
+  </div>
+  <p style="margin-top:12px"><b>优势</b>:多层级特征 + 直接优化接收率 → 更准,但参数开销略高</p>
+</details>
+
+<details style="margin-top:16px">
+  <summary>🔍 线性 vs 树形投机解码</summary>
+  <h3 style="margin-top:16px">线性(DeepSeek-V3 / GLM-5.2)</h3>
+  <p>每步只选 top-1,串行单链。加速比 ≈ accept length(约 2-3×)</p>
+  <h3>树形(K3 EAGLE-3)</h3>
+  <p>每步选 top-K=10,展开成分支树。每层 top-K 剪枝 + 全局 top-63 选优 + tree_mask 并行验证。</p>
+  <p><b>核心算法</b>(来自 <span class="code">SafeAILab/EAGLE</span> 仓库 <span class="code">cnets.py</span>):</p>
+  <ol style="margin-left:20px;margin-top:12px;line-height:1.8">
+    <li>第一层:top-K=10 个候选</li>
+    <li>逐层展开:每节点再出 10 个,累积分数剪枝保留 top-10</li>
+    <li>全局选 top-63 节点(整棵树)</li>
+    <li>构造 tree_mask:每个节点只 attend 祖先(分支间互不可见)</li>
+    <li>主干一次 forward 并行验证整棵树</li>
+  </ol>
+  <p style="margin-top:12px"><b>优势</b>:树形接受率更高,加速比可 > accept length。但草稿树 KV 槽位更多 → 上下文损耗更大。</p>
+</details>
+
+<!-- ============ 优化 ============ -->
+<h2 id="opt"><span class="num">5</span> 工程优化 — 如何缓解上下文损耗</h2>
+
+<div class="card">
+  <h3>1. Prefix caching</h3>
+  <p>多请求共享相同 prompt(系统 prompt / 文档前缀)时,缓存前缀 KV,减少重复计算和显存占用。</p>
+  
+  <h3>2. Chunked prefill</h3>
+  <p>把长 prompt 分块处理,降低单次 forward 峰值显存,平滑 KV pool 压力。</p>
+  
+  <h3>3. 动态调整 max_draft_len</h3>
+  <p>监控 accept rate:高则保持草稿步数,低则缩短(减少无效草稿的 KV 开销)。</p>
+  
+  <h3>4. 只对长上下文请求关闭 MTP</h3>
+  <p>路由策略:上下文 < 64K 时开 MTP(吞吐优先),≥ 64K 时关 MTP(上下文优先)。</p>
+  
+  <h3>5. CPU offload</h3>
+  <p>把冷 KV 卸载到 host DRAM,需要时异步加载。但要平衡 PCIe 带宽开销。</p>
+</div>
+
+<!-- ============ 结论 ============ -->
+<h2 id="conclusion"><span class="num">6</span> 核心结论</h2>
+
+<div class="card">
+  <ol style="line-height:2;padding-left:24px">
+    <li><b>权重不是大头</b>:MTP 层权重只多 1-1.3%,加载一次,静态</li>
+    <li><b>KV cache 才是大头</b>:每层每 token 都要存 K/V,MTP 层也是 Transformer,同样要缓存</li>
+    <li><b>草稿树要预占</b>:验证前必须分配槽位,即使后续释放,系统按最坏情况分配</li>
+    <li><b>上下文损耗公式</b>:主干 KV pool 从 100% 降到 70-80%,对应上下文从 128K 降到 90-110K</li>
+    <li><b>这是权衡</b>:用 15-25% 上下文换 2-3× 吞吐,智能体/短对话场景(上下文 < 64K)很划算</li>
+    <li><b>不是强制的</b>:可以按请求动态开关 MTP,长上下文请求关闭即可恢复到 Base 容量</li>
+  </ol>
+</div>
+
+<div class="callout info" style="margin-top:32px">
+  <b>一句话总结</b>:MTP 让上下文减小,不是因为"模型变大了",而是因为 <b>KV cache pool 被 MTP 层和草稿树瓜分了</b>。
+  权重增量很小(1%),但 KV cache 是按 token 累积的,这才是真正吃显存的地方。
+</div>
+
+<div style="margin-top:60px;padding-top:24px;border-top:1px solid var(--border);text-align:center;color:var(--muted);font-size:13px">
+  <p>参考:GLM-5.2 技术报告 · DeepSeek-V3 论文 · EAGLE-3 仓库(<code>SafeAILab/EAGLE</code>)</p>
+  <p style="margin-top:8px"><a href="/" style="color:var(--blue);text-decoration:none">← 返回首页</a></p>
+</div>
+
+</div>
+</body>
+</html>

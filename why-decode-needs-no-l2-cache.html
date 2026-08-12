@@ -297,6 +297,12 @@
   </div>
 </header>
 
+<div class="background">
+  <h3>PD 分离基础</h3>
+  <p>LLM 推理的一次请求分两阶段：<strong>prefill</strong>（处理整段输入 prompt，算出 KV cache，计算重、延迟高）和 <strong>decode</strong>（逐个生成输出 token，每步都要读全部历史 KV，计算轻、对延迟敏感）。传统单实例同时做两件事，要按更苛刻的那个分配显存，且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。</p>
+  <p><strong>PD 分离（Prefill-Decode Disaggregation）</strong>把这两阶段拆到不同实例上：prefill 实例专心算 prompt，算完把 KV 通过 RDMA 传给 decode 实例；decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。</p>
+</div>
+
 <div class="callout-summary">
   <h3>核心结论</h3>
   <div class="point">
@@ -313,26 +319,20 @@
   </div>
 </div>
 
-<div class="background">
-  <h3>PD 分离基础</h3>
-  <p>LLM 推理的一次请求分两阶段：<strong>prefill</strong>（处理整段输入 prompt，算出 KV cache，计算重、延迟高）和 <strong>decode</strong>（逐个生成输出 token，每步都要读全部历史 KV，计算轻、对延迟敏感）。传统单实例同时做两件事，要按更苛刻的那个分配显存，且 prefill 的长 prompt 计算会阻塞正在 decode 的请求。</p>
-  <p><strong>PD 分离（Prefill-Decode Disaggregation）</strong>把这两阶段拆到不同实例上：prefill 实例专心算 prompt，算完把 KV 通过 RDMA 传给 decode 实例；decode 实例只负责逐 token 生成。两边各自独立扩缩容、各自管理显存。</p>
-</div>
-
 <div class="toc">
   <h3>目录</h3>
   <ol>
-    <li><a href="#s1">先把 cache 结构搞清楚</a></li>
+    <li><a href="#s1">HiCache 三层架构</a></li>
     <li><a href="#s2">两条路径的源码实现</a></li>
     <li><a href="#s3">带宽对比：8×IB 聚合下的实际取舍</a></li>
     <li><a href="#s4">DecodeKVCacheOffloadManager 的完整机制</a></li>
     <li><a href="#s5">接收侧：路径 B 的 restore 状态机</a></li>
     <li><a href="#s6">整个流程的闭环</a></li>
-    <li><a href="#s7">那为什么这套部署 decode 没开</a></li>
+    <li><a href="#s7">部署决策：为什么 decode 没开二级缓存</a></li>
   </ol>
 </div>
 
-<h2 class="anchor-target" id="s1">一、先把 cache 结构搞清楚</h2>
+<h2 class="anchor-target" id="s1">HiCache 三层架构</h2>
 
 <h3>HiCache 是三层结构</h3>
 <p>部署脚本里 prefill 的配置用 NVMe 文件做 L3：</p>
@@ -369,7 +369,7 @@ self.cache_controller = HiCacheController(
 <p>L2 默认是 host DRAM，NVMe 只是 L3 选项之一。vLLM 也有类似设计（<code>--cpu-offload-gb</code>、<code>--kv_offloading_backend native</code>）。</p>
 </blockquote>
 
-<h2 class="anchor-target" id="s2">二、两条路径的源码实现</h2>
+<h2 class="anchor-target" id="s2">两条路径的源码实现</h2>
 
 <p>定义要对比的两条路径：</p>
 <ul>
@@ -439,7 +439,7 @@ __builtin_nontemporal_store(tmp, dst + j);</code></pre>
 <p><strong>源码层面的结构性事实（可靠）</strong>：路径 B 有三个机制优势 —— 无 gather/scatter、专用流不抢 SM、layer-wise overlap 隐藏延迟。</p>
 </blockquote>
 
-<h2 class="anchor-target" id="s3">三、带宽对比：8×IB 聚合下的实际取舍</h2>
+<h2 class="anchor-target" id="s3">带宽对比：8×IB 聚合下的实际取舍</h2>
 
 <p>PD 分离的 KV 传输不是走单条 IB 链路。开启 <code>SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER</code> 后，8 个 CP rank 并行传输，路径 A 的聚合带宽远高于路径 B。</p>
 <p><strong>源码确认多卡并行</strong>：</p>
@@ -475,7 +475,7 @@ self.enable_all_cp_ranks_for_transfer = (
 <p>具体在什么消息大小下路径 A/B 谁快，<strong>无法仅凭源码断言</strong>，需要实测。</p>
 </blockquote>
 
-<h2 class="anchor-target" id="s4">四、DecodeKVCacheOffloadManager 的完整机制</h2>
+<h2 class="anchor-target" id="s4">DecodeKVCacheOffloadManager 的完整机制</h2>
 
 <p>这是 decode 侧独有的组件，只在 <code>--disaggregation-decode-enable-offload-kvcache</code> 开启时创建。源码：<code>disaggregation/decode_kvcache_offload_manager.py</code>（352 行）。</p>
 
@@ -577,7 +577,7 @@ backup thread:            ──[host→NVMe A]──[host→NVMe B]──[host�
 </ul>
 <p>所以 offload 的 DMA 延迟被藏在 decode forward 计算里。</p>
 
-<h2 class="anchor-target" id="s5">五、接收侧：路径 B 的 restore 状态机</h2>
+<h2 class="anchor-target" id="s5">接收侧：路径 B 的 restore 状态机</h2>
 
 <p>下个请求进 decode 时，如何走路径 B 取回缓存的前缀 KV。源码：<code>disaggregation/decode_hicache_mixin.py</code>。</p>
 
@@ -623,7 +623,7 @@ consumer_index = self.tree_cache.ready_to_load_host_cache()</code></pre>
         return poll</code></pre>
 <p><strong>关键</strong>：路径 A 和路径 B 是并行的 —— RDMA 传差量的同时，L2/L3 restore 取命中部分。两者都 READY 才算完成。</p>
 
-<h2 class="anchor-target" id="s6">六、整个流程的闭环</h2>
+<h2 class="anchor-target" id="s6">整个流程的闭环</h2>
 
 <p>把写回侧和接收侧合起来看，就是"减少从 prefill 传输"的完整闭环：</p>
 <div class="flow-diagram">请求 1 进入 decode
