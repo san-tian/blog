@@ -115,6 +115,19 @@
     </div>
   </a>
 
+  <a class="post" href="glm52-dcp-config-draft.md">
+    <div class="title">[DRAFT] GLM-5.2 等大模型的 DCP 配置策略</div>
+    <div class="desc">GLM-5.2 最大尺寸能否开 DCP 2/4/8？答案取决于模型 KV 头数和 TP 并行度。分析不同 KV 头数（8/16/32）下各 TP 规模的 DCP 上限，含硬件选型（MI300X vs B200）、判断流程、实际案例与决策树。标注需实测确认的推测内容。</div>
+    <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
+      <span class="tag">DCP</span>
+      <span class="tag">GLM-5.2</span>
+      <span class="tag">张量并行</span>
+      <span class="tag">配置策略</span>
+      <span class="tag">DRAFT</span>
+    </div>
+  </a>
+
   <a class="post" href="mtp-kv-cache-viz.html">
     <div class="title">MTP 为什么会让上下文减小？权重结构与 KV cache 开销图解（GLM-5.2 vs Kimi K3）</div>
     <div class="desc">带完整 SVG 图解 + EAGLE-3 核心代码引用（cnets.py topK_genrate）：MTP 权重只是"多 1 层"，但 KV cache 才是大头 —— 从模型结构、草稿树算法、显存公式到工程优化五层展开，回答"为什么加了 MTP 上下文就变小"。</div>
