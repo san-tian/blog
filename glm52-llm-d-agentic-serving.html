@@ -251,6 +251,33 @@ MLA 下的 TP=8 (不可分片):
 <li><strong>MoE 部分</strong>：专家并行（EP MoE）</li>
 </ul>
 
+
+
+<h4>为什么需要 Wide-EP：从模型权重说起</h4>
+
+<p>要理解 Wide-EP 的作用，先看 GLM-5.2 一个 GPU 上显存里都有什么：</p>
+
+<table>
+<tr><th>组件</th><th>单 GPU 占用（Wide-EP / DEP16）</th><th>占比</th></tr>
+<tr><td>专家权重（Expert Weights）</td><td>~65 GiB</td><td>~57%</td></tr>
+<tr><td>共享部分（MLA 注意力 + 路由 + LN + 其他）</td><td>~50 GiB</td><td>~43%</td></tr>
+<tr><td><strong>模型权重合计</strong></td><td><strong>~115 GiB</strong></td><td><strong>100%</strong></td></tr>
+</table>
+
+<p><strong>专家权重是绝对大头</strong> —— 占了一半以上。而且这部分的容量在 TP=8 下还会继续增长：每个 rank 要承担 ~89.5 GiB 的专家权重（因为全部专家都需要存一份），挤压本就不宽裕的 KV 空间。</p>
+
+<p>更糟的是，<strong>专家权重不会被分摊</strong> —— TP=8 把 MLA 注意力按头分给 8 个 rank，但所有专家都还在每个 rank 上（因为每个 token 都要访问任意专家）。结果就是：</p>
+
+<ul>
+<li><strong>注意力部分</strong>：TP=8 能省 7/8 的注意力显存</li>
+<li><strong>MoE 部分</strong>：TP=8 完全没省 —— 所有 rank 都得持有完整专家集合</li>
+</ul>
+
+<p>也就是说，<strong>TP=8 优化的是占 43% 的那部分（共享部分），而占 57% 的专家部分纹丝不动</strong>。</p>
+
+<p>Wide-EP 的解法是<strong>让专家部分也参与并行</strong>：把 256 个专家分散到 16 个 rank 上，每个 rank 只持有 16 个（约 65 GiB / 16 ≈ 4 GiB）。这部分省下的显存可以全部留给 KV。</p>
+
+
 <h4>3.1 数据并行注意力：不复制 KV</h4>
 <p>在数据并行注意力下：</p>
 <ul>
@@ -494,18 +521,6 @@ def layer_forward(tokens, position_ids):
 <li>自建 <code>2P2D</code> 的输入成本是 Z.ai 价的 3.5%、Z.ai 缓存输入价的 20%。</li>
 </ul>
 <p>需要注意的是：这些数字<strong>仅覆盖 GPU 租赁</strong>，不含存储、出口带宽、工程、运维、税费；且假设集群 24/7 满载运行，利用率越低，等效成本反比上升。P/D 分池的成本拆分将每个池的成本分配给它处理的 token，改变拆分方式会改变两列数字，但不影响总集群成本。</p>
-
-<h2>经验法则：为智能体负载调参</h2>
-<p>把全文的发现凝练为几条工程经验：</p>
-<ol>
-<li><strong>KV 容量是主要部署约束</strong>。MLA + Wide-EP 是基础，没有它们任何长上下文服务都不可行。</li>
-<li><strong>HBM 装满前不要急着加 CPU 卸载</strong>；但一旦预见到峰值会超 HBM，CPU 卸载几乎是必选项。</li>
-<li><strong>Prefill 与 Decode 必须分池</strong>。它们的工作节奏、瓶颈、扩缩容参数都不同 —— 把它们绑在一起注定取次优解。</li>
-<li><strong>MTP 是性价比最高的 decode 加速</strong>。在 decode batch 受长上下文限制的场景下，它能 8× 并发。</li>
-<li><strong>路由的复用率上限是"工作负载的可复用前缀占比"</strong>。当上限达到 93.9% 时，即使把路由器做到极致也只到 91% —— 不要再为剩余几个百分点调路由。</li>
-<li><strong>容量规划要看"瓶颈在哪里"</strong>，而不是看"配置是否对称"。<code>3P1D</code> 与 <code>2P2D</code> 在同 64 GPU 下输出仅差 8%，但它们的延迟画像和恢复流量完全不同。</li>
-</ol>
-
 <h2>下一步</h2>
 <p>llm-d 团队计划：对比 P/D 与配对的聚合拓扑、在高并发下测试更宽的 decode 池、并验证 MTP 下的工具调用。Agentic Inference SIG 在 llm-d Slack 的 <a href="https://llm-d.slack.com/archives/C0ALHNZJCFJ">#sig-agentic-inference</a> 频道公开推进这项工作，欢迎带上你的追踪数据参与。</p>
 <p>完整的部署配置、可组合的 MTP/CPU 卸载/上下文长度组件，见 <a href="https://github.com/llm-d/llm-d/blob/main/guides/agentic-serving/glm-5-2-h200.md">GLM-5.2 H200 配置指南</a>。</p>
