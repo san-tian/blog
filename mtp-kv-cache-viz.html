@@ -361,7 +361,7 @@ IndexShare+KV-Share 使 7 步 KV 布局一致
 <strong>为什么第二阶段必要：</strong>只做 teacher forcing 训练的 drafter，在推理时会遇到训练时没见过的输入（自己的错误输出），越往后越偏，accept rate 掉得很快。展开训练把这个分布偏移提前暴露给模型。
 </div>
 
-<p>GLM 系列走的是“权重绑定”的路线。GLM-5 在 1 层 MTP 的前提下训练时展开 3 步、三步共用同一份权重，参数只多 1.3%，accept length 2.76（高于 DeepSeek-V3.2 的 2.55）。GLM-5.2 进一步推广到 <strong>7 步 MTP</strong>，但不是各步独立，而是用 IndexShare（indexer 只算一次，后续步复用 top-k 索引）和 KV-Share（后续步的 KV 只来自主干 hidden state，不来自 MTP 自身）实现跨步共享 KV 布局，这样训练和推理的输入分布一致；再加上 reject sampling + 端到端 TV loss，accept length 推到 5.47（+20%）。</p>
+<p>GLM 系列走的是”权重绑定”的路线。GLM-5 在 1 层 MTP 的前提下训练时展开 3 步、三步共用同一份权重，参数只多 1.3%，accept length <sup>[1]</sup>2.76（高于 DeepSeek-V3.2 的 2.55）。GLM-5.2 进一步推广到 <strong>7 步 MTP</strong>，但不是各步独立，而是用 IndexShare（indexer 只算一次，后续步复用 top-k 索引）和 KV-Share（后续步的 KV 只来自主干 hidden state，不来自 MTP 自身）实现跨步共享 KV 布局，这样训练和推理的输入分布一致；再加上 reject sampling + 端到端 TV loss，accept length <sup>[2]</sup>提升达 20%。</p>
 
 <h3>1.4 草稿怎么验证</h3>
 
@@ -522,7 +522,7 @@ IndexShare+KV-Share 使 7 步 KV 布局一致
 <!-- 接受 → 输出 -->
 <div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">接受判定<br>→ 输出</div>
 <div class="fwd-cell output">1 token<br><span class="em">无加速</span></div>
-<div class="fwd-cell output">接受前缀 + 1 免费 token<br><span class="em">accept ≈ 5.47（7 步）</span></div>
+<div class="fwd-cell output">接受前缀 + 1 免费 token<br><span class="em">7 步线性草稿链</span></div>
 <div class="fwd-cell output">接受最长路径<br><span class="em">树形接受率 &gt; 线性</span></div>
 
 </div>
@@ -594,7 +594,7 @@ EAGLE-3：top-63 个节点（树形）<br>
       <a href="https://arxiv.org/abs/2602.15763" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2602.15763</a>
     </li>
     <li>
-      <strong>GLM-5.2 MTP 设计（官方博客）</strong> — <strong>7 步 MTP</strong>，用 IndexShare + KV-Share 实现跨步 KV/索引共享；reject sampling + 端到端 TV loss。accept length 5.47（比基线 +20%）。<br>
+      <strong>GLM-5.2 MTP 设计（官方博客）</strong> — <strong>7 步 MTP</strong>，用 IndexShare + KV-Share 实现跨步 KV/索引共享；reject sampling + 端到端 TV loss。官方声称 accept length 提升达 <sup>[2]</sup>20%（相对 GLM-5 基线）。<br>
       <a href="https://z.ai/blog/glm-5.2" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">z.ai/blog/glm-5.2</a> ·
       <a href="https://huggingface.co/blog/zai-org/glm-52-blog" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">huggingface.co/blog/zai-org/glm-52-blog</a>
     </li>
@@ -609,13 +609,13 @@ EAGLE-3：top-63 个节点（树形）<br>
       代码: <a href="https://github.com/SafeAILab/EAGLE" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">github.com/SafeAILab/EAGLE</a>
     </li>
     <li>
-      <strong>Kimi K3 技术报告</strong> — 2.8T MoE (104B activated)，16/896 experts，1M context。论文未详细描述自带的 draft model，但默认 inference 配置为 <code>num_speculative_tokens=7</code>。<br>
+      <strong>Kimi K3 技术报告</strong> — <sup>[3]</sup>2.8T MoE (104B activated)，16/896 experts，1M context。论文未详细描述自带的 draft model，但默认 inference 配置为 <code>num_speculative_tokens=7</code>。<br>
       <a href="https://arxiv.org/abs/2607.24653" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2607.24653</a>
     </li>
     <li>
-      <strong>DSpark for Kimi K3（社区）</strong> — Inferact 训练的 block-diffusion style speculator，MLA-native 注意力对齐 KV 布局。accept rate ~4.73（coding） / 2.61（creative）。<br>
-      <a href="https://vllm.ai/blog/2026-07-27-k3" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">vllm.ai/blog/2026-07-27-k3</a> ·
-      <a href="https://huggingface.co/Inferact/Kimi-K3-DSpark" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">huggingface.co/Inferact/Kimi-K3-DSpark</a>
+      <strong>DSpark（社区实现）</strong> — 半自回归 block drafter + 置信度调度验证。Hugging Face 社区训练的 GLM-5.2 DSpark draft model 报告平均 accept length <sup>[4]</sup>≈4.6，math/code 场景可达 7。<br>
+      <a href="https://arxiv.org/abs/2607.05147" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2607.05147</a>（DSpark 论文） ·
+      <a href="https://huggingface.co/siro1/glm-5.2-dspark-spec-v1" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">huggingface.co/siro1/glm-5.2-dspark-spec-v1</a>
     </li>
     <li>
       <strong>投机解码分布等价性</strong> — Leviathan, Kalman, Matias 提出的拒绝采样方案，证明投机解码的输出分布与主干采样等价。<br>
@@ -627,7 +627,13 @@ EAGLE-3：top-63 个节点（树形）<br>
       代码: <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">github.com/vllm-project/vllm</a>
     </li>
   </ul>
-  <p style="margin-top:14px"><strong>关于本文的示例与限定：</strong>文章以 GLM-5.2（线性 MTP + IndexShare/KV-Share）与 EAGLE-3（树形 + 多层级特征融合）作为线性与树形投机解码的代表讲 KV 开销；GLM-5 是 GLM-5.2 的上一个版本（3 步权重共享，accept 2.76）。文中所有定量数字来自参考节的公开论文与官方博客。<strong>Kimi K3 作为当下 MTP 部署较热的模型一并列出供参考：其官方论文未详述自带 draft model，社区 Inferact 训练的 DSpark 是 block-diffusion 推测。</strong></p>
+  <p style="margin-top:14px"><strong>关于本文的示例与限定：</strong>文章以 GLM-5.2（线性 MTP + IndexShare/KV-Share）与 EAGLE-3（树形 + 多层级特征融合）作为线性与树形投机解码的代表讲 KV 开销；GLM-5 是 GLM-5.2 的上一个版本（3 步权重共享，accept <sup>[1]</sup>2.76）。文中所有定量数字来自参考节的公开论文与官方博客。<strong>Kimi K3 作为当下 MTP 部署较热的模型一并列出供参考：其官方论文未详述自带 draft model。</strong></p>
+  <p style="margin-top:10px;font-size:12.5px;color:var(--muted)"><strong>引用标注：</strong><br>
+  [1] GLM-5 技术报告 Table 2，arXiv:2602.15763<br>
+  [2] GLM-5.2 官方博客声称"increasing the acceptance length by up to 20%"，z.ai/blog/glm-5.2<br>
+  [3] Kimi K3 技术报告 arXiv:2607.24653<br>
+  [4] Hugging Face 社区 DSpark draft model，huggingface.co/siro1/glm-5.2-dspark-spec-v1
+  </p>
 </div>
 
 </div>
