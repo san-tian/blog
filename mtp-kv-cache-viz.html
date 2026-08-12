@@ -144,97 +144,6 @@
 
 <p>关键点是 <strong>它自带 attention</strong>。既然有 attention，就要存 K/V，就要占 KV cache——这正是"MTP 层也吃上下文"的结构性原因。而 LM head 一般与主干共享权重，所以参数增量主要来自那一层 block，量级是 <code>1/N</code>（N 为主干层数），对 80–100 层的模型就是 1% 上下。</p>
 
-<h3>1.3 它怎么训练出来</h3>
-
-<p>核心思路：<strong>冻结或弱扰动主干，只让 MTP 层学会"接着主干往下猜"</strong>。以 Kimi K3 的 Draft 层为例，是两阶段：</p>
-
-<div class="card">
-<h4>阶段一：预训练（学基本的多步预测能力）</h4>
-<ul>
-  <li>数据：常规预训练语料</li>
-  <li>目标：shifted target，即位置 t 的 MTP 输出去拟合真实的 t+1（和普通 LM 一样的交叉熵）</li>
-  <li>此时还没有"自己吃自己输出"的情形，训练是 teacher forcing 的</li>
-</ul>
-
-<h4>阶段二：后训练蒸馏（对齐真实推理时的分布）</h4>
-<ul>
-  <li><strong>冻主干</strong>，只更新 Draft 层，避免拖坏主干质量</li>
-  <li><strong>展开 k 步模拟推理</strong>（K3 为 7 步）：第 1 步吃主干的多层特征（浅层/中层/末层拼接），第 2 步起吃 Draft 自己上一步的输出——刻意制造和推理一致的误差累积</li>
-  <li><strong>损失直接对齐接收率</strong>：<code>L = −log Σ_v min(p_v, q_v)</code>，其中 p 是主干分布、q 是 Draft 分布。<code>Σ_v min(p_v, q_v)</code> 正是拒绝采样下这一步被接受的概率，所以这是在直接优化"会被主干接受多少"，而不是用 KL 之类的代理目标</li>
-</ul>
-</div>
-
-<div class="note">
-<strong>为什么第二阶段必要：</strong>只做 teacher forcing 训练的 drafter，在推理时会遇到训练时没见过的输入（自己的错误输出），越往后越偏，accept rate 掉得很快。展开训练把这个分布偏移提前暴露给模型。
-</div>
-
-<p>GLM-5.2 走的是更省的路线：<strong>只有 1 层 MTP，训练时展开 3 步但三步共用同一份权重</strong>（权重绑定）。代价是三步能力不能各自特化，好处是参数只多 1.3%，且实测 accept length 达到 2.76，高于 DeepSeek-V3 的 2.55。</p>
-
-<h3>1.4 草稿怎么验证</h3>
-
-<p>验证由<strong>主干</strong>完成，一次 forward 覆盖全部草稿位置，逐位置判定接受还是拒绝。</p>
-
-<div class="card">
-<ol>
-  <li><strong>拼接输入。</strong>把已确认的上下文 + k 个草稿 token 一起送进主干，构成长度 k+1 的一段待验证序列。</li>
-  <li><strong>一次并行 forward。</strong>因果 mask 保证位置 i 只能看到 i 之前的内容，于是一次前向就同时得到"接受了前 0 个、前 1 个 … 前 k 个草稿"各种情形下的主干分布 p。<em>这一步必须为 k 个位置准备 KV 槽位。</em></li>
-  <li><strong>逐位置判定。</strong>贪心解码下就是比对：主干 argmax 是否等于草稿 token；采样解码下用拒绝采样，以 <code>min(1, p_v/q_v)</code> 接受，拒绝时从修正分布 <code>norm(max(0, p−q))</code> 重采一个 token。</li>
-  <li><strong>截断。</strong>遇到第一个被拒绝的位置就停，保留它之前的全部草稿，再补上该位置由主干（或修正分布）给出的正确 token。所以<strong>每轮至少产出 1 个 token</strong>，不会空转。</li>
-  <li><strong>回收 KV。</strong>被接受位置的主干 KV 转为常驻，被拒绝位置的 KV 丢弃，MTP 层的草稿 KV 全部释放。</li>
-</ol>
-</div>
-
-<div class="warning">
-<strong>正确性保证：</strong>采样场景下用的拒绝采样方案（Leviathan 等提出）可以证明输出分布与直接从主干采样完全一致。<strong>投机解码不改变模型输出分布，只改变吐 token 的节奏。</strong>贪心场景则直接等价于主干贪心解码的结果。
-</div>
-
-<div class="warning">
-<strong>但显存要按最坏情况留：</strong>验证发生在"知道接受几个"之前，所以 k 个草稿位置的 KV 槽位必须先分配好。accept rate 再高也不能少留，树形投机要留的是整棵树的节点数。这就是上下文被吃掉的直接机制。
-</div>
-
-<h2>1. MTP Layer 从哪来、长什么样、怎么训出来、怎么验证</h2>
-
-<p>这一节回答四个问题：MTP Layer 的<strong>来源</strong>、<strong>结构</strong>、<strong>训练方式</strong>、<strong>推理时的验证机制</strong>。</p>
-
-<h3>1.1 来源：它是主干之外新增的一两层，权重从主干拷贝初始化</h3>
-
-<p>MTP Layer 不是从主干里"抠"出来的某一层，也不是独立的小模型，而是<strong>挂在主干最后一层之后的额外 Transformer block</strong>，和 LM Head 共享词表投影。</p>
-
-<table>
-  <thead>
-    <tr><th style="width:18%">模型</th><th style="width:24%">MTP 部分的来源</th><th style="width:32%">初始化</th><th style="width:26%">与主干的关系</th></tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><strong>DeepSeek-V3</strong></td>
-      <td>1 个 MTP module（技术报告中 D=1）</td>
-      <td>新增参数，随主干一起从头训练</td>
-      <td>共享 embedding 和 output head，只有 block 独立</td>
-    </tr>
-    <tr>
-      <td><strong>GLM-5.2</strong></td>
-      <td>1 层 MTP block</td>
-      <td>新增 1 层，训练时展开多步但<strong>权重绑定</strong></td>
-      <td>共享 embedding / output head，读主干末层 hidden state</td>
-    </tr>
-    <tr>
-      <td><strong>Kimi K3</strong></td>
-      <td>1 层 Draft block</td>
-      <td>常见做法是<strong>拷贝一个主干 block 的权重做初始化</strong>，再单独训</td>
-      <td>读主干<strong>多层</strong>特征（EAGLE-3 风格），主干冻结</td>
-    </tr>
-  </tbody>
-</table>
-
-<p>关键点：MTP Layer 的<strong>结构与主干层完全同构</strong>（同样的 attention + FFN + norm，同样的 hidden size 和 head 数），所以</p>
-<ul>
-  <li>参数量 ≈ 主干单层参数量，对 80-90 层的模型就是 ~1%</li>
-  <li><strong>推理时它同样要写 KV cache</strong> — 这是上下文变短的第一个来源</li>
-  <li>它能直接吃主干的 hidden state，不需要额外的对齐层</li>
-</ul>
-
-<h3>1.2 结构：主干层 vs MTP 层 vs Draft 层</h3>
-
 <div class="card">
 <div class="detail-compare">
 
@@ -328,69 +237,52 @@
 <strong>三者同构，差别只在输入和展开方式：</strong>主干层吃上一层输出；MTP 层吃主干末层 hidden state，串行迭代；Draft 层吃主干多层特征，树形展开。三者都是完整的 attention 层，<strong>都要写 KV</strong>。
 </div>
 
-<h3>1.3 训练：三种典型做法</h3>
+<h3>1.3 它怎么训练出来</h3>
 
-<h4>做法 A：与主干联合训练（DeepSeek-V3 风格）</h4>
-<p>MTP module 和主干一起从头训。第 i 个 module 预测 t+1+i，损失是各深度交叉熵的加权平均，反传时梯度也会流回主干，起到额外正则/密集监督的作用。推理时可以丢掉 MTP module（当纯训练技巧），也可以留着做投机解码。</p>
+<p>核心思路：<strong>冻结或弱扰动主干，只让 MTP 层学会"接着主干往下猜"</strong>。以 Kimi K3 的 Draft 层为例，是两阶段：</p>
 
-<h4>做法 B：权重共享 + 多步展开（GLM-5.2 风格）</h4>
-<p>只加 1 层，但训练时按推理的方式展开若干步：第 1 步吃主干 hidden state，第 2 步开始吃"自己上一步预测出来的 token 的 embedding"。三步用<strong>同一份权重</strong>，损失是三步 next-token 交叉熵之和。</p>
-<p>这样做的意义是<strong>训练和推理的输入分布一致</strong>：推理时第 2、3 步喂给 MTP 的都是它自己的输出，如果训练时只用 teacher forcing 喂真值，推理就会遇到 exposure bias，越往后草稿越离谱。</p>
+<div class="card">
+<h4>阶段一：预训练（学基本的多步预测能力）</h4>
+<ul>
+  <li>数据：常规预训练语料</li>
+  <li>目标：shifted target，即位置 t 的 MTP 输出去拟合真实的 t+1（和普通 LM 一样的交叉熵）</li>
+  <li>此时还没有"自己吃自己输出"的情形，训练是 teacher forcing 的</li>
+</ul>
 
-<h4>做法 C：冻结主干、蒸馏 Draft（EAGLE-3 / Kimi K3 风格）</h4>
-<p>分两步：先在语料上按标准 next-token 预训练 Draft 层；再<strong>冻结主干</strong>，只微调 Draft，训练时展开到推理用的步数（K3 是 7 步），第 1 步吃主干多层特征，后续步吃自己的输出。</p>
-<p>关键在损失函数。目标不是"预测对下一个词"，而是"<strong>让草稿分布尽量被主干接受</strong>"。EAGLE-3 直接优化与接受率对应的重叠量：</p>
-<pre>L = − log Σ<sub>v</sub> min( p<sub>v</sub>, q<sub>v</sub> )
-
-p = 主干（target）分布      q = draft 分布
-Σ<sub>v</sub> min(p_v, q_v) = 两个分布的重叠面积
-                    = 投机采样下单步的接受概率</pre>
-<p>相比用 KL 当代理，这个损失和推理时真正关心的指标（accept rate）是同一个量，所以同样参数量下草稿命中率更高。</p>
+<h4>阶段二：后训练蒸馏（对齐真实推理时的分布）</h4>
+<ul>
+  <li><strong>冻主干</strong>，只更新 Draft 层，避免拖坏主干质量</li>
+  <li><strong>展开 k 步模拟推理</strong>（K3 为 7 步）：第 1 步吃主干的多层特征（浅层/中层/末层拼接），第 2 步起吃 Draft 自己上一步的输出——刻意制造和推理一致的误差累积</li>
+  <li><strong>损失直接对齐接收率</strong>：<code>L = −log Σ_v min(p_v, q_v)</code>，其中 p 是主干分布、q 是 Draft 分布。<code>Σ_v min(p_v, q_v)</code> 正是拒绝采样下这一步被接受的概率，所以这是在直接优化"会被主干接受多少"，而不是用 KL 之类的代理目标</li>
+</ul>
+</div>
 
 <div class="note">
-<strong>为什么必须多步展开训练：</strong>草稿链的误差会累积。只训第 1 步的话，第 2 步拿到的是自己产出的、带噪声的 token，分布和训练时见过的完全不同。展开训练就是让 Draft 提前适应"吃自己的输出"这件事。
+<strong>为什么第二阶段必要：</strong>只做 teacher forcing 训练的 drafter，在推理时会遇到训练时没见过的输入（自己的错误输出），越往后越偏，accept rate 掉得很快。展开训练把这个分布偏移提前暴露给模型。
 </div>
 
-<h3>1.4 验证：主干如何一次 forward 判掉整批草稿</h3>
+<p>GLM-5.2 走的是更省的路线：<strong>只有 1 层 MTP，训练时展开 3 步但三步共用同一份权重</strong>（权重绑定）。代价是三步能力不能各自特化，好处是参数只多 1.3%，且实测 accept length 达到 2.76，高于 DeepSeek-V3 的 2.55。</p>
 
-<p>草稿必须验证，否则输出质量就不等价于主干。验证的核心技巧是<strong>把 k 个草稿 token 拼成一个"伪 batch 的序列"，让主干一次 forward 把它们的 logits 全算出来</strong>。</p>
+<h3>1.4 草稿怎么验证</h3>
 
-<div class="card">
-<h4>线性链验证（GLM-5.2，k=3）</h4>
-<pre>已确认前缀:  ... x<sub>t</sub>
-草稿:        d<sub>1</sub> d<sub>2</sub> d<sub>3</sub>
-
-主干输入序列: [x<sub>t</sub>, d<sub>1</sub>, d<sub>2</sub>, d<sub>3</sub>]   ← 一次 forward
-主干输出:     p(·|x<sub>t</sub>), p(·|x<sub>t</sub>d<sub>1</sub>), p(·|x<sub>t</sub>d<sub>1</sub>d<sub>2</sub>), p(·|x<sub>t</sub>d<sub>1</sub>d<sub>2</sub>d<sub>3</sub>)
-
-逐位判定（贪心情形）:
-  d<sub>1</sub> == argmax p(·|x<sub>t</sub>)?          → 接受，继续
-  d<sub>2</sub> == argmax p(·|x<sub>t</sub>d<sub>1</sub>)?        → 接受，继续
-  d<sub>3</sub> == argmax p(·|x<sub>t</sub>d<sub>1</sub>d<sub>2</sub>)?      → 拒绝，停
-
-结果: 接受 d<sub>1</sub> d<sub>2</sub>，并额外免费拿到 argmax p(·|x<sub>t</sub>d<sub>1</sub>d<sub>2</sub>) 作为下一个 token</pre>
-<p style="font-size:13px"><em>因为因果 mask 的存在，位置 i 只能看到自己之前的 token，所以一次 forward 就同时给出了"每个前缀下的下一步分布"。第一个被拒绝的位置之后的草稿全部作废。</em></p>
-</div>
+<p>验证由<strong>主干</strong>完成，一次 forward 覆盖全部草稿位置，逐位置判定接受还是拒绝。</p>
 
 <div class="card">
-<h4>树形验证（Kimi K3 / EAGLE-3）</h4>
-<p>树形草稿的多个分支互相排斥，不能简单当成一条序列。做法是构造 <code>tree_mask</code>：把整棵树的节点摊平进序列，但让每个节点<strong>只能 attend 到自己的祖先</strong>，兄弟分支彼此不可见。</p>
-<pre>       root
-      /    \
-    d<sub>1</sub>      d<sub>1</sub>'
-   /  \       \
- d<sub>2</sub>   d<sub>2</sub>'     d<sub>2</sub>''
-
-摊平: [d<sub>1</sub>, d<sub>1</sub>', d<sub>2</sub>, d<sub>2</sub>', d<sub>2</sub>'']
-mask: d<sub>2</sub> 只看 d<sub>1</sub>；d<sub>2</sub>'' 只看 d<sub>1</sub>'；d<sub>1</sub> 与 d<sub>1</sub>' 互不可见
-
-一次 forward → 拿到树上每个节点的下一步分布
-再沿树找出被接受的最长路径</pre>
-<p style="font-size:13px"><em>好处是同样一次主干 forward 覆盖了多条候选路径，命中长度的期望比单链更高；代价是要为<strong>整棵树的所有节点</strong>预留 KV 槽位，而不是只留 k 个。</em></p>
+<ol>
+  <li><strong>拼接输入。</strong>把已确认的上下文 + k 个草稿 token 一起送进主干，构成长度 k+1 的一段待验证序列。</li>
+  <li><strong>一次并行 forward。</strong>因果 mask 保证位置 i 只能看到 i 之前的内容，于是一次前向就同时得到"接受了前 0 个、前 1 个 … 前 k 个草稿"各种情形下的主干分布 p。<em>这一步必须为 k 个位置准备 KV 槽位。</em></li>
+  <li><strong>逐位置判定。</strong>贪心解码下就是比对：主干 argmax 是否等于草稿 token；采样解码下用拒绝采样，以 <code>min(1, p_v/q_v)</code> 接受，拒绝时从修正分布 <code>norm(max(0, p−q))</code> 重采一个 token。</li>
+  <li><strong>截断。</strong>遇到第一个被拒绝的位置就停，保留它之前的全部草稿，再补上该位置由主干（或修正分布）给出的正确 token。所以<strong>每轮至少产出 1 个 token</strong>，不会空转。</li>
+  <li><strong>回收 KV。</strong>被接受位置的主干 KV 转为常驻，被拒绝位置的 KV 丢弃，MTP 层的草稿 KV 全部释放。</li>
+</ol>
 </div>
 
 <div class="warning">
-<strong>验证阶段的显存是刚性的：</strong>主干 forward 之前就要为所有草稿位置（线性 k 个 / 树形整棵树）在每一层分配 KV 槽位。被拒绝的部分之后会回收，但<strong>峰值</strong>决定了 KV pool 要预留多少，也就决定了 <code>max_total_tokens</code> 能开多大。
+<strong>正确性保证：</strong>采样场景下用的拒绝采样方案（Leviathan 等提出）可以证明输出分布与直接从主干采样完全一致。<strong>投机解码不改变模型输出分布，只改变吐 token 的节奏。</strong>贪心场景则直接等价于主干贪心解码的结果。
+</div>
+
+<div class="warning">
+<strong>但显存要按最坏情况留：</strong>验证发生在"知道接受几个"之前，所以 k 个草稿位置的 KV 槽位必须先分配好。accept rate 再高也不能少留，树形投机要留的是整棵树的节点数。这就是上下文被吃掉的直接机制。
 </div>
 
 <h2>2. 显存里到底发生了什么</h2>
