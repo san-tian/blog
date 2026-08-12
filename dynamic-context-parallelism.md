@@ -1,157 +1,266 @@
-# DCP: 动态上下文并行 —— 破解长上下文训练的输入动态性难题
+# DCP 实测：消除张量并行下的 KV Cache 重复存储
 
 ## 核心问题
 
-长上下文训练面临**输入动态性**问题：序列长度和 token 关系在样本间存在巨大变异。现有的 Context Parallelism (CP) 方法采用静态配置，为所有 batch 使用固定的并行度和数据分区方案，导致：
+**DCP** 是 vLLM 的 `--decode-context-parallel-size` 参数的简称，全称 **Decode Context Parallel**（解码上下文并行）。它解决的是 GQA 模型在高张量并行度下的 **KV Cache 重复存储**问题。
 
-1. **序列长度差异**：训练数据中短序列远多于长序列（图 2 显示 LongAlign 和 LongDataCollection 数据集中，大部分序列长度 < 20K tokens，但也有 100K+ 的长序列）
-2. **注意力模式多样**：不同任务使用不同的注意力掩码（causal、shared question、lambda-shaped、block-wise 等，图 6）
+### 问题根源
 
-静态 CP 配置在处理这些动态输入时会产生：
-- **冗余通信**：短序列也按最长序列的通信模式传输 KV cache
-- **计算不均衡**：不同设备间的计算负载严重失衡（图 5c 显示长短序列混合时，某些设备空闲而其他设备过载）
+vLLM 官方文档的描述：
 
-以 8B GPT 模型在 EC2 p4d.24xlarge 集群（8 节点 × 8 GPUs）上训练为例，16-way CP 的通信开销占总迭代时间的 **36.7%**（图 1）。
+> When we continue to increase the tensor parallel size, the KV cache for each GPU will be **duplicated for `tp_size / H` times**. Of course, duplication is not good for efficiency. Then we need to add decode context parallel to further shard the KV cache along the **T dimension**.
 
-## DCP 方案
+其中 `H` 是 KV 头数，`T` 是序列维。
 
-DCP (Dynamic Context Parallelism) 通过**细粒度块级分区 + 动态映射**解决输入动态性问题。
+根源在于**切分维度不同**：
 
-### 核心设计
+- **常规张量并行**：沿注意力头维切分 KV，每张卡分到若干个 KV 头
+- **GQA 模型限制**：KV 头数由模型结构决定（通常只有 4 或 8 个）
+- **并行度超过头数时**：头数不足以分配，引擎只能让多张卡共用同一个头 → **重复存储产生**
 
-#### 1. 块级数据和计算分区
+**DCP 的解决方案**：改沿序列维切分，同一个 KV 头的不同 token 片段分给不同的 rank，每张卡只需保存 1/N，重复随之消除。
 
-将注意力计算的四个可并行维度（batch、head、SeqQ、SeqKV）划分为细粒度的块：
+这不是某一引擎的实现缺陷，而是**张量并行与 GQA 的结构性约束**。TensorRT-LLM 文档同样写明："if `num_heads` is less than `tensor_parallel_size`, the KV-cache is replicated on every GPU"。
 
-- **数据块（Data Block）**：Q、K、V、O 张量的连续切片
-  - Q、K、V 形状 [B, H, L, D]，按 batch 和 SeqLen 维度划分为 `H × B_b × B_q` 个 Q 块和 `B_b × B_kv` 个 KV 块
-  - 块大小是超参数（如 Q/KV 块 256 tokens）
+## 实测效果
 
-- **计算块（Computation Block）**：描述一对 Q 块和 KV 块之间的注意力计算
-  - 一个 Q_i 块和 KV_j 块的计算产生输出块 O_i
-  - 图 9 展示了不同注意力掩码下的计算块结构
+**实验环境**：
+- 硬件：8 × 昇腾 910B4-32GB
+- 模型：Qwen3.6-27B-w8a8
+- 框架：vllm-ascend v0.24.0
+- 张量并行度：TP8
 
-#### 2. 超图分区优化映射
-
-将块到设备的映射建模为**超图分区问题**（Hypergraph Partitioning）：
-
-- **顶点**：数据块（Q、KV、O）和计算块
-  - 顶点权重：数据块大小（bytes）+ 计算块 FLOPS
-- **超边**：连接一个计算块与其输入/输出数据块
-  - 超边权重：数据块大小（跨设备传输成本）
-
-优化目标（图 12）：
-```
-minimize Σ s_e(λ_e - 1)  # 跨设备通信量
-subject to:
-  w(P_i) ≤ [1+ε, 1] ⊙ w(N)/R  # 负载均衡约束
+模型配置（`config.json`）：
+```json
+{
+  "num_attention_heads": 24,
+  "num_hidden_layers": 64,
+  "num_key_value_heads": 4  // 决定是否触发复制的关键字段
+}
 ```
 
-使用层级超图分区：
-1. **机器级分区**：优先最小化跨机器通信（带宽低、延迟高）
-2. **设备级分区**：在每台机器内优化设备间通信
+TP8 > 4 个 KV 头，复制倍数 = 8 ÷ 4 = **2 倍**。
 
-采用 multi-level KaHyPar 等高效启发式算法求解（NP-hard 问题）。
+### 显存侧：无条件收益
 
-#### 3. 多路分治调度
+| 指标 | TP8 未开启 DCP | TP8 开启 DCP | 提升 |
+|---|---|---|---|
+| 每卡物理显存 | 20.54 GiB | 20.54 GiB | 无变化 |
+| 全机 KV 容量 | 1.32M tokens | 2.61M tokens | **1.98 倍** |
 
-计算和通信调度采用多路分治策略（Listing 3）：
+增量并非来自新增显存，而是**释放了原本用于存放重复数据的那一半**。
 
-1. 将每个设备的计算块按通信需求分为 T 个 division
-2. 第 1 个 division 优先调度最少通信的块（先执行不依赖远程数据的计算）
-3. 后续 division 按通信量递增调度
-4. 使用 fused kernel（Triton）执行每个 division 内的所有操作（attention + reduction + copy + comm launch），隐藏通信延迟
+精确值：1,318,741 → 2,612,705 tokens，比值 1.981。同配置换一次服务重启复现为 1,317,982，抖动仅 0.06%。
 
-### 系统架构（图 8）
+### 延迟侧：收益与代价方向相反
 
-- **Data Loader**：预取序列长度和掩码，触发 Planner
-- **Planner**：
-  - 为每个 batch 生成块（Block Generation）
-  - 超图分区求解最优映射（Placement w/ Hypergraph）
-  - 生成每设备执行计划（schedules with comm/comp blocks）
-- **Executor**：
-  - 块级缓冲区管理（local buffers，类型索引复用）
-  - 执行 DCP instructions（blockwise attention、reduction、copy、comm、wait）
-  - 使用 FlashAttention/Triton 实现高性能 kernel
+DCP 有两个效应，受不同变量支配：
 
-### 用户接口（Listing 2）
+- **收益**：TPOT（每 token 时间）下降，**随上下文长度增长**
+- **代价**：TTFT（首 token 时间）上升，**随并发增长**
+
+#### 每秒吐字速率（终端用户可感知指标）
+
+| 上下文长度 | 并发度 | 未开启 DCP | 开启 DCP | 提升 |
+|---|---|---|---|---|
+| 64K | 1 | - | - | **+16%** |
+| 128K | 1 | - | - | **+28%** |
+| 250K | 1 | - | - | **+45%** |
+| 250K | 2 | - | - | +31% |
+| 250K | 4 | - | - | +10% |
+
+规律：**上下文越长，DCP 提升越大；并发越高，提升幅度越小。**
+
+#### 首 Token 延迟增幅（代价）
+
+| 上下文长度 | 并发 1 | 并发 2 | 并发 4 |
+|---|---|---|---|
+| 64K | +3.2% | +9.8% | +21.4% |
+| 128K | +3.9% | +12.1% | +25.7% |
+| 250K | **+4.5%** | +14.9% | **+30.0%** |
+
+规律：**并发越高，首 token 延迟增幅越大。**
+
+#### 端到端时间（综合判断）
+
+折算公式：`ΔTTFT + ΔTPOT × 511`（输出 512 tokens）
+
+| 上下文 | 并发 | 端到端变化 | 是否值得开启 |
+|---|---|---|---|
+| 64K | 1 | −7.4% | ✅ 值得 |
+| 128K | 1 | −15.3% | ✅ 值得 |
+| 250K | 1 | −23.8% | ✅ 值得 |
+| 250K | 2 | −13.5% | ✅ 值得 |
+| 250K | 4 | **+2.9%** | ❌ 净亏损 |
+| 64K | 4 | **+7.9%** | ❌ 净亏损 |
+
+红色格为净亏损：并发 4 时 TTFT 代价升至 +21% 以上，足以抵消 TPOT 收益。用实测端到端延迟中位数核对：250K/并发 4 从 229.5s 升至 235.8s。
+
+## 开启判据
+
+### 何时应当开启
+
+**结论**：
+1. **显存紧张时**：直接开启（KV 容量翻倍）
+2. **显存充裕时**：
+   - ✅ 上下文 ≥ 128K **且** 并发 ≤ 2：开启
+   - ❌ 其余情形：不建议开启
+
+### 如何判断是否触发重复存储
+
+查看模型配置：
+```bash
+grep num_key_value_heads /path/to/model/config.json
+```
+
+与计划设置的张量并行度对照，**复制倍数 = TP ÷ KV头数**：
+
+| `num_key_value_heads` | TP2 | TP4 | TP8 | TP16 |
+|---|---|---|---|---|
+| 1 (MQA) | 2 | 4 | 8 | 16 |
+| 2 | 1✅ | 2 | 4 | 8 |
+| 4 (本文实测) | 1✅ | 1✅ | **2** | 4 |
+| 8 | 1✅ | 1✅ | 1✅ | 2 |
+| 16 | 1✅ | 1✅ | 1✅ | 1✅ |
+
+格内数值有两重含义：
+1. 每张卡需存放的 KV 份数
+2. `--decode-context-parallel-size` 可设的最大值
+
+**数值为 1（✅）表示分片干净、无冗余，此时无需开启。**
+
+### ⚠️ 不要与硬约束混淆
+
+两者都源于「头数除不尽」，但检查对象与后果完全不同：
+
+| 约束类型 | 检查对象 | 不满足时 |
+|---|---|---|
+| **硬约束** | `num_attention_heads`（Query 头数） | 直接抛 `ValueError`，服务无法启动 |
+| **软降级**（本文） | `num_key_value_heads`（KV 头数） | 静默复制，可运行但浪费显存 |
+
+常见的 `Total number of attention heads (52) must be divisible by tensor parallel size (3)` 属于前者——TP3 无法启动是 Query 头数除不尽所致，与本文讨论的 KV 复制不是同一问题。
+
+## 复制是怎么发生的
+
+4 个 KV 头在 TP4 下恰好每卡一个，在 TP8 下则除不尽。引擎在源码中设了一个兜底（`vllm/config/model.py:1270`）：
 
 ```python
-# 替换 attention 实现
-core_attn_out = DCPAttn.apply(dcp_executor, q, k, v)
-
-# 定义掩码函数（输入序列信息 → 掩码矩阵）
-def mask_fn(seqlens, ...):
-    return mask
-
-# 训练脚本
-dcp_dataloader = DCPDataloader(dataset, mask_fn)
-dcp_executor = DCPExecutor(grouped_ranks)
-for local_data, execution_plan in dcp_dataloader:
-    loss = model(local_data, dcp_executor)
+return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
+# num_kv_heads=4:
+#   TP4 → 4//4 = 1 (干净)
+#   TP8 → max(1, 4//8) = max(1, 0) = 1 (被迫复制 2 份)
 ```
 
-DCP 在训练迭代 i 时，Planner 可预取 i+κ 迭代的输入信息并行规划，与 GPU 训练流水线重叠，消除规划开销。
+`4 // 8 = 0`，而 KV 头数不能为 0，`max(1, ...)` 将其置为 1。
 
-## 性能数据
+实际分配：
+```python
+shard_rank = tp_rank // num_kv_head_replicas
+```
 
-### Attention 微基准测试（图略，论文 §7.1）
+rank 两两成对持同一个 KV 头：
+- rank0、rank1 → KV头1
+- rank2、rank3 → KV头2
+- rank4、rank5 → KV头3
+- rank6、rank7 → KV头4
 
-8× NVIDIA A100 (80GB)，NVSwitch 600GB/s，4x100 Gbps NIC：
+该兜底本身是**合理设计**：若无此处理，TP8 在该模型上无法启动；引擎选择了「可运行但存在冗余」，而非直接报错。
 
-| 场景 | Baseline | DCP 加速比 |
+### 实测反算：三方互证
+
+| 来源 | 每 token 的 KV 显存（全机合计） | 相对手算 |
 |---|---|---|
-| Causal mask | RingFlashAttention | 1.19×–2.45× |
-| Sparse mask | - | 2.15×–3.77× |
+| 按模型配置手算 | 2 × 16层 × 4KV头 × 256 × 2字节 = 64.0 KiB | 1.000 |
+| TP8 实测反算 | 20.54 GiB × 8 ÷ 1,318,741 tokens = 130.7 KiB | **2.042** |
+| TP4 实测反算（参照） | 16.37 GiB × 4 ÷ 1,040,564 tokens = 66.0 KiB | 1.031 |
 
-**关键优势**：
-- RingFlashAttention 对所有序列使用固定 ring size（R 块），DCP 为每个序列动态选择最优分区
-- ZigZag 只支持 2^R 块大小，无法适配任意长度；DCP 支持变长输入
-- LoongTrain 不支持序列长度维度变长，需 padding 到 batch 内最长序列
+**TP8 的实测值恰为手算值的两倍**，与源码推出的复制份数 `8 ÷ 4 = 2` 完全一致；分片干净的 TP4 实测与手算只差 3%，属正常记账误差。
 
-### 端到端训练（表略，论文 §7.2）
+这是该问题**唯一的外部线索**：启动日志里那个与手算对不上的 KV 池数值。全程没有任何报错或告警。
 
-| 框架 | Mask | 加速比 |
+## DCP 如何消除重复，代价在哪
+
+### 收益
+每张卡只存、只算一半 KV：
+- 显存立即减半
+- 解码时每步只扫一半序列 → **TPOT 下降**
+
+### 代价
+两张卡各持一半，注意力结果必须跨卡归并，这份通信打在 prefill 上 → **TTFT 上升**
+
+### 两个效应受不同变量支配
+
+- **收益随上下文长度增长**：并发 1 时 64K −13.8% → 128K −22.4% → 250K −31.2%
+- **代价随并发增长**：250K 时并发 1 +4.5% → 并发 2 +14.9% → 并发 4 +30.0%
+
+两条趋势相交，就划出了适用区间。
+
+**显存侧不受这两条趋势影响**——那是存储布局的改变，与调度无关，所以 1.98 倍容量在任何长度、任何并发下都成立。
+
+## 开启方式与约束
+
+```bash
+--decode-context-parallel-size 2
+```
+
+**四条约束**：
+
+1. **上限**：`tp_size ÷ num_kv_heads`。本文实测模型 4 个 KV 头、TP8，上限即 8 ÷ 4 = 2
+2. **整除**：`tp_size` 必须能被它整除，否则直接抛错（`vllm/config/parallel.py:531`）
+3. **版本**：GQA 模型要 vLLM ≥ v0.11.1（PR #24864），更早版本的 DCP 只支持 MLA
+4. **作用范围**：它只管 decode 侧。prefill 侧是另一个参数 `--prefill-context-parallel-size`
+
+### 测量注意事项
+
+复现本文测量时，**输出长度必须足够长**，否则结果失真。
+
+本文统一取 512 tokens。若压至 128，250K 输入下 prefill 占比约九成，并发 2 时请求 A 解码期间请求 B 仍在 prefill，A 的 TPOT 遭跨请求干扰严重污染——同一配置：
+- 输出 128：测得 251.1 ms
+- 输出 512：测得 107.3 ms
+- **相差 2.3 倍，唯一变量是输出长度**
+
+## 布局选型：DCP ≠ 最优布局
+
+DCP 修的是**一个布局内部的冗余**，它不回答「该用哪个布局」。消除 TP8 的冗余之后，仍需与 **TP4×2**（两个数据并行副本、每副本 TP4）做对照——TP4 恰好对应 4 个 KV 头，分片干净，本身不需要 DCP。
+
+### 64K × 并发 8（均值 ± 标准差）
+
+| 指标 | TP8 无 DCP | TP8+DCP | TP4×2 | 判定 |
+|---|---|---|---|---|
+| 端到端延迟 | 102.25±0.61 s | 104.78±0.68 s | 93.43±3.04 s | TP4×2 好 8.6%，**7.8σ** |
+| TPOT | 170.24±0.08 ms | 165.55±0.58 ms | 131.88±7.92 ms | TP4×2 好 22.5%，**13.7σ** |
+| TTFT | 16.48±0.00 s | 20.52±0.23 s | 22.75±2.14 s | TP8 无DCP 好 38.1%，**8.3σ** |
+| 总吞吐 | 5071.75±0.27 | 5011.13±0.95 | 5090.52±179.97 | **0.3σ，不显著** |
+
+「σ」为同一配置重复测量得到的波动幅度。
+- **7.8σ 表示差距达波动幅度的 7.8 倍**，不可能由随机波动产生
+- 0.3σ 则表示差距小于波动幅度，两者无法区分
+
+### 250K × 并发 1
+
+TP8+DCP 的 TPOT 是 58.5 ms，TP4×2 是 104.5 ms，**领先 1.79 倍**。
+
+### 布局选择建议
+
+| 场景 | 推荐布局 | 依据 |
 |---|---|---|
-| TransformerEngine | Causal | 0.94×–1.16× |
-| TransformerEngine | Sparse | 1.00×–1.46× |
+| 长上下文（≥128K）、低并发（≤2） | **TP8×1 + DCP** | TPOT 领先 1.79× |
+| 短上下文（~64K）、高并发（≥8） | **TP4×2** | 端到端好 8.6%、TPOT 好 22.5% |
+| 任何场景，SLO 卡 TTFT | **TP8×1，不开 DCP** | 16.5 s vs 20.5 / 22.8 s |
+| 缺显存 | **TP8×1 + DCP** | KV 容量翻倍 |
 
-端到端加速低于 attention 层加速（图 1 显示 attention 占 44.6%，CP 通信占 36.7%）：
-- Causal mask 下，静态 CP 通信开销已较优化，DCP 提升有限
-- Sparse mask 下，静态 CP 产生大量冗余通信（图 7b 显示 38/48 个 KV 块未被使用但仍传输），DCP 消除冗余获得显著提升
+## 关键洞察
 
-## 技术亮点
-
-1. **统一表示**：数据块 + 计算块的抽象统一描述了所有 CP 配置（pure CP、DP+CP 混合、图 5），使动态规划成为可能
-
-2. **负载感知分区**：计算块权重 = 2×(head_dim)×(Q_size)×(KV_size) FLOPS，精确建模不同掩码下的计算负载（图 7a causal mask 中上三角块被 mask 掉）
-
-3. **通信避免**：masked 计算块不生成（如 M_{ij} = 0 的 Q_i × KV_j），对应数据块无需传输
-
-4. **与其他并行正交**：
-   - **Tensor Parallelism (TP)**：可在 head 维度联合使用，DCP 占用传统 DP 的设备等级
-   - **Pipeline Parallelism (PP)**：不同 stage 可用不同 CP 配置，建议 TP-CP-DP-PP 的等级顺序（§6.2）
-   - **Data Parallelism (DP)**：DCP 在 DP group 间应用（图 5c 长序列用 CP，短序列用 DP）
-
-## 适用场景
-
-- **长上下文预训练**：Llama 3 tuning 阶段，128K 上下文样本仅占 0.1%，但训练成本极高
-- **指令微调**：数据集包含大量短序列（<4K）+ 少量长序列（>100K），如 LongAlign
-- **多任务训练**：不同任务使用不同注意力模式（RLHF 的 shared question mask、retrieval 的 lambda-shaped、causal LM 训练）
-- **推理优化**：虽然论文聚焦训练，但 DCP 的动态分区思想可扩展到批处理推理（不同请求长度差异大）
-
-## 实现要点
-
-- **代码量**：核心模块 14K LOC Python（dataloader、planner、executor）+ 300 LOC C++（通信/计算调度加速）
-- **依赖**：FlashAttention（block attention kernel）、Triton（fused kernel）、KaHyPar（超图分区）
-- **开销**：
-  - Planning：在 CPU 异步执行，与 GPU 训练重叠（lookahead κ 迭代）
-  - Executor：块级缓冲区按类型索引复用，避免频繁分配
+1. **重复存储是静默的**：没有报错或告警，唯一线索是启动日志里与手算不符的 KV 池容量
+2. **收益与代价分离**：TPOT 收益随上下文增长，TTFT 代价随并发增长，必须合并计算
+3. **显存收益无条件**：1.98 倍 KV 容量在任何长度、任何并发下都成立
+4. **布局优先于优化**：消除 TP8 冗余后，仍可能不如分片干净的 TP4×2
+5. **GQA 是结构性约束**：不是 vLLM 的实现缺陷，TensorRT-LLM 也有同样问题
 
 ---
 
-## 参考资料
-
-- 论文：Chenyu Jiang et al., "DCP: Addressing Input Dynamism In Long-Context Training via Dynamic Context Parallelism", SOSP'25
-- 代码：https://github.com/chenyu-jiang/dcp
-- arXiv：https://arxiv.org/abs/2510.10620
+**参考资料**：
+- vLLM 官方文档：Context Parallel Deployment
+- vLLM 源码：`vllm/config/model.py`、`vllm/config/parallel.py`
+- TensorRT-LLM 文档：KV-cache replication 说明
+- vLLM PR #24864：GQA 支持

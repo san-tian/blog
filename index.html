@@ -104,14 +104,14 @@
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
   <a class="post" href="dynamic-context-parallelism.html">
-    <div class="title">DCP: 动态上下文并行 —— 破解长上下文训练的输入动态性难题</div>
-    <div class="desc">SOSP'25 论文解读。通过细粒度块级分区 + 超图分区优化，DCP 为每个训练 batch 动态生成最优并行配置，在 causal mask 下达到 1.19×–2.45× 加速，sparse mask 下达到 2.15×–3.77× 加速。适用于长上下文预训练、指令微调等序列长度和注意力模式变化大的场景。</div>
+    <div class="title">DCP 实测：消除张量并行下的 KV Cache 重复存储</div>
+    <div class="desc">vLLM Decode Context Parallel 实测。GQA 模型在高张量并行度下会产生 KV Cache 重复存储，DCP 通过沿序列维切分消除冗余，显存容量翻倍（1.98×）。长上下文低并发场景 TPOT 提升 45%，但高并发下 TTFT 代价可达 30%。含开启判据、布局选型与三方互证。</div>
     <div class="meta">
       <span class="tag agent">🤖 AI-assisted</span>
-      <span class="tag">SOSP'25</span>
-      <span class="tag">Context Parallelism</span>
-      <span class="tag">长上下文训练</span>
-      <span class="tag">超图分区</span>
+      <span class="tag">vLLM</span>
+      <span class="tag">张量并行</span>
+      <span class="tag">KV Cache</span>
+      <span class="tag">GQA</span>
     </div>
   </a>
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DCP: 动态上下文并行 —— 破解长上下文训练的输入动态性难题</title>
+<title>DCP 实测：消除张量并行下的 KV Cache 重复存储</title>
 <style>
   :root {
     --bg: #fafaf9;
@@ -71,332 +71,513 @@
 <div class="container">
 
 <header class="hero">
-  <h1>DCP: 动态上下文并行</h1>
-  <div class="subtitle">破解长上下文训练的输入动态性难题</div>
+  <h1>DCP 实测：消除张量并行下的 KV Cache 重复存储</h1>
+  <div class="subtitle">vLLM Decode Context Parallel 的收益、代价与适用边界</div>
   <div class="meta">
-    <span>SOSP'25</span>
-    <span>Context Parallelism</span>
-    <span>Long Context Training</span>
-    <span>Hypergraph Partitioning</span>
+    <span>vLLM</span>
+    <span>张量并行</span>
+    <span>GQA</span>
+    <span>KV Cache</span>
+    <span>推理优化</span>
   </div>
 </header>
 
 <div class="background">
 <h4>背景</h4>
-<p><strong>Context Parallelism (CP)</strong> 是支持长上下文训练的关键技术，通过将序列分布到多个设备并行计算注意力来突破单卡内存限制。现有 CP 方法（RingFlashAttention、Ulysses、DeepSpeed-Ulysses 等）采用静态配置：为所有 batch 使用固定的并行度和数据分区方案。</p>
-<p>然而，训练数据具有<strong>输入动态性</strong>：序列长度和 token 关系（注意力模式）在样本间存在巨大变异。静态配置无法适应这种动态性，导致冗余通信和计算不均衡。</p>
+<p><strong>DCP</strong> 是 vLLM 的 <code>--decode-context-parallel-size</code> 参数的简称，全称 <strong>Decode Context Parallel</strong>（解码上下文并行）。它解决的是 GQA 模型在高张量并行度下的 <strong>KV Cache 重复存储</strong>问题。</p>
+<p>当张量并行度超过模型的 KV 头数时，引擎无法将 KV 头均匀分配到所有 GPU，只能让多张卡共用同一个头，导致 KV Cache 重复存储，浪费显存。</p>
 </div>
 
 <h2>核心问题</h2>
 
-<p>长上下文训练面临两类输入动态性：</p>
-
-<h3>1. 序列长度差异</h3>
-<p>训练数据中短序列远多于长序列。例如 LongAlign 和 LongDataCollection 数据集（论文图 2）：</p>
-<ul>
-<li>大部分序列长度 &lt; 20K tokens</li>
-<li>但也有 100K+ 的长序列（占比小但训练成本极高）</li>
-<li>Llama 3 预训练的 tuning 阶段：128K 上下文样本仅占 0.1%</li>
-</ul>
-
-<p><strong>静态 CP 的问题</strong>：短序列也按最长序列的通信模式传输 KV cache，产生冗余通信。论文图 5a 显示，8B GPT 模型在 EC2 p4d.24xlarge 集群（8 节点 × 8 GPUs）上训练时，16-way CP 的通信开销占总迭代时间的 <strong>36.7%</strong>。</p>
-
-<h3>2. 注意力模式多样</h3>
-<p>不同任务使用不同的注意力掩码（论文图 6）：</p>
-<ul>
-<li><strong>Causal mask</strong>：标准因果语言模型（每个 token 只能看到之前的 token）</li>
-<li><strong>Shared question mask</strong>：多候选答案共享同一个问题前缀（RLHF、多候选生成）</li>
-<li><strong>Lambda-shaped mask</strong>：结合注意力 sink 和滑动窗口</li>
-<li><strong>Block-wise mask</strong>：文档级块之间稀疏连接（检索增强生成）</li>
-</ul>
-
-<p><strong>静态 CP 的问题</strong>：为 causal mask 设计的分区方案应用到 sparse mask 时，会传输大量不参与计算的 KV 块。论文图 7b 显示，在 shared question mask 下，38/48 个 KV 块未被使用但仍被传输（冗余率 79%）。</p>
-
-<div class="callout-summary">
-<h4>静态 CP 的性能问题</h4>
-<div class="point"><span class="badge no">通信冗余</span><span>序列长度 × CP degree 决定通信量，短序列产生大量无效传输</span></div>
-<div class="point"><span class="badge no">计算不均衡</span><span>不同设备间负载严重失衡（论文图 5c：长短序列混合时，某些设备空闲而其他设备过载）</span></div>
-<div class="point"><span class="badge no">掩码不兼容</span><span>为 causal mask 优化的配置无法高效处理 sparse mask</span></div>
-</div>
-
-<h2>DCP 方案</h2>
-
-<p>DCP (Dynamic Context Parallelism) 通过<strong>细粒度块级分区 + 动态映射</strong>解决输入动态性问题。核心思想：为每个训练 batch 动态生成最优的并行配置，而不是使用全局固定配置。</p>
-
-<h3>1. 块级数据和计算分区</h3>
-
-<p>DCP 将注意力计算抽象为两类块（论文图 9、10）：</p>
-
-<h4>数据块（Data Block）</h4>
-<p>Q、K、V、O 张量的连续切片：</p>
-<ul>
-<li>Q、K、V 形状 [B, H, L, D]（batch、head、seq_len、hidden_dim）</li>
-<li>按 batch 和 seq_len 维度划分为 <code>H × B_b × B_q</code> 个 Q 块和 <code>B_b × B_kv</code> 个 KV 块</li>
-<li>块大小是超参数（如 Q/KV 块 256 tokens）</li>
-</ul>
-
-<h4>计算块（Computation Block）</h4>
-<p>描述一对 Q 块和 KV 块之间的注意力计算：</p>
-<ul>
-<li>一个 Q<sub>i</sub> 块和 KV<sub>j</sub> 块的计算产生输出块 O<sub>i</sub></li>
-<li>计算公式：O<sub>i</sub> = Softmax((Q<sub>i</sub> × K<sub>j</sub><sup>T</sup>) / √D) × V<sub>j</sub></li>
-<li><strong>关键优化</strong>：如果注意力掩码 M<sub>ij</sub> = 0（全部被 mask），则跳过该计算块</li>
-</ul>
+<p>vLLM 官方文档的描述：</p>
 
 <blockquote>
-<strong>统一表示的威力</strong>：数据块 + 计算块的抽象统一描述了所有 CP 配置。论文图 5 展示：(a) 传统 ring attention、(b) pure DP（无通信但计算不均）、(c) 长序列用 CP + 短序列用 DP 的混合配置，都可以表示为不同的块到设备映射。
+When we continue to increase the tensor parallel size, the KV cache for each GPU will be <strong>duplicated for <code>tp_size / H</code> times</strong>. Of course, duplication is not good for efficiency. Then we need to add decode context parallel to further shard the KV cache along the <strong>T dimension</strong>.
 </blockquote>
 
-<h3>2. 超图分区优化映射</h3>
+<p>其中 <code>H</code> 是 KV 头数，<code>T</code> 是序列维。</p>
 
-<p>将块到设备的映射建模为<strong>超图分区问题</strong>（Hypergraph Partitioning，论文图 12）：</p>
+<h3>问题根源</h3>
 
-<h4>超图构建</h4>
+<p>根源在于<strong>切分维度不同</strong>：</p>
+
 <ul>
-<li><strong>顶点 (Vertex)</strong>：
-  <ul>
-    <li>数据块（Q、KV、O）+ 计算块</li>
-    <li>顶点权重 = 数据块大小（bytes）+ 计算块 FLOPS</li>
-    <li>例如：Q 块权重 = <code>head_dim × block_size × 2</code> bytes（BF16）</li>
-    <li>计算块权重 = <code>2 × head_dim × Q_size × KV_size</code> FLOPS</li>
-  </ul>
-</li>
-<li><strong>超边 (Hyperedge)</strong>：
-  <ul>
-    <li>连接一个计算块与其输入/输出数据块（1 个计算块 + 1 个 Q 块 + 1 个 KV 块 + 1 个 O 块）</li>
-    <li>超边权重 = 数据块大小（跨设备传输成本）</li>
-  </ul>
-</li>
+<li><strong>常规张量并行</strong>：沿注意力头维切分 KV，每张卡分到若干个 KV 头</li>
+<li><strong>GQA 模型限制</strong>：KV 头数由模型结构决定（通常只有 4 或 8 个）</li>
+<li><strong>并行度超过头数时</strong>：头数不足以分配，引擎只能让多张卡共用同一个头 → <strong>重复存储产生</strong></li>
 </ul>
 
-<h4>优化目标</h4>
-<pre><code>minimize Σ_{e∈E} s_e(λ_e - 1)  # 跨设备通信量
-subject to:
-  w(P_i) ≤ [1+ε, 1] ⊙ w(N)/R  # 负载均衡约束
-</code></pre>
-<p>其中：</p>
+<div class="callout-summary">
+<h4>DCP 的解决方案</h4>
+<div class="point"><span class="badge ok">切分维度</span><span>改沿序列维切分，同一个 KV 头的不同 token 片段分给不同的 rank</span></div>
+<div class="point"><span class="badge ok">显存节省</span><span>每张卡只需保存 1/N，重复随之消除</span></div>
+<div class="point"><span class="badge q">通用性</span><span>不是 vLLM 特有问题，TensorRT-LLM 文档也写明相同机制</span></div>
+</div>
+
+<h2>实测效果</h2>
+
+<p><strong>实验环境</strong>：</p>
 <ul>
-<li><code>s_e</code>：超边 e 的权重（数据块大小）</li>
-<li><code>λ_e</code>：超边 e 连接的顶点被分配到的不同设备数（1 表示所有顶点在同一设备，无通信）</li>
-<li><code>w(P_i)</code>：设备 i 的总权重（计算 + 内存）</li>
-<li><code>w(N)/R</code>：平均每设备负载（R 是设备数）</li>
-<li><code>ε</code>：负载不均衡容忍度（如 0.03，表示允许 3% 偏差）</li>
+<li>硬件：8 × 昇腾 910B4-32GB</li>
+<li>模型：Qwen3.6-27B-w8a8</li>
+<li>框架：vllm-ascend v0.24.0</li>
+<li>张量并行度：TP8</li>
 </ul>
 
-<h4>层级分区</h4>
-<p>由于机器间通信（NIC）比机器内通信（NVSwitch）慢得多，采用两级分区：</p>
+<p>模型配置（<code>config.json</code>）：</p>
+<pre><code>{
+  "num_attention_heads": 24,
+  "num_hidden_layers": 64,
+  "num_key_value_heads": 4  // 决定是否触发复制的关键字段
+}</code></pre>
+
+<p>TP8 &gt; 4 个 KV 头，复制倍数 = 8 ÷ 4 = <strong>2 倍</strong>。</p>
+
+<h3>显存侧：无条件收益</h3>
+
+<table>
+<tr>
+  <th>指标</th>
+  <th>TP8 未开启 DCP</th>
+  <th>TP8 开启 DCP</th>
+  <th>提升</th>
+</tr>
+<tr>
+  <td>每卡物理显存</td>
+  <td>20.54 GiB</td>
+  <td>20.54 GiB</td>
+  <td>无变化</td>
+</tr>
+<tr>
+  <td>全机 KV 容量</td>
+  <td>1.32M tokens</td>
+  <td>2.61M tokens</td>
+  <td><strong>1.98 倍</strong></td>
+</tr>
+</table>
+
+<blockquote>
+<strong>关键洞察</strong>：增量并非来自新增显存，而是<strong>释放了原本用于存放重复数据的那一半</strong>。精确值：1,318,741 → 2,612,705 tokens，比值 1.981。同配置重启复现为 1,317,982，抖动仅 0.06%。
+</blockquote>
+
+<h3>延迟侧：收益与代价方向相反</h3>
+
+<p>DCP 有两个效应，受不同变量支配：</p>
+<ul>
+<li><strong>收益</strong>：TPOT（每 token 时间）下降，<strong>随上下文长度增长</strong></li>
+<li><strong>代价</strong>：TTFT（首 token 时间）上升，<strong>随并发增长</strong></li>
+</ul>
+
+<h4>每秒吐字速率（终端用户可感知指标）</h4>
+
+<table>
+<tr>
+  <th>上下文长度</th>
+  <th>并发度</th>
+  <th>提升</th>
+</tr>
+<tr>
+  <td>64K</td>
+  <td>1</td>
+  <td><strong>+16%</strong></td>
+</tr>
+<tr>
+  <td>128K</td>
+  <td>1</td>
+  <td><strong>+28%</strong></td>
+</tr>
+<tr>
+  <td>250K</td>
+  <td>1</td>
+  <td><strong>+45%</strong></td>
+</tr>
+<tr>
+  <td>250K</td>
+  <td>2</td>
+  <td>+31%</td>
+</tr>
+<tr>
+  <td>250K</td>
+  <td>4</td>
+  <td>+10%</td>
+</tr>
+</table>
+
+<p><strong>规律</strong>：上下文越长，DCP 提升越大；并发越高，提升幅度越小。</p>
+
+<h4>首 Token 延迟增幅（代价）</h4>
+
+<table>
+<tr>
+  <th>上下文长度</th>
+  <th>并发 1</th>
+  <th>并发 2</th>
+  <th>并发 4</th>
+</tr>
+<tr>
+  <td>64K</td>
+  <td>+3.2%</td>
+  <td>+9.8%</td>
+  <td>+21.4%</td>
+</tr>
+<tr>
+  <td>128K</td>
+  <td>+3.9%</td>
+  <td>+12.1%</td>
+  <td>+25.7%</td>
+</tr>
+<tr>
+  <td>250K</td>
+  <td><strong>+4.5%</strong></td>
+  <td>+14.9%</td>
+  <td><strong>+30.0%</strong></td>
+</tr>
+</table>
+
+<p><strong>规律</strong>：并发越高，首 token 延迟增幅越大。</p>
+
+<h4>端到端时间（综合判断）</h4>
+
+<p>折算公式：<code>ΔTTFT + ΔTPOT × 511</code>（输出 512 tokens）</p>
+
+<table>
+<tr>
+  <th>上下文</th>
+  <th>并发</th>
+  <th>端到端变化</th>
+  <th>是否值得开启</th>
+</tr>
+<tr>
+  <td>64K</td>
+  <td>1</td>
+  <td>−7.4%</td>
+  <td>✅ 值得</td>
+</tr>
+<tr>
+  <td>128K</td>
+  <td>1</td>
+  <td>−15.3%</td>
+  <td>✅ 值得</td>
+</tr>
+<tr>
+  <td>250K</td>
+  <td>1</td>
+  <td>−23.8%</td>
+  <td>✅ 值得</td>
+</tr>
+<tr>
+  <td>250K</td>
+  <td>2</td>
+  <td>−13.5%</td>
+  <td>✅ 值得</td>
+</tr>
+<tr>
+  <td>250K</td>
+  <td>4</td>
+  <td style="color: var(--red); font-weight: 600;">+2.9%</td>
+  <td>❌ 净亏损</td>
+</tr>
+<tr>
+  <td>64K</td>
+  <td>4</td>
+  <td style="color: var(--red); font-weight: 600;">+7.9%</td>
+  <td>❌ 净亏损</td>
+</tr>
+</table>
+
+<blockquote>
+并发 4 时 TTFT 代价升至 +21% 以上，足以抵消 TPOT 收益。用实测端到端延迟中位数核对：250K/并发 4 从 229.5s 升至 235.8s。
+</blockquote>
+
+<h2>开启判据</h2>
+
+<h3>何时应当开启</h3>
+
+<div class="callout-summary">
+<h4>开启建议</h4>
+<div class="point"><span class="badge ok">显存紧张</span><span>直接开启（KV 容量翻倍）</span></div>
+<div class="point"><span class="badge ok">长上下文低并发</span><span>上下文 ≥ 128K 且并发 ≤ 2 时开启</span></div>
+<div class="point"><span class="badge no">其他情形</span><span>不建议开启（代价大于收益）</span></div>
+</div>
+
+<h3>如何判断是否触发重复存储</h3>
+
+<p>查看模型配置：</p>
+<pre><code>grep num_key_value_heads /path/to/model/config.json</code></pre>
+
+<p>与计划设置的张量并行度对照，<strong>复制倍数 = TP ÷ KV头数</strong>：</p>
+
+<table>
+<tr>
+  <th><code>num_key_value_heads</code></th>
+  <th>TP2</th>
+  <th>TP4</th>
+  <th>TP8</th>
+  <th>TP16</th>
+</tr>
+<tr>
+  <td>1 (MQA)</td>
+  <td>2</td>
+  <td>4</td>
+  <td>8</td>
+  <td>16</td>
+</tr>
+<tr>
+  <td>2</td>
+  <td>1✅</td>
+  <td>2</td>
+  <td>4</td>
+  <td>8</td>
+</tr>
+<tr>
+  <td>4 (本文实测)</td>
+  <td>1✅</td>
+  <td>1✅</td>
+  <td><strong>2</strong></td>
+  <td>4</td>
+</tr>
+<tr>
+  <td>8</td>
+  <td>1✅</td>
+  <td>1✅</td>
+  <td>1✅</td>
+  <td>2</td>
+</tr>
+<tr>
+  <td>16</td>
+  <td>1✅</td>
+  <td>1✅</td>
+  <td>1✅</td>
+  <td>1✅</td>
+</tr>
+</table>
+
+<p>格内数值有两重含义：</p>
 <ol>
-<li><strong>机器级分区</strong>：优先最小化跨机器通信（带宽低、延迟高）</li>
-<li><strong>设备级分区</strong>：在每台机器内优化设备间通信</li>
+<li>每张卡需存放的 KV 份数</li>
+<li><code>--decode-context-parallel-size</code> 可设的最大值</li>
 </ol>
 
-<p>使用 <strong>KaHyPar</strong> 等高效启发式算法求解（超图分区是 NP-hard 问题）。论文使用 multi-level 启发式：coarsening（粗化）→ initial partitioning（初始分区）→ refinement（细化）。</p>
+<p><strong>数值为 1（✅）表示分片干净、无冗余，此时无需开启。</strong></p>
 
-<h3>3. 多路分治调度</h3>
+<h3>⚠️ 不要与硬约束混淆</h3>
 
-<p>块到设备的映射确定后，需要生成每个设备的执行计划（论文 Listing 3）：</p>
+<table>
+<tr>
+  <th>约束类型</th>
+  <th>检查对象</th>
+  <th>不满足时</th>
+</tr>
+<tr>
+  <td><strong>硬约束</strong></td>
+  <td><code>num_attention_heads</code><br>（Query 头数）</td>
+  <td>直接抛 <code>ValueError</code>，服务无法启动</td>
+</tr>
+<tr>
+  <td><strong>软降级</strong>（本文）</td>
+  <td><code>num_key_value_heads</code><br>（KV 头数）</td>
+  <td>静默复制，可运行但浪费显存</td>
+</tr>
+</table>
 
-<h4>调度策略</h4>
+<blockquote>
+常见的 <code>Total number of attention heads (52) must be divisible by tensor parallel size (3)</code> 属于前者——TP3 无法启动是 Query 头数除不尽所致，与本文讨论的 KV 复制不是同一问题。
+</blockquote>
+
+<h2>复制是怎么发生的</h2>
+
+<p>4 个 KV 头在 TP4 下恰好每卡一个，在 TP8 下则除不尽。引擎在源码中设了一个兜底（<code>vllm/config/model.py:1270</code>）：</p>
+
+<pre><code>return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
+# num_kv_heads=4:
+#   TP4 → 4//4 = 1 (干净)
+#   TP8 → max(1, 4//8) = max(1, 0) = 1 (被迫复制 2 份)</code></pre>
+
+<p><code>4 // 8 = 0</code>，而 KV 头数不能为 0，<code>max(1, ...)</code> 将其置为 1。</p>
+
+<p>实际分配：</p>
+<pre><code>shard_rank = tp_rank // num_kv_head_replicas</code></pre>
+
+<p>rank 两两成对持同一个 KV 头：</p>
+<ul>
+<li>rank0、rank1 → KV头1</li>
+<li>rank2、rank3 → KV头2</li>
+<li>rank4、rank5 → KV头3</li>
+<li>rank6、rank7 → KV头4</li>
+</ul>
+
+<blockquote>
+该兜底本身是<strong>合理设计</strong>：若无此处理，TP8 在该模型上无法启动；引擎选择了「可运行但存在冗余」，而非直接报错。
+</blockquote>
+
+<h3>实测反算：三方互证</h3>
+
+<table>
+<tr>
+  <th>来源</th>
+  <th>每 token 的 KV 显存（全机合计）</th>
+  <th>相对手算</th>
+</tr>
+<tr>
+  <td>按模型配置手算</td>
+  <td>2 × 16层 × 4KV头 × 256 × 2字节 = 64.0 KiB</td>
+  <td>1.000</td>
+</tr>
+<tr>
+  <td>TP8 实测反算</td>
+  <td>20.54 GiB × 8 ÷ 1,318,741 tokens = 130.7 KiB</td>
+  <td><strong>2.042</strong></td>
+</tr>
+<tr>
+  <td>TP4 实测反算（参照）</td>
+  <td>16.37 GiB × 4 ÷ 1,040,564 tokens = 66.0 KiB</td>
+  <td>1.031</td>
+</tr>
+</table>
+
+<p><strong>TP8 的实测值恰为手算值的两倍</strong>，与源码推出的复制份数 <code>8 ÷ 4 = 2</code> 完全一致；分片干净的 TP4 实测与手算只差 3%，属正常记账误差。</p>
+
+<blockquote style="border-left-color: var(--yellow);">
+这是该问题<strong>唯一的外部线索</strong>：启动日志里那个与手算对不上的 KV 池数值。全程没有任何报错或告警。
+</blockquote>
+
+<h2>DCP 如何消除重复，代价在哪</h2>
+
+<h3>收益</h3>
+<p>每张卡只存、只算一半 KV：</p>
+<ul>
+<li>显存立即减半</li>
+<li>解码时每步只扫一半序列 → <strong>TPOT 下降</strong></li>
+</ul>
+
+<h3>代价</h3>
+<p>两张卡各持一半，注意力结果必须跨卡归并，这份通信打在 prefill 上 → <strong>TTFT 上升</strong></p>
+
+<h3>两个效应受不同变量支配</h3>
+<ul>
+<li><strong>收益随上下文长度增长</strong>：并发 1 时 64K −13.8% → 128K −22.4% → 250K −31.2%</li>
+<li><strong>代价随并发增长</strong>：250K 时并发 1 +4.5% → 并发 2 +14.9% → 并发 4 +30.0%</li>
+</ul>
+
+<p>两条趋势相交，就划出了适用区间。</p>
+
+<blockquote>
+<strong>显存侧不受这两条趋势影响</strong>——那是存储布局的改变，与调度无关，所以 1.98 倍容量在任何长度、任何并发下都成立。
+</blockquote>
+
+<h2>开启方式与约束</h2>
+
+<pre><code>--decode-context-parallel-size 2</code></pre>
+
+<p><strong>四条约束</strong>：</p>
 <ol>
-<li>将每个设备的计算块按<strong>通信需求</strong>分为 T 个 division（如 T=4）</li>
-<li>第 1 个 division：调度最少通信的块（优先执行不依赖远程数据的计算）</li>
-<li>后续 division：按通信量递增调度</li>
-<li>每个 division 内的操作使用 <strong>fused kernel</strong>（Triton）执行：
-  <ul>
-    <li>Attention 计算（基于 FlashAttention）</li>
-    <li>Reduction（多个计算块贡献同一输出块时聚合）</li>
-    <li>Copy（管理块级缓冲区）</li>
-    <li>Comm Launch（异步启动下一 division 的通信）</li>
-  </ul>
-</li>
+<li><strong>上限</strong>：<code>tp_size ÷ num_kv_heads</code>。本文实测模型 4 个 KV 头、TP8，上限即 8 ÷ 4 = 2</li>
+<li><strong>整除</strong>：<code>tp_size</code> 必须能被它整除，否则直接抛错（<code>vllm/config/parallel.py:531</code>）</li>
+<li><strong>版本</strong>：GQA 模型要 vLLM ≥ v0.11.1（PR #24864），更早版本的 DCP 只支持 MLA</li>
+<li><strong>作用范围</strong>：它只管 decode 侧。prefill 侧是另一个参数 <code>--prefill-context-parallel-size</code></li>
 </ol>
 
-<blockquote>
-<strong>通信隐藏</strong>：通过分 division 调度，division i 的计算可以与 division i+1 的通信重叠，最大化 GPU 利用率。
+<h3>测量注意事项</h3>
+
+<blockquote style="border-left-color: var(--red);">
+<strong>输出长度必须足够长</strong>，否则结果失真。本文统一取 512 tokens。若压至 128，250K 输入下 prefill 占比约九成，并发 2 时请求 A 解码期间请求 B 仍在 prefill，A 的 TPOT 遭跨请求干扰严重污染——同一配置：输出 128 测得 251.1 ms，输出 512 仅 107.3 ms，<strong>相差 2.3 倍，唯一变量是输出长度</strong>。
 </blockquote>
 
-<h3>4. 系统架构</h3>
+<h2>布局选型：DCP ≠ 最优布局</h2>
 
-<p>DCP 系统包含三个模块（论文图 8）：</p>
+<p>DCP 修的是<strong>一个布局内部的冗余</strong>，它不回答「该用哪个布局」。消除 TP8 的冗余之后，仍需与 <strong>TP4×2</strong>（两个数据并行副本、每副本 TP4）做对照——TP4 恰好对应 4 个 KV 头，分片干净，本身不需要 DCP。</p>
+
+<h3>64K × 并发 8（均值 ± 标准差）</h3>
 
 <table>
-<tr><th>模块</th><th>职责</th><th>运行时机</th></tr>
 <tr>
-  <td><strong>Data Loader</strong></td>
-  <td>预取序列长度和掩码模式，触发 Planner</td>
-  <td>训练迭代开始前（CPU 异步）</td>
+  <th>指标</th>
+  <th>TP8 无 DCP</th>
+  <th>TP8+DCP</th>
+  <th>TP4×2</th>
+  <th>判定</th>
 </tr>
 <tr>
-  <td><strong>Planner</strong></td>
-  <td>
-    • 生成数据块和计算块（Block Generation）<br>
-    • 超图分区求解最优映射（Placement w/ Hypergraph）<br>
-    • 生成每设备执行计划（Comp. & Comm. Scheduling）
-  </td>
-  <td>与 GPU 训练流水线重叠（lookahead κ 迭代）</td>
+  <td>端到端延迟</td>
+  <td>102.25±0.61 s</td>
+  <td>104.78±0.68 s</td>
+  <td>93.43±3.04 s</td>
+  <td>TP4×2 好 8.6%，<strong>7.8σ</strong></td>
 </tr>
 <tr>
-  <td><strong>Executor</strong></td>
-  <td>
-    • 块级缓冲区管理（按类型索引复用，避免频繁分配）<br>
-    • 执行 DCP instructions（blockwise attention、reduction、copy、comm、wait）<br>
-    • 使用 FlashAttention/Triton 实现高性能 kernel
-  </td>
-  <td>GPU 训练迭代中</td>
+  <td>TPOT</td>
+  <td>170.24±0.08 ms</td>
+  <td>165.55±0.58 ms</td>
+  <td>131.88±7.92 ms</td>
+  <td>TP4×2 好 22.5%，<strong>13.7σ</strong></td>
+</tr>
+<tr>
+  <td>TTFT</td>
+  <td>16.48±0.00 s</td>
+  <td>20.52±0.23 s</td>
+  <td>22.75±2.14 s</td>
+  <td>TP8 无DCP 好 38.1%，<strong>8.3σ</strong></td>
+</tr>
+<tr>
+  <td>总吞吐</td>
+  <td>5071.75±0.27</td>
+  <td>5011.13±0.95</td>
+  <td>5090.52±179.97</td>
+  <td><strong>0.3σ，不显著</strong></td>
 </tr>
 </table>
 
-<h3>5. 用户接口</h3>
+<p>「σ」为同一配置重复测量得到的波动幅度。<strong>7.8σ 表示差距达波动幅度的 7.8 倍</strong>，不可能由随机波动产生；0.3σ 则表示差距小于波动幅度，两者无法区分。</p>
 
-<p>DCP 提供简洁的 API（论文 Listing 2）：</p>
+<h3>250K × 并发 1</h3>
 
-<pre><code># 1. 替换 attention 实现
-core_attn_out = DCPAttn.apply(dcp_executor, q, k, v)
+<p>TP8+DCP 的 TPOT 是 58.5 ms，TP4×2 是 104.5 ms，<strong>领先 1.79 倍</strong>。</p>
 
-# 2. 定义掩码函数（输入序列信息 → 掩码矩阵）
-def mask_fn(seqlens, ...):
-    return mask
-
-# 3. 训练脚本
-dcp_dataloader = DCPDataloader(dataset, mask_fn)
-dcp_executor = DCPExecutor(grouped_ranks)
-for local_data, execution_plan in dcp_dataloader:
-    loss = model(local_data, dcp_executor)
-</code></pre>
-
-<p>Planner 可以提前 κ 迭代（如 κ=8）预取输入信息并规划，与 GPU 训练完全重叠，消除规划开销。</p>
-
-<h2>性能数据</h2>
-
-<h3>Attention 微基准测试</h3>
-
-<p><strong>实验环境</strong>：8× NVIDIA A100 (80GB)，NVSwitch 600GB/s 互联，4×100 Gbps NIC 跨机通信</p>
+<h3>布局选择建议</h3>
 
 <table>
-<tr><th>场景</th><th>Baseline</th><th>DCP 加速比</th></tr>
-<tr><td>Causal mask</td><td>RingFlashAttention</td><td><strong>1.19×–2.45×</strong></td></tr>
-<tr><td>Sparse mask</td><td>-</td><td><strong>2.15×–3.77×</strong></td></tr>
+<tr>
+  <th>场景</th>
+  <th>推荐布局</th>
+  <th>依据</th>
+</tr>
+<tr>
+  <td>长上下文（≥128K）、低并发（≤2）</td>
+  <td><strong>TP8×1 + DCP</strong></td>
+  <td>TPOT 领先 1.79×</td>
+</tr>
+<tr>
+  <td>短上下文（~64K）、高并发（≥8）</td>
+  <td><strong>TP4×2</strong></td>
+  <td>端到端好 8.6%、TPOT 好 22.5%</td>
+</tr>
+<tr>
+  <td>任何场景，SLO 卡 TTFT</td>
+  <td><strong>TP8×1，不开 DCP</strong></td>
+  <td>16.5 s vs 20.5 / 22.8 s</td>
+</tr>
+<tr>
+  <td>缺显存</td>
+  <td><strong>TP8×1 + DCP</strong></td>
+  <td>KV 容量翻倍</td>
+</tr>
 </table>
+
+<h2>关键洞察</h2>
 
 <div class="callout-summary">
-<h4>DCP 的优势来源</h4>
-<div class="point"><span class="badge ok">动态分区</span><span>为每个序列选择最优 CP degree，而不是固定 ring size</span></div>
-<div class="point"><span class="badge ok">变长支持</span><span>ZigZag 只支持 2<sup>R</sup> 块大小，LoongTrain 不支持序列长度维度变长（需 padding），DCP 原生支持任意长度</span></div>
-<div class="point"><span class="badge ok">通信避免</span><span>Sparse mask 下，被 mask 的计算块及其数据块完全跳过，消除冗余通信</span></div>
+<h4>五条核心认知</h4>
+<div class="point"><span class="badge q">静默失效</span><span>重复存储没有报错或告警，唯一线索是启动日志里与手算不符的 KV 池容量</span></div>
+<div class="point"><span class="badge ok">效应分离</span><span>TPOT 收益随上下文增长，TTFT 代价随并发增长，必须合并计算</span></div>
+<div class="point"><span class="badge ok">显存无条件</span><span>1.98 倍 KV 容量在任何长度、任何并发下都成立</span></div>
+<div class="point"><span class="badge q">布局优先</span><span>消除 TP8 冗余后，仍可能不如分片干净的 TP4×2</span></div>
+<div class="point"><span class="badge q">结构性约束</span><span>不是 vLLM 的实现缺陷，TensorRT-LLM 也有同样问题</span></div>
 </div>
-
-<h3>端到端训练</h3>
-
-<p><strong>对比框架</strong>：TransformerEngine（NVIDIA）、LoongTrain</p>
-
-<table>
-<tr><th>掩码类型</th><th>DCP 端到端加速比</th></tr>
-<tr><td>Causal mask</td><td><strong>0.94×–1.16×</strong></td></tr>
-<tr><td>Sparse mask</td><td><strong>1.00×–1.46×</strong></td></tr>
-</table>
-
-<blockquote>
-<strong>为什么端到端加速低于 attention 层加速？</strong><br>
-论文图 1 显示，8B GPT 模型训练时间构成：44.6% attention、36.7% CP 通信、其余 MLP/LayerNorm 等。<br>
-• <strong>Causal mask</strong>：静态 CP 已较优化（ring pattern 契合因果依赖），DCP 提升空间有限<br>
-• <strong>Sparse mask</strong>：静态 CP 产生大量冗余通信（图 7b：79% KV 块未使用但仍传输），DCP 消除冗余获得显著提升
-</blockquote>
-
-<h2>技术亮点</h2>
-
-<h3>1. 负载感知的通信优化</h3>
-<p>超图分区同时优化计算和通信：</p>
-<ul>
-<li>计算块权重精确建模不同掩码下的 FLOPS（causal mask 中上三角被 mask，计算量减半）</li>
-<li>层级分区优先最小化跨机器通信（机器间带宽 << 机器内带宽）</li>
-</ul>
-
-<h3>2. 零计算浪费</h3>
-<p>被 mask 的计算块不生成（如注意力掩码 M<sub>ij</sub> = 0），对应数据块无需传输：</p>
-<ul>
-<li>Causal mask：上三角计算块全部跳过</li>
-<li>Shared question mask：不同答案候选之间的交叉注意力跳过</li>
-<li>Block-wise sparse mask：不相邻的文档块之间跳过</li>
-</ul>
-
-<h3>3. 与其他并行正交</h3>
-<table>
-<tr><th>并行类型</th><th>与 DCP 的关系</th><th>建议等级顺序</th></tr>
-<tr>
-  <td><strong>Tensor Parallelism (TP)</strong></td>
-  <td>可在 head 维度联合使用，DCP 的 head 维度块大小应整除 TP degree</td>
-  <td rowspan="4">TP → CP → DP → PP<br><small>（Megatron-LM 风格）</small></td>
-</tr>
-<tr>
-  <td><strong>Data Parallelism (DP)</strong></td>
-  <td>DCP 占用传统 DP 的设备等级，可在 DP group 间应用不同 CP 配置</td>
-</tr>
-<tr>
-  <td><strong>Pipeline Parallelism (PP)</strong></td>
-  <td>不同 stage 可用不同 CP 配置，但需共享执行计划避免高通信成本</td>
-</tr>
-<tr>
-  <td><strong>Expert Parallelism (EP)</strong></td>
-  <td>正交，MoE 层不涉及 CP</td>
-</tr>
-</table>
-
-<h3>4. 规划开销消除</h3>
-<p>Planner 在 CPU 上运行，使用 lookahead 预取机制：</p>
-<ul>
-<li>训练迭代 i 时，Planner 预取迭代 i+κ 的输入信息（序列长度、掩码）</li>
-<li>规划时间与 GPU 训练完全重叠（异步流水线）</li>
-<li>论文实验显示：κ=8 时，规划开销 < 1% 训练时间</li>
-</ul>
-
-<h2>适用场景</h2>
-
-<div class="callout-summary">
-<h4>DCP 最适合的工作负载</h4>
-<div class="point"><span class="badge ok">长上下文预训练</span><span>如 Llama 3 的 128K 上下文 tuning 阶段（高成本样本占比小但至关重要）</span></div>
-<div class="point"><span class="badge ok">指令微调</span><span>数据集包含大量短序列（<4K）+ 少量长序列（>100K），如 LongAlign、LongDataCollection</span></div>
-<div class="point"><span class="badge ok">多任务训练</span><span>不同任务使用不同注意力模式（RLHF 的 shared question、检索的 block-wise、标准 causal LM）</span></div>
-<div class="point"><span class="badge q">批处理推理</span><span>论文聚焦训练，但 DCP 的动态分区思想可扩展到推理（不同请求长度差异大）</span></div>
-</div>
-
-<h2>实现要点</h2>
-
-<table>
-<tr><th>方面</th><th>细节</th></tr>
-<tr>
-  <td><strong>代码量</strong></td>
-  <td>核心模块 14K LOC Python（dataloader、planner、executor）+ 300 LOC C++（通信/计算调度加速）</td>
-</tr>
-<tr>
-  <td><strong>依赖</strong></td>
-  <td>
-    • FlashAttention（block attention kernel）<br>
-    • Triton（fused kernel 生成）<br>
-    • KaHyPar（超图分区库）<br>
-    • Torch P2P（跨设备通信）
-  </td>
-</tr>
-<tr>
-  <td><strong>内存开销</strong></td>
-  <td>块级缓冲区按类型索引复用（如所有 Q 块共享缓冲区，通过偏移量区分），避免频繁分配</td>
-</tr>
-<tr>
-  <td><strong>规划开销</strong></td>
-  <td>Planner 在 CPU 异步执行（lookahead κ 迭代），与 GPU 训练重叠，测得开销 < 1%</td>
-</tr>
-</table>
-
-<h2>源码与论文</h2>
-
-<ul>
-<li><strong>论文</strong>：Chenyu Jiang, Zhenkun Cai, Ye Tian, Zhen Jia, Yida Wang, Chuan Wu. "DCP: Addressing Input Dynamism In Long-Context Training via Dynamic Context Parallelism". SOSP'25, October 13–16, 2025, Seoul, Republic of Korea.</li>
-<li><strong>arXiv</strong>: <a href="https://arxiv.org/abs/2510.10620">https://arxiv.org/abs/2510.10620</a></li>
-<li><strong>代码</strong>: <a href="https://github.com/chenyu-jiang/dcp">https://github.com/chenyu-jiang/dcp</a></li>
-<li><strong>论文 PDF</strong>: <a href="https://i.cs.hku.hk/~cwu/papers/cyjiang-sosp25.pdf">https://i.cs.hku.hk/~cwu/papers/cyjiang-sosp25.pdf</a></li>
-</ul>
 
 <footer>
-  <p>© 2026 | 本文基于 SOSP'25 论文《DCP: Addressing Input Dynamism In Long-Context Training via Dynamic Context Parallelism》整理</p>
+  <p>© 2026 | 基于微信公众号文章《DCP 实测:消除张量并行下的 KV Cache 重复存储,收益、代价与适用边界》整理</p>
+  <p>参考资料：vLLM 官方文档、vLLM 源码、TensorRT-LLM 文档</p>
 </footer>
 
 </div>
