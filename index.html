@@ -70,10 +70,21 @@
     border: 1px solid transparent;
     transition: all 0.2s;
   }
-  .post:hover .tag { 
+  .post:hover .tag {
     background: var(--accent-soft);
     color: var(--accent);
     border-color: rgba(29,78,216,0.15);
+  }
+  .tag.agent {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(59, 130, 246, 0.1));
+    color: #7c3aed;
+    border: 1px solid rgba(124, 58, 237, 0.2);
+    font-weight: 600;
+  }
+  .post:hover .tag.agent {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(59, 130, 246, 0.15));
+    color: #6d28d9;
+    border-color: rgba(124, 58, 237, 0.3);
   }
 
   .footer {
@@ -96,6 +107,7 @@
     <div class="title">MTP 为什么会让上下文减小？权重结构与 KV cache 开销图解（GLM-5.2 vs Kimi K3）</div>
     <div class="desc">带完整 SVG 图解 + EAGLE-3 核心代码引用（cnets.py topK_genrate）：MTP 权重只是"多 1 层"，但 KV cache 才是大头 —— 从模型结构、草稿树算法、显存公式到工程优化五层展开，回答"为什么加了 MTP 上下文就变小"。</div>
     <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
       <span class="tag">MTP</span>
       <span class="tag">GLM-5.2</span>
       <span class="tag">Kimi K3</span>
@@ -108,6 +120,7 @@
     <div class="title">在 H200 上服务 GLM-5.2 智能体负载：llm-d 的工程实践与成本测算</div>
     <div class="desc">编译自 llm-d 官方博客。GLM-5.2 + H200 智能体负载的六项能力组合（MLA / Wide-EP / 前缀路由 / CPU 卸载 / P-D 分池 / MTP），含 64 GPU 参考扫描、成本测算与六条调参经验法则。</div>
     <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
       <span class="tag">llm-d</span>
       <span class="tag">GLM-5.2</span>
       <span class="tag">Wide-EP</span>
@@ -119,6 +132,7 @@
     <div class="title">为什么 PD 分离中，decode 不需要二级缓存？</div>
     <div class="desc">一次被源码与硬件双重纠正的技术复盘 —— SGLang PD 分离架构里 DecodeKVCacheOffloadManager 的机制、路径 A/B 的源码对比，以及 8×IB 事实带来的带宽反转。</div>
     <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
       <span class="tag">SGLang</span>
       <span class="tag">PD 分离</span>
       <span class="tag">KV Cache</span>
