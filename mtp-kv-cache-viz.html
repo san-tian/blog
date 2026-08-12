@@ -140,7 +140,7 @@
 
 <ul>
   <li><strong>新建 + 随机初始化后训练</strong>（DeepSeek-V3、GLM 系列的 MTP 层）：结构照抄一个 Transformer block，参数独立于主干，从头训。</li>
-  <li><strong>拷贝主干某个 block 作为起点</strong>（EAGLE 类 / Kimi K3 的 Draft 层做法）：用主干已有 block 的权重初始化，再单独微调。好处是起点就懂语言分布，收敛快。</li>
+  <li><strong>拷贝主干某个 block 作为起点</strong>（EAGLE 类做法）：用主干已有 block 的权重初始化，再单独微调。好处是起点就懂语言分布，收敛快。</li>
 </ul>
 
 <p>两种方式的共同点：<strong>推理时它和主干是两套权重、两套 KV cache</strong>。这就是后面显存账要分开算的原因。</p>
@@ -153,7 +153,7 @@
     <ul>
       <li>主干层：上一层直接给 x，不用投影。</li>
       <li>MTP 层（GLM-5.2）：拿主干末层 hidden state h<sub>t</sub>，<strong>拼上一步草稿 token 的 embedding</strong>（h<sub>t</sub> ⊕ emb(上一草稿)），再线性投影回 d<sub>model</sub>。拼这个是为了让 MTP 知道“上一轮猜出了什么词”，从而接着往下猜。</li>
-      <li>Draft 层（Kimi K3 / EAGLE-3）：取主干多个层的 hidden state（如第 1/中/末层），<strong>拼接后线性投影</strong>回 d<sub>model</sub>。主干层的输出从左到右越来越抽象（低层偏 token、高层偏语义），多层级拼接让 draft 同时拿到不同粒度的信息，猜得更准。</li>
+      <li>Draft 层（EAGLE-3）：取主干多个层的 hidden state（如第 1/中/末层），<strong>拼接后线性投影</strong>回 d<sub>model</sub>。主干层的输出从左到右越来越抽象（低层偏 token、高层偏语义），多层级拼接让 draft 同时拿到不同粒度的信息，猜得更准。</li>
     </ul>
   </li>
   <li><strong>末尾的“LM Head / 展开”</strong>：主干层输出 hidden state 给下一层；MTP/Draft 层过共享 LM Head 出 logits，再按自己的方式展开成多个草稿 token。</li>
@@ -195,8 +195,8 @@
 <!-- header -->
 <div></div>
 <div class="hd base">标准 Transformer Layer</div>
-<div class="hd glm">MTP Layer（GLM-5.2 式）</div>
-<div class="hd k3">Draft Layer（Kimi K3 / EAGLE-3 式）</div>
+<div class="hd glm">MTP Layer（GLM-5.2）</div>
+<div class="hd k3">Draft Layer（EAGLE-3 风格）</div>
 
 <!-- 输入 -->
 <div></div>
@@ -292,10 +292,10 @@
 <div class="row-label">展开</div>
 <div class="cell-empty"></div>
 <div class="cell-box iterate">
-  <div style="font-weight:600;margin-bottom:3px">同一份权重 W<sub>MTP</sub> 迭代 3 次</div>
+  <div style="font-weight:600;margin-bottom:3px">7 步跨步共享</div>
   <div class="iter-row">Step 1: h<sub>t</sub> → W → t+1</div>
-  <div class="iter-row">Step 2: ⊕emb(t+1) → W → t+2</div>
-  <div class="iter-row">Step 3: ⊕emb(t+2) → W → t+3</div>
+  <div class="iter-row">Step 2..7: ⊕emb(上一步) → W → t+k</div>
+  <div style="font-size:10px;color:var(--muted);margin-top:3px">IndexShare 复用 indexer<br>KV-Share 用主干 KV</div>
 </div>
 <div class="cell-box iterate k3">
   <div style="font-weight:600;margin-bottom:3px">树形展开 7 步，每步 top-K</div>
@@ -323,12 +323,12 @@
 <div style="background:#f0f9ff;border-left:3px solid var(--blue);padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
 <strong>KV cache 形态</strong><br>
 主干层：无（仅中间张量）<br>
-MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
+MTP（GLM-5.2）：1 层 × 序列长度 + 7 位置临时（主干按 7×N 层预留）
 </div>
 <div style="background:#fef2f2;border-left:3px solid #dc2626;padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
-<strong>权重共享</strong><br>
-3 步共用 W<sub>MTP</sub><br>
-参数只多 1 层
+<strong>跨步共享</strong><br>
+7 步共用 W<sub>MTP</sub><br>
+IndexShare+KV-Share 使 7 步 KV 布局一致
 </div>
 <div style="background:#faf5ff;border-left:3px solid #9333ea;padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
 <strong>树形候选</strong><br>
@@ -338,7 +338,7 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 </div>
 <h3>1.3 它怎么训练出来</h3>
 
-<p>核心思路：<strong>冻结或弱扰动主干，只让 MTP 层学会"接着主干往下猜"</strong>。以 Kimi K3 的 Draft 层为例，是两阶段：</p>
+<p>核心思路：<strong>冻结或弱扰动主干，只让 MTP 层学会"接着主干往下猜"</strong>。这条路径在 EAGLE / EAGLE-3 里讲得最清楚，以它为例：</p>
 
 <div class="card">
 <h4>阶段一：预训练（学基本的多步预测能力）</h4>
@@ -351,7 +351,7 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 <h4>阶段二：后训练蒸馏（对齐真实推理时的分布）</h4>
 <ul>
   <li><strong>冻主干</strong>，只更新 Draft 层，避免拖坏主干质量</li>
-  <li><strong>展开 k 步模拟推理</strong>（K3 为 7 步）：第 1 步吃主干的多层特征（浅层/中层/末层拼接），第 2 步起吃 Draft 自己上一步的输出——刻意制造和推理一致的误差累积</li>
+  <li><strong>展开 k 步模拟推理</strong>（EAGLE-3 为 7 步）：第 1 步吃主干的多层特征（浅层/中层/末层拼接），第 2 步起吃 Draft 自己上一步的输出——刻意制造和推理一致的误差累积</li>
   <li><strong>损失直接对齐接收率</strong>：<code>L = −log Σ_v min(p_v, q_v)</code>，其中 p 是主干分布、q 是 Draft 分布。<code>Σ_v min(p_v, q_v)</code> 正是拒绝采样下这一步被接受的概率，所以这是在直接优化"会被主干接受多少"，而不是用 KL 之类的代理目标</li>
 </ul>
 </div>
@@ -360,7 +360,7 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 <strong>为什么第二阶段必要：</strong>只做 teacher forcing 训练的 drafter，在推理时会遇到训练时没见过的输入（自己的错误输出），越往后越偏，accept rate 掉得很快。展开训练把这个分布偏移提前暴露给模型。
 </div>
 
-<p>GLM-5.2 走的是更省的路线：<strong>只有 1 层 MTP，训练时展开 3 步但三步共用同一份权重</strong>（权重绑定）。代价是三步能力不能各自特化，好处是参数只多 1.3%，且实测 accept length 达到 2.76，高于 DeepSeek-V3 的 2.55。</p>
+<p>GLM 系列走的是“权重绑定”的路线。GLM-5 在 1 层 MTP 的前提下训练时展开 3 步、三步共用同一份权重，参数只多 1.3%，accept length 2.76（高于 DeepSeek-V3.2 的 2.55）。GLM-5.2 进一步推广到 <strong>7 步 MTP</strong>，但不是各步独立，而是用 IndexShare（indexer 只算一次，后续步复用 top-k 索引）和 KV-Share（后续步的 KV 只来自主干 hidden state，不来自 MTP 自身）实现跨步共享 KV 布局，这样训练和推理的输入分布一致；再加上 reject sampling + 端到端 TV loss，accept length 推到 5.47（+20%）。</p>
 
 <h3>1.4 草稿怎么验证</h3>
 
@@ -397,15 +397,15 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 </div>
 <div class="mem-result">可用上下文 = 基准值</div>
 
-<div class="mem-label" style="margin-top:24px"><span>线性投机（如 GLM-5.2，k=3）</span></div>
+<div class="mem-label" style="margin-top:24px"><span>线性投机（GLM-5.2，k=7，IndexShare 共享 KV）</span></div>
 <div class="mem-bar">
   <div class="mem-seg seg-backbone" style="width:84%">主干 KV</div>
   <div class="mem-seg seg-mtp" style="width:6%">MTP</div>
-  <div class="mem-seg seg-tree" style="width:10%">草稿峰值</div>
+  <div class="mem-seg seg-tree" style="width:10%">草稿峰值（7×N 层）</div>
 </div>
-<div class="mem-result">可用上下文 = 基准值 × (1 − 少量占比)</div>
+<div class="mem-result">可用上下文 = 基准值 × (1 − 草稿峰值占比)</div>
 
-<div class="mem-label" style="margin-top:24px"><span>树形投机（如 Kimi K3，多节点）</span></div>
+<div class="mem-label" style="margin-top:24px"><span>树形投机（EAGLE-3 风格，多节点并行验证）</span></div>
 <div class="mem-bar">
   <div class="mem-seg seg-backbone" style="width:72%">主干 KV</div>
   <div class="mem-seg seg-draft" style="width:6%">Draft</div>
@@ -452,7 +452,7 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 <div></div>
 <div class="hd base">Base（无 MTP）</div>
 <div class="hd glm">线性投机（GLM-5.2）</div>
-<div class="hd k3">树形投机（Kimi K3）</div>
+<div class="hd k3">树形投机（EAGLE-3 风格）</div>
 
 <!-- Input -->
 <div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">Input</div>
@@ -497,7 +497,7 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 <!-- 草稿展开 -->
 <div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">草稿<br>展开</div>
 <div class="fwd-empty"></div>
-<div class="fwd-cell draft-step">线性链 d<sub>1</sub> d<sub>2</sub> d<sub>3</sub><br><span class="em">权重绑定 × 3 步</span></div>
+<div class="fwd-cell draft-step">线性链 d<sub>1</sub>…d<sub>7</sub><br><span class="em">IndexShare/KV-Share 跨步共享</span></div>
 <div class="fwd-cell draft-step">候选 token 树<br><span class="em">逐层 top-K 剪枝 → top-63</span></div>
 
 <div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
@@ -513,7 +513,7 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 <!-- 主干验证 -->
 <div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">主干验证<br>(临时 KV)</div>
 <div class="fwd-empty"></div>
-<div class="fwd-cell verify">主干 1× forward<br><span class="em">3 位置 × N 层临时 KV</span></div>
+<div class="fwd-cell verify">主干 1× forward<br><span class="em">7 位置 × N 层临时 KV</span></div>
 <div class="fwd-cell verify">主干 1× forward + tree_mask<br><span class="em">节点数 × N 层临时 KV</span></div>
 
 <div class="arrow-row" style="text-align:center;color:var(--muted);font-size:12px;line-height:1;padding:1px 0;grid-column:1/-1">↓</div>
@@ -521,7 +521,7 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 <!-- 接受 → 输出 -->
 <div class="row-label" style="font-size:10.5px;color:var(--muted);text-align:right;align-self:center">接受判定<br>→ 输出</div>
 <div class="fwd-cell output">1 token<br><span class="em">无加速</span></div>
-<div class="fwd-cell output">接受前缀 + 1 免费 token<br><span class="em">accept ≈ 2.76</span></div>
+<div class="fwd-cell output">接受前缀 + 1 免费 token<br><span class="em">accept ≈ 5.47（7 步）</span></div>
 <div class="fwd-cell output">接受最长路径<br><span class="em">树形接受率 &gt; 线性</span></div>
 
 </div>
@@ -535,14 +535,15 @@ MTP：1 层 × 序列长度 + 3 位置临时（主干按 3×N 层预留）
 <div style="background:#f0f9ff;border-left:3px solid var(--blue);padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
 <strong>KV cache 总量</strong><br>
 Base：N 层 × seq_len<br>
-GLM：N + 1 层常驻 + 3×N 峰值<br>
-K3：93 + 1 层常驻 + 节点数×93 峰值
+GLM-5.2：N + 1 层常驻 + 7×N 峰值（IndexShare 共享）<br>
+EAGLE-3：N + 1 层常驻 + 节点数×N 峰值
 </div>
 <div style="background:#fef2f2;border-left:3px solid #dc2626;padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
 <strong>草稿峰值大小</strong><br>
-GLM：3 个位置（线性链）<br>
-K3：63 个节点（树形）<br>
-→ K3 峰值是 GLM 的 ~21×
+GLM-5.2：7 个位置（线性链）<br>
+EAGLE-3：top-63 个节点（树形）<br>
+→ 树形峰值是线性 9×，代价换取更高接受率
+</div>
 </div>
 <div style="background:#faf5ff;border-left:3px solid #9333ea;padding:10px 12px;font-size:11.5px;line-height:1.6;border-radius:4px">
 <strong>输出分布</strong><br>
@@ -588,23 +589,36 @@ K3：63 个节点（树形）<br>
       <a href="https://arxiv.org/abs/2412.19437" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2412.19437</a>
     </li>
     <li>
+      <strong>GLM-5 论文</strong> — 3 步 MTP 权重共享、accept length 2.76 实测。<br>
+      <a href="https://arxiv.org/abs/2602.15763" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2602.15763</a>
+    </li>
+    <li>
+      <strong>GLM-5.2 MTP 设计（官方博客）</strong> — <strong>7 步 MTP</strong>，用 IndexShare + KV-Share 实现跨步 KV/索引共享；reject sampling + 端到端 TV loss。accept length 5.47（比基线 +20%）。<br>
+      <a href="https://z.ai/blog/glm-5.2" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">z.ai/blog/glm-5.2</a> ·
+      <a href="https://huggingface.co/blog/zai-org/glm-52-blog" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">huggingface.co/blog/zai-org/glm-52-blog</a>
+    </li>
+    <li>
+      <strong>GLM IndexShare 论文</strong> — 每 4 层稀疏 attention 共享 indexer，在 1M context 下 token FLOP 减 2.9×。<br>
+      <a href="https://arxiv.org/abs/2603.12201" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2603.12201</a>
+    </li>
+    <li>
       <strong>EAGLE / EAGLE-3</strong> — 多层级特征融合、树形投机解码、Σ min(p,q) 接受率损失。<br>
       论文: <a href="https://arxiv.org/abs/2401.15077" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2401.15077</a>（EAGLE） ·
       <a href="https://arxiv.org/abs/2503.00040" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2503.00040</a>（EAGLE-3）<br>
       代码: <a href="https://github.com/SafeAILab/EAGLE" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">github.com/SafeAILab/EAGLE</a>
     </li>
     <li>
+      <strong>Kimi K3 技术报告</strong> — 2.8T MoE (104B activated)，16/896 experts，1M context。论文未详细描述自带的 draft model，但默认 inference 配置为 <code>num_speculative_tokens=7</code>。<br>
+      <a href="https://arxiv.org/abs/2607.24653" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2607.24653</a>
+    </li>
+    <li>
+      <strong>DSpark for Kimi K3（社区）</strong> — Inferact 训练的 block-diffusion style speculator，MLA-native 注意力对齐 KV 布局。accept rate ~4.73（coding） / 2.61（creative）。<br>
+      <a href="https://vllm.ai/blog/2026-07-27-k3" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">vllm.ai/blog/2026-07-27-k3</a> ·
+      <a href="https://huggingface.co/Inferact/Kimi-K3-DSpark" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">huggingface.co/Inferact/Kimi-K3-DSpark</a>
+    </li>
+    <li>
       <strong>投机解码分布等价性</strong> — Leviathan, Kalman, Matias 提出的拒绝采样方案，证明投机解码的输出分布与主干采样等价。<br>
       <a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2211.17192</a>
-    </li>
-    <li>
-      <strong>GLM 系列</strong> — 权重绑定的 MTP 设计在 GLM 系列里有公开论文。本文中 GLM-5.2 为该系列中带 MTP 的版本的代号，具体技术细节需查阅对应报告。<br>
-      GLM 技术报告: <a href="https://arxiv.org/abs/2406.12793" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2406.12793</a>（GLM-4）<br>
-      代码: <a href="https://github.com/THUDM" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">github.com/THUDM</a>
-    </li>
-    <li>
-      <strong>Kimi 系列</strong> — Kimi K3 在本文中作为带 Draft 层的 tree-speculative 架构代表，具体架构细节需查阅其官方技术报告。<br>
-      Kimi K2（公开版本，供参考）: <a href="https://arxiv.org/abs/2507.20534" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">arXiv:2507.20534</a>
     </li>
     <li>
       <strong>vLLM PagedAttention</strong> — KV cache 分页与池化管理，是理解 KV cache pool 如何划分的基础。<br>
@@ -612,7 +626,7 @@ K3：63 个节点（树形）<br>
       代码: <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">github.com/vllm-project/vllm</a>
     </li>
   </ul>
-  <p style="margin-top:14px">文中定量数字（KV 占比、草稿节点数、accept length 等）为示意。具体数值随模型架构、KV head 数、草稿树形状、量化精度与框架分配策略变化。</p>
+  <p style="margin-top:14px"><strong>关于本文的示例与限定：</strong>文章以 GLM-5.2（线性 MTP + IndexShare/KV-Share）与 EAGLE-3（树形 + 多层级特征融合）作为线性与树形投机解码的代表讲 KV 开销；GLM-5 是 GLM-5.2 的上一个版本（3 步权重共享，accept 2.76）。文中所有定量数字来自参考节的公开论文与官方博客。<strong>Kimi K3 作为当下 MTP 部署较热的模型一并列出供参考：其官方论文未详述自带 draft model，社区 Inferact 训练的 DSpark 是 block-diffusion 推测。</strong></p>
 </div>
 
 </div>
