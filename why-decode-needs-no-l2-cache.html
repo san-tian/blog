@@ -49,6 +49,14 @@
   blockquote { margin: 20px 0; padding: 14px 20px; border-left: 4px solid var(--accent); background: var(--card); border-radius: 0 8px 8px 0; color: var(--text); }
   blockquote.keyinsight { border-left-color: var(--accent-2); }
   blockquote.keyinsight::before { content: "💡 关键洞察"; display: block; color: var(--accent-2); font-weight: 700; font-size: 0.85em; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .background { background: var(--card); border-left: 4px solid var(--yellow); padding: 18px 24px; border-radius: 0 8px 8px 0; margin: 24px 0; }
+  .callout-summary { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin: 24px 0; }
+  .callout-summary h3 { margin: 0 0 16px; font-size: 1.1em; color: var(--accent); }
+  .callout-summary .point { margin: 12px 0; padding-left: 0; line-height: 1.7; }
+  .callout-summary .badge { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 0.75em; font-weight: 600; margin-right: 8px; }
+  .callout-summary .badge.ok { background: rgba(5, 150, 105, 0.12); color: var(--green); }
+  .callout-summary .badge.no { background: rgba(220, 38, 38, 0.12); color: var(--red); }
+  .callout-summary .badge.q { background: rgba(217, 119, 6, 0.12); color: var(--yellow); }
   table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.92em; display: block; overflow-x: auto; }
   th, td { border: 1px solid var(--border); padding: 10px 14px; text-align: left; vertical-align: top; }
   th { background: var(--card-2); color: #111111; font-weight: 600; }
@@ -66,6 +74,9 @@
 <header class="hero">
   <h1>为什么 PD 分离中，decode 不需要开二级缓存</h1>
   <div class="subtitle">prefill 跨机重传（路径 A）为什么比 decode 本地 L2 缓存加载（路径 B）更快</div>
+  <div class="meta">
+    <span>📝 本文主要由 AI agent 完成</span>
+  </div>
 </header>
 
 <div class="background">
@@ -91,16 +102,6 @@
 <tr><td><strong>L2</strong></td><td>host DRAM</td><td><code>--hicache-ratio</code>（默认 2.0）</td><td>默认就有，不依赖 storage backend</td></tr>
 <tr><td><strong>L3</strong>（可选）</td><td>NVMe / Mooncake / NIXL / ...</td><td><code>--hicache-storage-backend</code></td><td>8 种可选 backend，全是外部/分布式存储</td></tr>
 </table>
-<p>L2 默认是 host DRAM，NVMe 只是 L3 的一个选项。源码确认（<code>decode_kvcache_offload_manager.py</code>）：</p>
-<pre><code><span class="tok-cmt"># L2：host DRAM pool</span>
-self.decode_host_mem_pool = MLATokenToKVPoolHost(
-    kv_cache, server_args.hicache_ratio, ...
-)
-<span class="tok-cmt"># L3：可选的 storage backend</span>
-self.cache_controller = HiCacheController(
-    mem_pool_host=self.decode_host_mem_pool,                  <span class="tok-cmt"># ← L2 = host DRAM</span>
-    storage_backend=server_args.hicache_storage_backend,      <span class="tok-cmt"># ← L3 = file/nixl/...</span>
-)</code></pre>
 
 <h2>Decode 侧二级缓存：机制完整</h2>
 <p><code>DecodeKVCacheOffloadManager</code> 提供完整的 decode offload 机制：</p>
@@ -144,21 +145,6 @@ self.enable_all_cp_ranks_for_transfer = (
 <li><strong>跨机 vs 本机</strong>：路径 A 跨机器，路径 B 本机——跨机器的 RTT 和 bootstrap 是路径 A 独有开销</li>
 </ul>
 <p>具体在什么消息大小下路径 A/B 谁快，无法仅凭源码断言，需要实测。</p>
-
-<h2>实测验证方案</h2>
-<p>路径 A 有现成监控指标：</p>
-<pre><code>sum(sglang:kv_transfer_speed_gb_s_sum{...})   <span class="tok-cmt"># 路径 A 实测带宽</span>
-...kv_transfer_latency_ms...                   <span class="tok-cmt"># KV 传输延迟</span>
-...per_stage_req_latency_seconds_sum{stage="prefill_transfer_kv_cache"}</code></pre>
-<p>对照实验：</p>
-<ol>
-<li>当前配置（decode 不开 offload）跑一批共享前缀请求，记 TTFT 和 <code>kv_transfer_speed_gb_s</code>（全走路径 A）</li>
-<li>打开 offload + restore，跑同样请求（第二批起命中 L2/L3，走路径 B），记 TTFT</li>
-<li>对比 TTFT 差值 = 路径 B 相对 A 的实际收益</li>
-</ol>
-<blockquote>
-<p>路径 B 的 restore 指标（<code>ack_load_queue</code> 的 timing event）在监控脚本里没有对应 Prometheus metric，需要在 decode 机器上看 SGLang 日志里的 hicache load timing，或加 metric。</p>
-</blockquote>
 
 <h2>附录：关键源码文件索引</h2>
 <table>
