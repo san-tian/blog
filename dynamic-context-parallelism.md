@@ -1,5 +1,10 @@
 # DCP 实测：消除张量并行下的 KV Cache 重复存储
 
+> **本文改编自微信公众号文章**
+> 标题：《DCP 实测:消除张量并行下的 KV Cache 重复存储,收益、代价与适用边界》
+> 来源：微信公众号
+> 链接：https://mp.weixin.qq.com/s/0M-_6lE6z87Sk67FaDrgkA
+
 ## 核心问题
 
 **DCP** 是 vLLM 的 `--decode-context-parallel-size` 参数的简称，全称 **Decode Context Parallel**（解码上下文并行）。它解决的是 GQA 模型在高张量并行度下的 **KV Cache 重复存储**问题。
