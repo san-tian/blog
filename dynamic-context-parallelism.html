@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DCP: 动态上下文并行 —— 破解长上下文训练的输入动态性难题</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --card: #ffffff;
+    --card-2: #f8f8f7;
+    --border: #e7e5e4;
+    --text: #1c1917;
+    --text-dim: #78716c;
+    --accent: #1d4ed8;
+    --accent-2: #1d4ed8;
+    --green: #059669;
+    --red: #dc2626;
+    --yellow: #d97706;
+    --code-bg: #f8fafc;
+    --inline-code-bg: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    margin: 0;
+    padding: 0;
+    font-size: 16px;
+  }
+  .container { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+  header.hero { text-align: center; margin-bottom: 56px; padding-bottom: 32px; border-bottom: 1px solid var(--border); }
+  header.hero h1 { font-size: 2.1em; font-weight: 700; line-height: 1.3; color: #111111; margin: 0 0 16px; }
+  header.hero .subtitle { color: var(--text-dim); font-size: 1em; margin: 0 auto; max-width: 620px; }
+  header.hero .meta { margin-top: 20px; color: var(--text-dim); font-size: 0.85em; }
+  header.hero .meta span { display: inline-block; padding: 4px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 999px; margin: 0 4px; }
+  h2 { color: #111111; font-size: 1.5em; font-weight: 650; margin: 56px 0 20px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h3 { color: #111111; font-size: 1.18em; font-weight: 600; margin: 36px 0 14px; }
+  h4 { color: var(--text); font-size: 1.02em; font-weight: 600; margin: 24px 0 10px; }
+  p { margin: 14px 0; }
+  strong { color: #111111; font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: "JetBrains Mono", "Fira Code", "SF Mono", Consolas, "Liberation Mono", Menlo, monospace; background: var(--inline-code-bg); color: #2563eb; padding: 2px 6px; border-radius: 4px; font-size: 0.88em; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 18px 0; font-size: 0.85em; line-height: 1.6; }
+  pre code { background: none; color: var(--text); padding: 0; border-radius: 0; font-size: 1em; }
+  blockquote { margin: 20px 0; padding: 14px 20px; border-left: 4px solid var(--accent); background: var(--card); border-radius: 0 8px 8px 0; color: var(--text); }
+  table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.92em; display: block; overflow-x: auto; }
+  th, td { border: 1px solid var(--border); padding: 10px 14px; text-align: left; vertical-align: top; }
+  th { background: var(--card-2); color: #111111; font-weight: 600; }
+  tr:nth-child(even) td { background: var(--card); }
+  td code, th code { font-size: 0.85em; }
+  ul, ol { padding-left: 1.5em; }
+  li { margin: 6px 0; }
+  .background { margin: 24px 0; padding: 18px 20px; background: var(--card); border-left: 4px solid #f97316; border-radius: 0 8px 8px 0; }
+  .background h4 { margin-top: 0; color: #f97316; }
+  .callout-summary { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin: 24px 0; }
+  .callout-summary h4 { margin-top: 0; color: var(--accent); }
+  .point { display: flex; align-items: flex-start; margin: 10px 0; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: 600; margin-right: 10px; flex-shrink: 0; }
+  .badge.ok { background: #d1fae5; color: var(--green); }
+  .badge.no { background: #fee2e2; color: var(--red); }
+  .badge.q { background: #fed7aa; color: var(--yellow); }
+  footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85em; text-align: center; }
+  @media (max-width: 640px) { .container { padding: 24px 16px 64px; } header.hero h1 { font-size: 1.6em; } table { font-size: 0.82em; } }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header class="hero">
+  <h1>DCP: 动态上下文并行</h1>
+  <div class="subtitle">破解长上下文训练的输入动态性难题</div>
+  <div class="meta">
+    <span>SOSP'25</span>
+    <span>Context Parallelism</span>
+    <span>Long Context Training</span>
+    <span>Hypergraph Partitioning</span>
+  </div>
+</header>
+
+<div class="background">
+<h4>背景</h4>
+<p><strong>Context Parallelism (CP)</strong> 是支持长上下文训练的关键技术，通过将序列分布到多个设备并行计算注意力来突破单卡内存限制。现有 CP 方法（RingFlashAttention、Ulysses、DeepSpeed-Ulysses 等）采用静态配置：为所有 batch 使用固定的并行度和数据分区方案。</p>
+<p>然而，训练数据具有<strong>输入动态性</strong>：序列长度和 token 关系（注意力模式）在样本间存在巨大变异。静态配置无法适应这种动态性，导致冗余通信和计算不均衡。</p>
+</div>
+
+<h2>核心问题</h2>
+
+<p>长上下文训练面临两类输入动态性：</p>
+
+<h3>1. 序列长度差异</h3>
+<p>训练数据中短序列远多于长序列。例如 LongAlign 和 LongDataCollection 数据集（论文图 2）：</p>
+<ul>
+<li>大部分序列长度 &lt; 20K tokens</li>
+<li>但也有 100K+ 的长序列（占比小但训练成本极高）</li>
+<li>Llama 3 预训练的 tuning 阶段：128K 上下文样本仅占 0.1%</li>
+</ul>
+
+<p><strong>静态 CP 的问题</strong>：短序列也按最长序列的通信模式传输 KV cache，产生冗余通信。论文图 5a 显示，8B GPT 模型在 EC2 p4d.24xlarge 集群（8 节点 × 8 GPUs）上训练时，16-way CP 的通信开销占总迭代时间的 <strong>36.7%</strong>。</p>
+
+<h3>2. 注意力模式多样</h3>
+<p>不同任务使用不同的注意力掩码（论文图 6）：</p>
+<ul>
+<li><strong>Causal mask</strong>：标准因果语言模型（每个 token 只能看到之前的 token）</li>
+<li><strong>Shared question mask</strong>：多候选答案共享同一个问题前缀（RLHF、多候选生成）</li>
+<li><strong>Lambda-shaped mask</strong>：结合注意力 sink 和滑动窗口</li>
+<li><strong>Block-wise mask</strong>：文档级块之间稀疏连接（检索增强生成）</li>
+</ul>
+
+<p><strong>静态 CP 的问题</strong>：为 causal mask 设计的分区方案应用到 sparse mask 时，会传输大量不参与计算的 KV 块。论文图 7b 显示，在 shared question mask 下，38/48 个 KV 块未被使用但仍被传输（冗余率 79%）。</p>
+
+<div class="callout-summary">
+<h4>静态 CP 的性能问题</h4>
+<div class="point"><span class="badge no">通信冗余</span><span>序列长度 × CP degree 决定通信量，短序列产生大量无效传输</span></div>
+<div class="point"><span class="badge no">计算不均衡</span><span>不同设备间负载严重失衡（论文图 5c：长短序列混合时，某些设备空闲而其他设备过载）</span></div>
+<div class="point"><span class="badge no">掩码不兼容</span><span>为 causal mask 优化的配置无法高效处理 sparse mask</span></div>
+</div>
+
+<h2>DCP 方案</h2>
+
+<p>DCP (Dynamic Context Parallelism) 通过<strong>细粒度块级分区 + 动态映射</strong>解决输入动态性问题。核心思想：为每个训练 batch 动态生成最优的并行配置，而不是使用全局固定配置。</p>
+
+<h3>1. 块级数据和计算分区</h3>
+
+<p>DCP 将注意力计算抽象为两类块（论文图 9、10）：</p>
+
+<h4>数据块（Data Block）</h4>
+<p>Q、K、V、O 张量的连续切片：</p>
+<ul>
+<li>Q、K、V 形状 [B, H, L, D]（batch、head、seq_len、hidden_dim）</li>
+<li>按 batch 和 seq_len 维度划分为 <code>H × B_b × B_q</code> 个 Q 块和 <code>B_b × B_kv</code> 个 KV 块</li>
+<li>块大小是超参数（如 Q/KV 块 256 tokens）</li>
+</ul>
+
+<h4>计算块（Computation Block）</h4>
+<p>描述一对 Q 块和 KV 块之间的注意力计算：</p>
+<ul>
+<li>一个 Q<sub>i</sub> 块和 KV<sub>j</sub> 块的计算产生输出块 O<sub>i</sub></li>
+<li>计算公式：O<sub>i</sub> = Softmax((Q<sub>i</sub> × K<sub>j</sub><sup>T</sup>) / √D) × V<sub>j</sub></li>
+<li><strong>关键优化</strong>：如果注意力掩码 M<sub>ij</sub> = 0（全部被 mask），则跳过该计算块</li>
+</ul>
+
+<blockquote>
+<strong>统一表示的威力</strong>：数据块 + 计算块的抽象统一描述了所有 CP 配置。论文图 5 展示：(a) 传统 ring attention、(b) pure DP（无通信但计算不均）、(c) 长序列用 CP + 短序列用 DP 的混合配置，都可以表示为不同的块到设备映射。
+</blockquote>
+
+<h3>2. 超图分区优化映射</h3>
+
+<p>将块到设备的映射建模为<strong>超图分区问题</strong>（Hypergraph Partitioning，论文图 12）：</p>
+
+<h4>超图构建</h4>
+<ul>
+<li><strong>顶点 (Vertex)</strong>：
+  <ul>
+    <li>数据块（Q、KV、O）+ 计算块</li>
+    <li>顶点权重 = 数据块大小（bytes）+ 计算块 FLOPS</li>
+    <li>例如：Q 块权重 = <code>head_dim × block_size × 2</code> bytes（BF16）</li>
+    <li>计算块权重 = <code>2 × head_dim × Q_size × KV_size</code> FLOPS</li>
+  </ul>
+</li>
+<li><strong>超边 (Hyperedge)</strong>：
+  <ul>
+    <li>连接一个计算块与其输入/输出数据块（1 个计算块 + 1 个 Q 块 + 1 个 KV 块 + 1 个 O 块）</li>
+    <li>超边权重 = 数据块大小（跨设备传输成本）</li>
+  </ul>
+</li>
+</ul>
+
+<h4>优化目标</h4>
+<pre><code>minimize Σ_{e∈E} s_e(λ_e - 1)  # 跨设备通信量
+subject to:
+  w(P_i) ≤ [1+ε, 1] ⊙ w(N)/R  # 负载均衡约束
+</code></pre>
+<p>其中：</p>
+<ul>
+<li><code>s_e</code>：超边 e 的权重（数据块大小）</li>
+<li><code>λ_e</code>：超边 e 连接的顶点被分配到的不同设备数（1 表示所有顶点在同一设备，无通信）</li>
+<li><code>w(P_i)</code>：设备 i 的总权重（计算 + 内存）</li>
+<li><code>w(N)/R</code>：平均每设备负载（R 是设备数）</li>
+<li><code>ε</code>：负载不均衡容忍度（如 0.03，表示允许 3% 偏差）</li>
+</ul>
+
+<h4>层级分区</h4>
+<p>由于机器间通信（NIC）比机器内通信（NVSwitch）慢得多，采用两级分区：</p>
+<ol>
+<li><strong>机器级分区</strong>：优先最小化跨机器通信（带宽低、延迟高）</li>
+<li><strong>设备级分区</strong>：在每台机器内优化设备间通信</li>
+</ol>
+
+<p>使用 <strong>KaHyPar</strong> 等高效启发式算法求解（超图分区是 NP-hard 问题）。论文使用 multi-level 启发式：coarsening（粗化）→ initial partitioning（初始分区）→ refinement（细化）。</p>
+
+<h3>3. 多路分治调度</h3>
+
+<p>块到设备的映射确定后，需要生成每个设备的执行计划（论文 Listing 3）：</p>
+
+<h4>调度策略</h4>
+<ol>
+<li>将每个设备的计算块按<strong>通信需求</strong>分为 T 个 division（如 T=4）</li>
+<li>第 1 个 division：调度最少通信的块（优先执行不依赖远程数据的计算）</li>
+<li>后续 division：按通信量递增调度</li>
+<li>每个 division 内的操作使用 <strong>fused kernel</strong>（Triton）执行：
+  <ul>
+    <li>Attention 计算（基于 FlashAttention）</li>
+    <li>Reduction（多个计算块贡献同一输出块时聚合）</li>
+    <li>Copy（管理块级缓冲区）</li>
+    <li>Comm Launch（异步启动下一 division 的通信）</li>
+  </ul>
+</li>
+</ol>
+
+<blockquote>
+<strong>通信隐藏</strong>：通过分 division 调度，division i 的计算可以与 division i+1 的通信重叠，最大化 GPU 利用率。
+</blockquote>
+
+<h3>4. 系统架构</h3>
+
+<p>DCP 系统包含三个模块（论文图 8）：</p>
+
+<table>
+<tr><th>模块</th><th>职责</th><th>运行时机</th></tr>
+<tr>
+  <td><strong>Data Loader</strong></td>
+  <td>预取序列长度和掩码模式，触发 Planner</td>
+  <td>训练迭代开始前（CPU 异步）</td>
+</tr>
+<tr>
+  <td><strong>Planner</strong></td>
+  <td>
+    • 生成数据块和计算块（Block Generation）<br>
+    • 超图分区求解最优映射（Placement w/ Hypergraph）<br>
+    • 生成每设备执行计划（Comp. & Comm. Scheduling）
+  </td>
+  <td>与 GPU 训练流水线重叠（lookahead κ 迭代）</td>
+</tr>
+<tr>
+  <td><strong>Executor</strong></td>
+  <td>
+    • 块级缓冲区管理（按类型索引复用，避免频繁分配）<br>
+    • 执行 DCP instructions（blockwise attention、reduction、copy、comm、wait）<br>
+    • 使用 FlashAttention/Triton 实现高性能 kernel
+  </td>
+  <td>GPU 训练迭代中</td>
+</tr>
+</table>
+
+<h3>5. 用户接口</h3>
+
+<p>DCP 提供简洁的 API（论文 Listing 2）：</p>
+
+<pre><code># 1. 替换 attention 实现
+core_attn_out = DCPAttn.apply(dcp_executor, q, k, v)
+
+# 2. 定义掩码函数（输入序列信息 → 掩码矩阵）
+def mask_fn(seqlens, ...):
+    return mask
+
+# 3. 训练脚本
+dcp_dataloader = DCPDataloader(dataset, mask_fn)
+dcp_executor = DCPExecutor(grouped_ranks)
+for local_data, execution_plan in dcp_dataloader:
+    loss = model(local_data, dcp_executor)
+</code></pre>
+
+<p>Planner 可以提前 κ 迭代（如 κ=8）预取输入信息并规划，与 GPU 训练完全重叠，消除规划开销。</p>
+
+<h2>性能数据</h2>
+
+<h3>Attention 微基准测试</h3>
+
+<p><strong>实验环境</strong>：8× NVIDIA A100 (80GB)，NVSwitch 600GB/s 互联，4×100 Gbps NIC 跨机通信</p>
+
+<table>
+<tr><th>场景</th><th>Baseline</th><th>DCP 加速比</th></tr>
+<tr><td>Causal mask</td><td>RingFlashAttention</td><td><strong>1.19×–2.45×</strong></td></tr>
+<tr><td>Sparse mask</td><td>-</td><td><strong>2.15×–3.77×</strong></td></tr>
+</table>
+
+<div class="callout-summary">
+<h4>DCP 的优势来源</h4>
+<div class="point"><span class="badge ok">动态分区</span><span>为每个序列选择最优 CP degree，而不是固定 ring size</span></div>
+<div class="point"><span class="badge ok">变长支持</span><span>ZigZag 只支持 2<sup>R</sup> 块大小，LoongTrain 不支持序列长度维度变长（需 padding），DCP 原生支持任意长度</span></div>
+<div class="point"><span class="badge ok">通信避免</span><span>Sparse mask 下，被 mask 的计算块及其数据块完全跳过，消除冗余通信</span></div>
+</div>
+
+<h3>端到端训练</h3>
+
+<p><strong>对比框架</strong>：TransformerEngine（NVIDIA）、LoongTrain</p>
+
+<table>
+<tr><th>掩码类型</th><th>DCP 端到端加速比</th></tr>
+<tr><td>Causal mask</td><td><strong>0.94×–1.16×</strong></td></tr>
+<tr><td>Sparse mask</td><td><strong>1.00×–1.46×</strong></td></tr>
+</table>
+
+<blockquote>
+<strong>为什么端到端加速低于 attention 层加速？</strong><br>
+论文图 1 显示，8B GPT 模型训练时间构成：44.6% attention、36.7% CP 通信、其余 MLP/LayerNorm 等。<br>
+• <strong>Causal mask</strong>：静态 CP 已较优化（ring pattern 契合因果依赖），DCP 提升空间有限<br>
+• <strong>Sparse mask</strong>：静态 CP 产生大量冗余通信（图 7b：79% KV 块未使用但仍传输），DCP 消除冗余获得显著提升
+</blockquote>
+
+<h2>技术亮点</h2>
+
+<h3>1. 负载感知的通信优化</h3>
+<p>超图分区同时优化计算和通信：</p>
+<ul>
+<li>计算块权重精确建模不同掩码下的 FLOPS（causal mask 中上三角被 mask，计算量减半）</li>
+<li>层级分区优先最小化跨机器通信（机器间带宽 << 机器内带宽）</li>
+</ul>
+
+<h3>2. 零计算浪费</h3>
+<p>被 mask 的计算块不生成（如注意力掩码 M<sub>ij</sub> = 0），对应数据块无需传输：</p>
+<ul>
+<li>Causal mask：上三角计算块全部跳过</li>
+<li>Shared question mask：不同答案候选之间的交叉注意力跳过</li>
+<li>Block-wise sparse mask：不相邻的文档块之间跳过</li>
+</ul>
+
+<h3>3. 与其他并行正交</h3>
+<table>
+<tr><th>并行类型</th><th>与 DCP 的关系</th><th>建议等级顺序</th></tr>
+<tr>
+  <td><strong>Tensor Parallelism (TP)</strong></td>
+  <td>可在 head 维度联合使用，DCP 的 head 维度块大小应整除 TP degree</td>
+  <td rowspan="4">TP → CP → DP → PP<br><small>（Megatron-LM 风格）</small></td>
+</tr>
+<tr>
+  <td><strong>Data Parallelism (DP)</strong></td>
+  <td>DCP 占用传统 DP 的设备等级，可在 DP group 间应用不同 CP 配置</td>
+</tr>
+<tr>
+  <td><strong>Pipeline Parallelism (PP)</strong></td>
+  <td>不同 stage 可用不同 CP 配置，但需共享执行计划避免高通信成本</td>
+</tr>
+<tr>
+  <td><strong>Expert Parallelism (EP)</strong></td>
+  <td>正交，MoE 层不涉及 CP</td>
+</tr>
+</table>
+
+<h3>4. 规划开销消除</h3>
+<p>Planner 在 CPU 上运行，使用 lookahead 预取机制：</p>
+<ul>
+<li>训练迭代 i 时，Planner 预取迭代 i+κ 的输入信息（序列长度、掩码）</li>
+<li>规划时间与 GPU 训练完全重叠（异步流水线）</li>
+<li>论文实验显示：κ=8 时，规划开销 < 1% 训练时间</li>
+</ul>
+
+<h2>适用场景</h2>
+
+<div class="callout-summary">
+<h4>DCP 最适合的工作负载</h4>
+<div class="point"><span class="badge ok">长上下文预训练</span><span>如 Llama 3 的 128K 上下文 tuning 阶段（高成本样本占比小但至关重要）</span></div>
+<div class="point"><span class="badge ok">指令微调</span><span>数据集包含大量短序列（<4K）+ 少量长序列（>100K），如 LongAlign、LongDataCollection</span></div>
+<div class="point"><span class="badge ok">多任务训练</span><span>不同任务使用不同注意力模式（RLHF 的 shared question、检索的 block-wise、标准 causal LM）</span></div>
+<div class="point"><span class="badge q">批处理推理</span><span>论文聚焦训练，但 DCP 的动态分区思想可扩展到推理（不同请求长度差异大）</span></div>
+</div>
+
+<h2>实现要点</h2>
+
+<table>
+<tr><th>方面</th><th>细节</th></tr>
+<tr>
+  <td><strong>代码量</strong></td>
+  <td>核心模块 14K LOC Python（dataloader、planner、executor）+ 300 LOC C++（通信/计算调度加速）</td>
+</tr>
+<tr>
+  <td><strong>依赖</strong></td>
+  <td>
+    • FlashAttention（block attention kernel）<br>
+    • Triton（fused kernel 生成）<br>
+    • KaHyPar（超图分区库）<br>
+    • Torch P2P（跨设备通信）
+  </td>
+</tr>
+<tr>
+  <td><strong>内存开销</strong></td>
+  <td>块级缓冲区按类型索引复用（如所有 Q 块共享缓冲区，通过偏移量区分），避免频繁分配</td>
+</tr>
+<tr>
+  <td><strong>规划开销</strong></td>
+  <td>Planner 在 CPU 异步执行（lookahead κ 迭代），与 GPU 训练重叠，测得开销 < 1%</td>
+</tr>
+</table>
+
+<h2>源码与论文</h2>
+
+<ul>
+<li><strong>论文</strong>：Chenyu Jiang, Zhenkun Cai, Ye Tian, Zhen Jia, Yida Wang, Chuan Wu. "DCP: Addressing Input Dynamism In Long-Context Training via Dynamic Context Parallelism". SOSP'25, October 13–16, 2025, Seoul, Republic of Korea.</li>
+<li><strong>arXiv</strong>: <a href="https://arxiv.org/abs/2510.10620">https://arxiv.org/abs/2510.10620</a></li>
+<li><strong>代码</strong>: <a href="https://github.com/chenyu-jiang/dcp">https://github.com/chenyu-jiang/dcp</a></li>
+<li><strong>论文 PDF</strong>: <a href="https://i.cs.hku.hk/~cwu/papers/cyjiang-sosp25.pdf">https://i.cs.hku.hk/~cwu/papers/cyjiang-sosp25.pdf</a></li>
+</ul>
+
+<footer>
+  <p>© 2026 | 本文基于 SOSP'25 论文《DCP: Addressing Input Dynamism In Long-Context Training via Dynamic Context Parallelism》整理</p>
+</footer>
+
+</div>
+</body>
+</html>
