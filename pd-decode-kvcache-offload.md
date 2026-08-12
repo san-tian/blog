@@ -1,12 +1,16 @@
 # PD 分离架构中 decode 二级 KV 缓存的机制与带宽权衡
 
-在 PD 分离部署中，decode 侧是否需要开启二级 KV 缓存取决于两个因素：**机制支持**与**带宽权衡**。SGLang 的 `DecodeKVCacheOffloadManager` 提供了完整的 L2（host DRAM）+ L3（NVMe/分布式存储）支持，但在 8×IB 聚合带宽（~200 GB/s）远高于单机 H2D（~50-64 GB/s）的环境下，跨机 RDMA 传输（路径 A）已经足够快，decode 本地缓存的边际收益可能不足以抵消 offload 开销。
+PD 分离部署里，prefill 节点普遍使用 L2 cache（把 KV cache offload 到 host DRAM）来扩大可用缓存空间、提升命中率。一个自然的问题是：**decode 节点是不是也应该有类似的机制？**
+
+本文给出的答案是：**机制完整支持，但带宽维度上不需要**。SGLang 的 `DecodeKVCacheOffloadManager` 提供了完整的 decode 侧 L2（host DRAM）+ L3（NVMe/分布式存储）支持，但在 8×IB 聚合带宽（~200 GB/s）远高于单机 H2D（~50-64 GB/s）的环境下，**跨机 RDMA 重传（路径 A）比从本地 L2 缓存加载（路径 B）更快**，因此 decode offload 缺乏边际收益。
 
 **核心结论**：
 
-- **机制**：SGLang decode 侧有完整的二级缓存机制（`DecodeKVCacheOffloadManager`），支持 GPU → host DRAM → NVMe/分布式存储三层架构，下次命中时通过专用流 layer-wise overlap 恢复
-- **带宽**：8×IB 并行传输（`SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER=1`）下，路径 A（跨机 RDMA）聚合带宽 ~200 GB/s，远高于路径 B（本机 H2D）~50-64 GB/s。带宽维度路径 A 占优
-- **权衡**：decode offload 需额外付出 D2H + host→storage 写回开销。在路径 A 已足够快的前提下，边际收益可能为负。具体临界点取决于消息大小、前缀命中率、负载特征，需实测确认
+- **机制完整**：SGLang decode 侧有完整的二级缓存机制（`DecodeKVCacheOffloadManager`），支持 GPU → host DRAM → NVMe/分布式存储三层架构，下次命中时通过专用流 layer-wise overlap 恢复
+- **路径 A 更快**：8×IB 并行传输（`SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER=1`）下，路径 A（跨机 RDMA）聚合带宽 ~200 GB/s，远高于路径 B（本机 H2D）~50-64 GB/s
+- **结论**：从 prefill 重新传输 KV（路径 A）比从 decode 本地 L2 缓存恢复（路径 B）更快，因此不需要开启 decode offload。本文所有带宽数字为硬件规格理论值。
+
+本文基于 SGLang v0.5.14 源码与实际部署配置，分析 decode 侧二级缓存的机制实现与带宽权衡。
 
 本文基于 SGLang v0.5.14 源码与实际部署配置，分析 decode 侧二级缓存的机制实现与带宽权衡。所有带宽数字为硬件规格理论值。
 
