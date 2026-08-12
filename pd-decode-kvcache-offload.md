@@ -155,7 +155,7 @@ class LayerLoadingEvent:
 
 **路径 B 延迟 = Σ 每层 H2D,但 layer-wise overlap 后 ≈ max(单层 H2D, 单层 attention) × 层数**。专用 `load_stream` 不抢 attention 计算流,无 gather/scatter。
 
-### 路径 B 的结构优势(源码可确认)
+### 路径 B 的结构优势(但带宽不占优)
 
 | 维度 | 路径 A | 路径 B |
 |---|---|---|
@@ -199,7 +199,7 @@ prefill 用了 CP8(Context Parallel 8 卡)+ `--enable-dsa-prefill-cp-layersplit`
 
 带宽维度路径 A 占优:8×IB 聚合后 ~200 GB/s 远高于路径 B 的 ~50-64 GB/s。
 
-### 净较量:取决于负载特征
+### 例外：小消息场景
 
 - **小消息**(短前缀,几 MB):路径 A 的 gather/scatter kernel launch + RDMA per-WR 开销占比大,有效带宽远低于 200 GB/s 峰值;路径 B 的 layer-wise overlap 优势凸显 → **路径 B 可能赢**
 - **大消息**(长前缀,几十 MB+):路径 A 的 8×IB 聚合带宽优势放大,gather/scatter 占比下降 → **路径 A 可能赢**
@@ -476,49 +476,9 @@ decode_req.req.prefix_indices = torch.cat(
 
 ## 部署决策：为什么 decode 没开二级缓存
 
-### 可能的原因(按可信度排)
+核心原因已在结论中说明：**8×IB 下路径 A 已经够快**。路径 A 聚合带宽 ~200 GB/s（8×IB），路径 B 受 host DRAM 带宽限制（~50-64 GB/s）。当路径 A 已经很快时，decode offload 的收益——即“省下的路径 A 传输”换成“路径 B 加载”——带宽上不占优，且要额外付 offload 写回开销（D2H + host→NVMe）。
 
-1. **8×IB 下路径 A 已经够快(最可能)**
-   路径 A 聚合带宽 ~200 GB/s(8×IB),路径 B 受 host DRAM 带宽限制(~50-64 GB/s)。当路径 A 已经很快时,decode offload 的收益——即"省下的路径 A 传输"换成"路径 B 加载"——带宽上不占优,且要额外付 offload 写回开销(D2H + host→NVMe)。**边际收益可能不足以抵消开销**。
-
-2. **镜像版本的特性成熟度**
-   镜像 `v0.5.14-pr47` + CjiW fork 补丁。`DecodeKVCacheOffloadManager` 在 main 分支是较新特性,测试文件还在 `test/registered/` 下。这个 fork 基于 v0.5.14,可能没有这套代码,或未在 ROCm/MI300X 上验证。
-   **验证方法**:
-   ```bash
-   docker run --rm b200routeraca.azurecr.io/mindverse/sglang:v0.5.14-pr47 \
-     python3 -m sglang.launch_server --help 2>&1 | grep -i "offload-kvcache"
-   ```
-
-3. **配置复杂度**
-   要调 `num-reserved-decode-tokens`、`hicache-ratio`、stride 等,调不好影响 decode 吞吐,部署时可能先没启用。
-
-### 怎么开(如果镜像支持)
-
-在 decode 启动命令加:
-
-```bash
-# 接收侧 restore(路径 B)
---enable-hierarchical-cache \
---hicache-ratio 2 \                          # L2 host DRAM = 2× GPU pool
---hicache-mem-layout page_first \
-
-# 写回侧(offload manager)
---hicache-storage-backend file \
---file-storage-path /nvme/hicache \
---disaggregation-decode-enable-offload-kvcache \
---num-reserved-decode-tokens 128 \
-```
-
-环境变量:
-```bash
-export SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR="/nvme/hicache"
-export SGLANG_HICACHE_FILE_BACKEND_MAX_SIZE="200G"
-export SGLANG_HICACHE_FILE_BACKEND_MIN_FREE_SPACE="10G"
-# 可选:调 offload 粒度
-# export SGLANG_HICACHE_DECODE_OFFLOAD_STRIDE=128
-```
-
-`mem-fraction-static` 可能要从 0.80 降一点给 L2 元数据留空间。
+具体在什么消息大小下路径 A/B 谁快，需要实测确认。路径 A 有现成监控指标：
 
 ### 实测验证方案
 

@@ -426,7 +426,7 @@ __builtin_nontemporal_store(tmp, dst + j);</code></pre>
         <span class="tok-cmt"># 计算侧等对应层就绪，加载 layer N+1 和计算 layer N 并行</span></code></pre>
 <p><strong>路径 B 延迟 = Σ 每层 H2D，但 layer-wise overlap 后 ≈ max(单层 H2D, 单层 attention) × 层数</strong>。专用 <code>load_stream</code> 不抢 attention 计算流，无 gather/scatter。</p>
 
-<h3>路径 B 的结构优势（源码可确认）</h3>
+<h3>路径 B 的结构优势（但带宽不占优）</h3>
 <table>
 <tr><th>维度</th><th>路径 A</th><th>路径 B</th></tr>
 <tr><td>串行阶段</td><td>3 段（gather + RDMA + scatter）</td><td>1 段（H2D）+ overlap</td></tr>
@@ -464,7 +464,7 @@ self.enable_all_cp_ranks_for_transfer = (
 
 <p>带宽维度路径 A 占优：8×IB 聚合后 ~200 GB/s 远高于路径 B 的 ~50-64 GB/s。</p>
 
-<h3>净较量：取决于负载特征</h3>
+<h3>例外：小消息场景</h3>
 <ul>
 <li><strong>小消息</strong>（短前缀，几 MB）：路径 A 的 gather/scatter kernel launch + RDMA per-WR 开销占比大，有效带宽远低于峰值；路径 B 的 layer-wise overlap 优势凸显 → <strong>路径 B 可能赢</strong></li>
 <li><strong>大消息</strong>（长前缀，几十 MB+）：路径 A 的 8×IB 聚合带宽优势放大，gather/scatter 占比下降 → <strong>路径 A 可能赢</strong></li>
@@ -645,37 +645,22 @@ consumer_index = self.tree_cache.ready_to_load_host_cache()</code></pre>
 </blockquote>
 
 <h2 class="anchor-target" id="s7">部署决策：为什么 decode 没开二级缓存</h2>
+<p>核心原因已在结论中说明：<strong>8×IB 下路径 A 已经够快</strong>。路径 A 聚合带宽 ~200 GB/s（8×IB），路径 B 受 host DRAM 带宽限制（~50-64 GB/s）。当路径 A 已经很快时，decode offload 的收益——即"省下的路径 A 传输"换成"路径 B 加载"——带宽上不占优，且要额外付 offload 写回开销（D2H + host→NVMe）。</p>
 
-<h3>1. 8×IB 下路径 A 已经够快（最可能）</h3>
-<p>路径 A 聚合带宽 ~200 GB/s（8×IB），路径 B 受 host DRAM 带宽限制（~50-64 GB/s）。当路径 A 已经很快时，decode offload 的收益 —— 即"省下的路径 A 传输"换成"路径 B 加载" —— 带宽上不占优，且要额外付 offload 写回开销（D2H + host→NVMe）。<strong>边际收益可能不足以抵消开销</strong>。</p>
+<p>具体在什么消息大小下路径 A/B 谁快，需要实测确认。路径 A 有现成监控指标：</p>
+<pre><code>"kv_transfer_gbps":   'sum(sglang:kv_transfer_speed_gb_s_sum{...}) / ...'
+"kv_latency_s":       '...kv_transfer_latency_ms...'
+"prefill_transfer_s": '...per_stage_req_latency_seconds_sum{stage="prefill_transfer_kv_cache"}'</code></pre>
 
-<h3>2. 镜像版本的特性成熟度</h3>
-<p>镜像 <code>v0.5.14-pr47</code> + CjiW fork 补丁。<code>DecodeKVCacheOffloadManager</code> 在 main 分支是较新特性，测试文件还在 <code>test/registered/</code> 下。这个 fork 基于 v0.5.14，可能没有这套代码，或未在 ROCm/MI300X 上验证。</p>
-<p><strong>验证方法</strong>：</p>
-<pre><code>docker run --rm b200routeraca.azurecr.io/mindverse/sglang:v0.5.14-pr47 \
-  python3 -m sglang.launch_server --help 2>&1 | grep -i "offload-kvcache"</code></pre>
-
-<h3>3. 配置复杂度</h3>
-<p>要调 <code>num-reserved-decode-tokens</code>、<code>hicache-ratio</code>、stride 等，调不好影响 decode 吞吐，部署时可能先没启用。</p>
-
-<h3>怎么开（如果镜像支持）</h3>
-<pre><code><span class="tok-cmt"># 接收侧 restore（路径 B）</span>
---enable-hierarchical-cache \
---hicache-ratio 2 \                          <span class="tok-cmt"># L2 host DRAM = 2× GPU pool</span>
---hicache-mem-layout page_first \
-
-<span class="tok-cmt"># 写回侧（offload manager）</span>
---hicache-storage-backend file \
---file-storage-path /nvme/hicache \
---disaggregation-decode-enable-offload-kvcache \
---num-reserved-decode-tokens 128 \</code></pre>
-
-<pre><code><span class="tok-cmt"># 环境变量</span>
-export SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR="/nvme/hicache"
-export SGLANG_HICACHE_FILE_BACKEND_MAX_SIZE="200G"
-export SGLANG_HICACHE_FILE_BACKEND_MIN_FREE_SPACE="10G"
-<span class="tok-cmt"># 可选：调 offload 粒度</span>
-<span class="tok-cmt"># export SGLANG_HICACHE_DECODE_OFFLOAD_STRIDE=128</span></code></pre>
+<h3>实测验证方案</h3>
+<ol>
+<li>当前配置（decode 不开 offload）跑一批共享前缀请求，记 TTFT 和 <code>kv_transfer_speed_gb_s</code>（全走路径 A）</li>
+<li>打开 offload + restore，跑同样请求（第二批起命中 L2/L3，走路径 B），记 TTFT</li>
+<li>对比 TTFT 差值 = 路径 B 相对 A 的实际收益</li>
+</ol>
+<blockquote class="confirm">
+<p>路径 B 的 restore 指标（<code>ack_load_queue</code> 的 timing event）在监控脚本里没有对应 Prometheus metric，需要在 decode 机器上看 SGLang 日志里的 hicache load timing，或加 metric。</p>
+</blockquote>
 
 <h2>附录：关键源码文件索引</h2>
 <table>
