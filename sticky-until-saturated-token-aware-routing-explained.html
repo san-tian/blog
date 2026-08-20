@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sticky Until Saturated：LLM 路由为什么要“粘住直到饱和”</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --card: #ffffff;
+    --card-2: #f8f8f7;
+    --border: #e7e5e4;
+    --text: #1c1917;
+    --text-dim: #78716c;
+    --accent: #1d4ed8;
+    --accent-2: #1d4ed8;
+    --green: #059669;
+    --red: #dc2626;
+    --yellow: #d97706;
+    --code-bg: #f8fafc;
+    --inline-code-bg: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    margin: 0;
+    padding: 0;
+    font-size: 16px;
+  }
+  .container { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+  header.hero { text-align: center; margin-bottom: 56px; padding-bottom: 32px; border-bottom: 1px solid var(--border); }
+  header.hero h1 { font-size: 2.1em; font-weight: 700; line-height: 1.3; color: #111111; margin: 0 0 16px; }
+  header.hero .subtitle { color: var(--text-dim); font-size: 1em; margin: 0 auto; max-width: 680px; }
+  header.hero .meta { margin-top: 20px; color: var(--text-dim); font-size: 0.85em; }
+  header.hero .meta span { display: inline-block; padding: 4px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 999px; margin: 0 4px; }
+  h2 { color: #111111; font-size: 1.5em; font-weight: 650; margin: 56px 0 20px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h3 { color: #111111; font-size: 1.18em; font-weight: 600; margin: 36px 0 14px; }
+  p { margin: 14px 0; }
+  strong { color: #111111; font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: "JetBrains Mono", "Fira Code", "SF Mono", Consolas, "Liberation Mono", Menlo, monospace; background: var(--inline-code-bg); color: #2563eb; padding: 2px 6px; border-radius: 4px; font-size: 0.88em; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 18px 0; font-size: 0.85em; line-height: 1.6; }
+  pre code { background: none; color: var(--text); padding: 0; border-radius: 0; font-size: 1em; }
+  blockquote { margin: 20px 0; padding: 14px 20px; border-left: 4px solid var(--accent); background: var(--card); border-radius: 0 8px 8px 0; color: var(--text); }
+  .background { background: var(--card); border-left: 4px solid var(--yellow); padding: 18px 24px; border-radius: 0 8px 8px 0; margin: 24px 0; }
+  .callout-summary { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin: 24px 0; }
+  .callout-summary h3 { margin: 0 0 16px; font-size: 1.1em; color: var(--accent); }
+  .callout-summary .point { margin: 12px 0; line-height: 1.7; }
+  .callout-summary .badge { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 0.75em; font-weight: 600; margin-right: 8px; }
+  .callout-summary .badge.ok { background: rgba(5, 150, 105, 0.12); color: var(--green); }
+  .callout-summary .badge.no { background: rgba(220, 38, 38, 0.12); color: var(--red); }
+  .callout-summary .badge.q { background: rgba(217, 119, 6, 0.12); color: var(--yellow); }
+  table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.92em; display: block; overflow-x: auto; }
+  th, td { border: 1px solid var(--border); padding: 10px 14px; text-align: left; vertical-align: top; }
+  th { background: var(--card-2); color: #111111; font-weight: 600; }
+  tr:nth-child(even) td { background: var(--card); }
+  ul, ol { padding-left: 1.5em; }
+  li { margin: 6px 0; }
+  footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85em; text-align: center; }
+  @media (max-width: 640px) { .container { padding: 24px 16px 64px; } header.hero h1 { font-size: 1.6em; } table { font-size: 0.82em; } }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header class="hero">
+  <h1>Sticky Until Saturated：LLM 路由为什么要“粘住直到饱和”</h1>
+  <div class="subtitle">一篇关于 token-aware routing 的中文讲解：先亲和，再释放；先粘住，饱和后分流</div>
+  <div class="meta">
+    <span>📝 DRAFT</span><span>讲解稿 HTML 版</span>
+  </div>
+</header>
+
+<div class="background">
+  <p>这篇文章讨论的是 LLM 推理请求的路由策略：如何在 <strong>缓存亲和</strong> 和 <strong>负载均衡</strong> 之间找到平衡。作者的核心主张是：<strong>不要用一堆权重硬凑一个“看起来聪明”的分数，而要先识别 workload 的瓶颈，再用与瓶颈匹配的信号做路由</strong>。</p>
+  <p>它背后的直觉很简单：请求应该尽量留在已经拥有前缀缓存的 endpoint 上，但这份“粘性”不能无限持续；一旦 warm endpoint 接近饱和，就必须释放出来，让 cold endpoint 接管一部分负载。</p>
+</div>
+
+<div class="callout-summary">
+  <h3>先说结论</h3>
+  <div class="point"><span class="badge ok">核心思想</span>路由不是“永远追着缓存跑”，而是“先跟着缓存走，直到 endpoint 背不动了，再按真实瓶颈分流”。</div>
+  <div class="point"><span class="badge ok">Prefill-bound</span>长 prompt 场景用 <code>prefix-cache-affinity-filter + token-load-scorer</code>，负载信号看的是未缓存的 prefill tokens in flight。</div>
+  <div class="point"><span class="badge ok">Decode-bound</span>长输出场景用 <code>prefix-cache-affinity-filter + active-request-scorer</code>，负载信号看的是活跃请求数。</div>
+  <div class="point"><span class="badge q">阈值 τ</span><code>τ</code> 不是拍脑袋的经验值，而是从硬件吞吐和可接受 TTFT 上限推导出来的饱和阈值。</div>
+</div>
+
+<h2>1. 这篇文章在反对什么？</h2>
+<p>作者先批评的是一种常见但不够稳的默认做法：把多个信号加权混合起来做路由。比如把 prefix-cache 匹配、队列深度、KV cache 利用率、LRU 等一起算分。</p>
+<p>这种做法的问题不在于“完全不能用”，而在于它有三个工程上的缺点：</p>
+<ul>
+  <li><strong>难解释</strong>：最后为什么选了这个 endpoint，不好说清楚。</li>
+  <li><strong>难调参</strong>：一个权重改了，整体行为可能大幅变化。</li>
+  <li><strong>容易放大热点</strong>：越热的 endpoint 越容易继续吸流量，最后被粘爆。</li>
+</ul>
+<p>所以作者换了一个更直接的思路：<strong>先判断 workload 的瓶颈是什么，再选一个和瓶颈匹配的负载信号</strong>。这就是文章里的 token-aware routing。</p>
+
+<h2>2. 两个阶段，两种瓶颈</h2>
+<p>LLM 推理通常分成两个阶段：</p>
+<ul>
+  <li><strong>Prefill</strong>：处理 prompt，把输入 tokens 一段段算进去。</li>
+  <li><strong>Decode</strong>：逐 token 生成输出，依赖 KV cache 和并发解码槽位。</li>
+</ul>
+<p>不同 workload 的瓶颈不一样：</p>
+<ul>
+  <li><strong>prefill-bound</strong>：prompt 很长，输入处理先成为瓶颈。</li>
+  <li><strong>decode-bound</strong>：输出很长，解码槽位先成为瓶颈。</li>
+</ul>
+<p>因此，路由信号也不应该统一。</p>
+
+<h3>Prefill-bound 用什么信号？</h3>
+<p>文章推荐的组合是：</p>
+<pre><code>prefix-cache-affinity-filter + token-load-scorer</code></pre>
+<p>含义是：</p>
+<ul>
+  <li>先尽量把请求留给已经有前缀缓存的 endpoint</li>
+  <li>但在比较负载时，不看“总请求数”，而看<strong>未缓存的 prefill tokens in flight</strong></li>
+</ul>
+<p>也就是说，谁当前还要处理的“新输入工作”更少，谁就更值得接这个请求。</p>
+
+<h3>Decode-bound 用什么信号？</h3>
+<p>文章推荐的组合是：</p>
+<pre><code>prefix-cache-affinity-filter + active-request-scorer</code></pre>
+<p>这里的核心变量变成了<strong>活跃请求数</strong>。因为 decode 阶段真正卡住的往往不是 prompt 处理，而是并发生成流的数量。</p>
+<p>换句话说，decode 侧更关心的是：<strong>谁的并发生成已经太多了？</strong></p>
+
+<h2>3. “Sticky until saturated” 到底是什么意思？</h2>
+<p>这是标题的核心。</p>
+<p>可以把它理解为一句很朴素的策略口号：</p>
+<blockquote>
+  只要某个 endpoint 还没饱和，就让请求尽量粘在它上面；一旦超过阈值，就不再死守亲和性，改按负载分流。
+</blockquote>
+<p>这和“永远优先缓存命中”的思路不一样。后者容易导致：</p>
+<ul>
+  <li>warm endpoint 越来越热</li>
+  <li>cold endpoint 一直吃不到活</li>
+  <li>最后 warm endpoint 比 cold endpoint 还慢</li>
+</ul>
+<p>所以文章引入了一个释放阈值 <code>τ</code>，用来控制“粘性”什么时候结束。</p>
+
+<h2>4. τ 是什么？</h2>
+<p><code>τ</code> 可以理解成：</p>
+<blockquote>
+  一个 warm endpoint 最多允许比别的 endpoint 多背多少“未缓存的 in-flight token 工作量”；超过这个量，就必须释放粘性。
+</blockquote>
+<p>它不是随便定的，而是从硬件吞吐和服务目标推出来的。文章给出的简化形式是：</p>
+<pre><code>τ_sat = R_peak × T_max</code></pre>
+<p>其中：</p>
+<ul>
+  <li><code>R_peak</code> 是峰值 prefill 吞吐</li>
+  <li><code>T_max</code> 是可接受的 TTFT 退化上限</li>
+</ul>
+<p>直觉上很简单：如果 warm endpoint 已经背了太多未完成的输入工作，继续把请求粘过去，就会让 TTFT 超过你能接受的范围；到点就该“解粘”。</p>
+<p>文中的示例参数是：</p>
+<ul>
+  <li><code>B = 8192</code></li>
+  <li><code>R_peak = 20480 tok/s</code></li>
+  <li><code>T_max = 14s</code></li>
+  <li>得到 <code>τ = 286720</code></li>
+</ul>
+<p>可以把它理解成：允许 warm endpoint 领先大约 35 个 8192-token chunk 的未缓存 prefill 工作量。</p>
+
+<h2>5. 三个 workload 说明了什么？</h2>
+<p>文章拿了三类 workload 来验证这个方法。</p>
+
+<h3>5.1 code-generation：典型 prefill-bound</h3>
+<p>这个 workload 的特征很明显：</p>
+<ul>
+  <li>prompt 很长</li>
+  <li>输出相对短</li>
+  <li>跨请求共享前缀不多</li>
+</ul>
+<p>所以瓶颈是 <strong>prefill compute</strong>。</p>
+<p>结论是：</p>
+<ul>
+  <li><code>prefix-cache-affinity + token-load</code> 表现最好</li>
+  <li>TTFT 更低</li>
+  <li>输入吞吐更高</li>
+  <li>传统 round-robin 更容易更早撞到拐点</li>
+</ul>
+<p>一句话理解：在长 prompt 场景里，最值钱的是“谁的未完成输入更少”，而不是单纯谁最近命中过缓存。</p>
+
+<h3>5.2 reasoning：典型 decode-bound</h3>
+<p>这个 workload 的特征是：</p>
+<ul>
+  <li>prompt 较短</li>
+  <li>输出很长</li>
+  <li>并发生成流很多</li>
+</ul>
+<p>所以瓶颈是 <strong>decode slots</strong>。</p>
+<p>结论是：</p>
+<ul>
+  <li><code>prefix-cache-affinity + active-request</code> 更合适</li>
+  <li>因为它直接按活跃流数均衡 decode 压力</li>
+  <li>在 decode 侧更容易保持均衡</li>
+</ul>
+<p>这说明：对 decode-bound 负载来说，token 不是最合适的负载单位，活跃请求数更贴近真实瓶颈。</p>
+
+<h3>5.3 b2b-saas：病态 prefill-bound 压力测试</h3>
+<p>这个 workload 不是普通业务流量，而是一个重复小语料的压力测试：</p>
+<ul>
+  <li>很多 system prompt 会重复出现</li>
+  <li>缓存命中会变得很关键</li>
+  <li>如果分流不对，容易出现 cache churn</li>
+</ul>
+<p>它说明两件事：</p>
+<ul>
+  <li>缓存亲和策略确实有用，能把重复语料稳定分到不同 endpoint 上</li>
+  <li><code>τ</code> 太小或太大都不好：太小会过早释放，太大会粘得太久，热点会过载</li>
+</ul>
+<p>它像是一个验证“饱和阀门”是否合理的实验。</p>
+
+<h2>6. 为什么旧的加权混合不如这个方案？</h2>
+<p>不是说加权混合一定错，而是它有几个工程上的问题。</p>
+<ul>
+  <li><strong>不可解释</strong>：很难一眼说清楚到底是哪个信号起了作用。</li>
+  <li><strong>不可迁移</strong>：一组权重可能只对某个 workload 好，换场景就不稳。</li>
+  <li><strong>不容易做饱和释放</strong>：如果没有明确阈值，就容易一路偏向 warm endpoint。</li>
+</ul>
+<p>文章把复杂度收敛成了三个东西：</p>
+<ul>
+  <li>一个 affinity filter</li>
+  <li>一个与瓶颈匹配的负载信号</li>
+  <li>一个可计算的 saturation threshold</li>
+</ul>
+<p>这就更像一个能落地的系统，而不是一堆经验权重。</p>
+
+<h2>7. 这篇文章真正想传达什么？</h2>
+<div class="callout-summary">
+  <h3>工程启发</h3>
+  <div class="point"><span class="badge ok">先识别瓶颈</span>不要先问“用什么算法”，先问 workload 卡在哪：prefill、decode，还是两者混合。</div>
+  <div class="point"><span class="badge ok">信号要贴近瓶颈</span>prefill 看 token load，decode 看 active requests，混合场景再考虑 predictor。</div>
+  <div class="point"><span class="badge ok">亲和性不是越强越好</span>缓存亲和有价值，但必须有释放机制，否则“粘住”会变成“粘死”。</div>
+  <div class="point"><span class="badge ok">阈值尽量可推导</span>如果能从硬件吞吐和 SLO 反推，策略就更稳、更可解释，也更容易迁移。</div>
+</div>
+
+<h2>8. 一句话总结</h2>
+<blockquote class="keyinsight">
+  LLM 路由的关键，不是永远追着缓存跑，而是让请求先跟着缓存走，直到某个 endpoint 背不动了，再按真实瓶颈分流。这样既保留缓存收益，又避免热点过载。
+</blockquote>
+
+<h2>9. 记住这几个结论就够了</h2>
+<table>
+  <tr><th>场景</th><th>推荐策略</th><th>关注的负载信号</th></tr>
+  <tr><td>prefill-bound</td><td><code>prefix-cache-affinity + token-load</code></td><td>未缓存的 prefill tokens in flight</td></tr>
+  <tr><td>decode-bound</td><td><code>prefix-cache-affinity + active-request</code></td><td>活跃请求数</td></tr>
+  <tr><td>sticky until saturated</td><td>先粘住，再按阈值释放</td><td><code>τ</code> 饱和阈值</td></tr>
+</table>
+
+<p>如果你把这篇文章记成一句话，那就是：</p>
+<p><strong>缓存亲和负责吃收益，饱和阈值负责防热点，负载信号负责贴近瓶颈。</strong></p>
+
+<footer>
+  <p>本文为中文讲解版 HTML（draft），基于 llm-d 的 token-aware routing 文章整理。</p>
+  <p style="margin-top:8px;"><a href="index.html">返回目录</a></p>
+</footer>
+
+</div>
+</body>
+</html>
