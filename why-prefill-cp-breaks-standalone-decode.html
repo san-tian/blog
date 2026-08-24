@@ -153,6 +153,85 @@ prefill 顺序前向（transient 槽位有效）：
 </code></pre>
 <p>这套机制是给 prefill 的<strong>一次性顺序前向</strong>设计的。decode 撞上它就坏（下面讲）。</p>
 <hr>
+<h2>prefill CP 与 decode CP 的 token 排列不一样（关键）</h2>
+<p>这里有一个最容易被忽略、却又最关键的区别：<strong>prefill CP 和 decode CP 把 token 分给不同 rank 的方式是相反的</strong>。</p>
+<p>源码 <code>srt/layers/dcp/layout.py</code> 里 decode CP 的 owner 规则是 <code>pos % dcp_size == dcp_rank</code>（轮询分条）；而 prefill CP 是连续分块。同一 12 个 token，两种布局里的归属完全不同：</p>
+<pre><code>
+prefill CP（attn_cp_size=4，连续分块）:
+  rank0 = [0 1 2]   rank1 = [3 4 5]   rank2 = [6 7 8]   rank3 = [9 10 11]
+
+decode CP（dcp_size=4，轮询 pos%4）:
+  rank0 = [0 4 8]   rank1 = [1 5 9]   rank2 = [2 6 10]  rank3 = [3 7 11]
+</code></pre>
+<div style="text-align:center;margin:24px 0">
+<svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+<text x="20" y="40" font-size="16" font-weight="700" fill="#111">prefill CP 与 decode CP 的 token→rank 排列不同</text>
+<text x="20" y="110" font-size="14" font-weight="600" fill="#1d4ed8">prefill CP（attn_cp_size=4）：连续分块</text>
+<rect x="40" y="120" width="44" height="44" rx="6" fill="#1d4ed8" />
+<text x="62" y="147" font-size="13" fill="#fff" text-anchor="middle">0</text>
+<rect x="100" y="120" width="44" height="44" rx="6" fill="#1d4ed8" />
+<text x="122" y="147" font-size="13" fill="#fff" text-anchor="middle">1</text>
+<rect x="160" y="120" width="44" height="44" rx="6" fill="#1d4ed8" />
+<text x="182" y="147" font-size="13" fill="#fff" text-anchor="middle">2</text>
+<rect x="220" y="120" width="44" height="44" rx="6" fill="#059669" />
+<text x="242" y="147" font-size="13" fill="#fff" text-anchor="middle">3</text>
+<rect x="280" y="120" width="44" height="44" rx="6" fill="#059669" />
+<text x="302" y="147" font-size="13" fill="#fff" text-anchor="middle">4</text>
+<rect x="340" y="120" width="44" height="44" rx="6" fill="#059669" />
+<text x="362" y="147" font-size="13" fill="#fff" text-anchor="middle">5</text>
+<rect x="400" y="120" width="44" height="44" rx="6" fill="#d97706" />
+<text x="422" y="147" font-size="13" fill="#fff" text-anchor="middle">6</text>
+<rect x="460" y="120" width="44" height="44" rx="6" fill="#d97706" />
+<text x="482" y="147" font-size="13" fill="#fff" text-anchor="middle">7</text>
+<rect x="520" y="120" width="44" height="44" rx="6" fill="#d97706" />
+<text x="542" y="147" font-size="13" fill="#fff" text-anchor="middle">8</text>
+<rect x="580" y="120" width="44" height="44" rx="6" fill="#7c3aed" />
+<text x="602" y="147" font-size="13" fill="#fff" text-anchor="middle">9</text>
+<rect x="640" y="120" width="44" height="44" rx="6" fill="#7c3aed" />
+<text x="662" y="147" font-size="13" fill="#fff" text-anchor="middle">10</text>
+<rect x="700" y="120" width="44" height="44" rx="6" fill="#7c3aed" />
+<text x="722" y="147" font-size="13" fill="#fff" text-anchor="middle">11</text>
+<text x="40" y="180" font-size="12" fill="#78716c">rank0</text>
+<text x="100" y="180" font-size="12" fill="#059669">rank1</text>
+<text x="160" y="180" font-size="12" fill="#d97706">rank2</text>
+<text x="220" y="180" font-size="12" fill="#7c3aed">rank3</text>
+<text x="20" y="250" font-size="14" font-weight="600" fill="#059669">decode CP（dcp_size=4）：轮询分条（pos % 4）</text>
+<rect x="40" y="260" width="44" height="40" rx="6" fill="#1d4ed8" />
+<text x="62" y="285" font-size="13" fill="#fff" text-anchor="middle">0</text>
+<rect x="100" y="260" width="44" height="40" rx="6" fill="#059669" />
+<text x="122" y="285" font-size="13" fill="#fff" text-anchor="middle">1</text>
+<rect x="160" y="260" width="44" height="40" rx="6" fill="#d97706" />
+<text x="182" y="285" font-size="13" fill="#fff" text-anchor="middle">2</text>
+<rect x="220" y="260" width="44" height="40" rx="6" fill="#7c3aed" />
+<text x="242" y="285" font-size="13" fill="#fff" text-anchor="middle">3</text>
+<rect x="280" y="260" width="44" height="40" rx="6" fill="#1d4ed8" />
+<text x="302" y="285" font-size="13" fill="#fff" text-anchor="middle">4</text>
+<rect x="340" y="260" width="44" height="40" rx="6" fill="#059669" />
+<text x="362" y="285" font-size="13" fill="#fff" text-anchor="middle">5</text>
+<rect x="400" y="260" width="44" height="40" rx="6" fill="#d97706" />
+<text x="422" y="285" font-size="13" fill="#fff" text-anchor="middle">6</text>
+<rect x="460" y="260" width="44" height="40" rx="6" fill="#7c3aed" />
+<text x="482" y="285" font-size="13" fill="#fff" text-anchor="middle">7</text>
+<rect x="520" y="260" width="44" height="40" rx="6" fill="#1d4ed8" />
+<text x="542" y="285" font-size="13" fill="#fff" text-anchor="middle">8</text>
+<rect x="580" y="260" width="44" height="40" rx="6" fill="#059669" />
+<text x="602" y="285" font-size="13" fill="#fff" text-anchor="middle">9</text>
+<rect x="640" y="260" width="44" height="40" rx="6" fill="#d97706" />
+<text x="662" y="285" font-size="13" fill="#fff" text-anchor="middle">10</text>
+<rect x="700" y="260" width="44" height="40" rx="6" fill="#7c3aed" />
+<text x="722" y="285" font-size="13" fill="#fff" text-anchor="middle">11</text>
+<text x="20" y="340" font-size="13" fill="#dc2626" font-weight="600">同一 token 在两种布局里落在不同 rank → 必须 reshard 转移，standalone 缺失 → 读错</text>
+</svg>
+</div>
+<p>比如 token 4：prefill 在 rank1，decode 却要在 rank0——<strong>同一个 token 在两种布局里落在不同的 rank 上</strong>。</p>
+<p>在 PD 里，这个错位靠一次<strong>「DCP reshard」</strong>跨机传输时重新切分来桥接（源码 <code>srt/disaggregation/common/conn.py:620</code>: "each prefill rank will send 1/N token-shard to each decode rank"）。<strong>standalone 没有这段跨机 reshard</strong>，于是：</p>
+<table>
+<tr><th>只开……</th><th>发生了什么</th><th>结果</th><th>证据</th></tr>
+<tr><td>prefill CP（不开 decode CP）</td><td>prefill 按连续块写 KV，decode 按本地连续读</td><td>破坏 decode</td><td>实测：输出重复</td></tr>
+<tr><td>只开 decode CP（不开 prefill CP）</td><td>prefill 写本地 KV，decode 按 pos%N 轮询读</td><td>同样错位</td><td>源码对称推断，B200 未验证</td></tr>
+</table>
+<p>这就是为什么这两个 CP 开关在 standalone 里都危险——不是某个开关"坏"，而是<strong>两种并行布局在单机里缺少了原本由 PD 传送层做的那次 reshard</strong>。</p>
+<hr>
 <h2>实测：单机下它们坏了什么</h2>
 <p>隔离测试（<code>temperature=0</code> 贪心，排除采样噪声）：</p>
 <table>

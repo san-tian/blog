@@ -107,6 +107,33 @@ prefill 顺序前向（transient 槽位有效）：
 
 ---
 
+## prefill CP 与 decode CP 的 token 排列不一样（关键）
+
+这里有一个最容易被忽略、却又最关键的区别：**prefill CP 和 decode CP 把 token 分给不同 rank 的方式是相反的**。
+
+源码 `srt/layers/dcp/layout.py` 里 decode CP 的 owner 规则是 `pos % dcp_size == dcp_rank`（轮询分条）；而 prefill CP 是连续分块。同一 12 个 token，两种布局里的归属完全不同：
+
+```
+prefill CP（attn_cp_size=4，连续分块）:
+  rank0 = [0 1 2]   rank1 = [3 4 5]   rank2 = [6 7 8]   rank3 = [9 10 11]
+
+decode CP（dcp_size=4，轮询 pos%4）:
+  rank0 = [0 4 8]   rank1 = [1 5 9]   rank2 = [2 6 10]  rank3 = [3 7 11]
+```
+
+比如 token 4：prefill 在 rank1，decode 却要在 rank0——**同一个 token 在两种布局里落在不同的 rank 上**。
+
+在 PD 里，这个错位靠一次**「DCP reshard」**跨机传输时重新切分来桥接（源码 `srt/disaggregation/common/conn.py:620`: "each prefill rank will send 1/N token-shard to each decode rank"）。**standalone 没有这段跨机 reshard**，于是：
+
+| 只开…… | 发生了什么 | 结果 | 证据 |
+|---|---|---|---|
+| prefill CP（不开 decode CP） | prefill 按连续块写 KV，decode 按本地连续读 | 破坏 decode | 实测：输出重复 |
+| 只开 decode CP（不开 prefill CP） | prefill 写本地 KV，decode 按 pos%N 轮询读 | 同样错位 | 源码对称推断，B200 未验证 |
+
+这就是为什么这两个 CP 开关在 standalone 里都危险——不是某个开关"坏"，而是**两种并行布局在单机里缺少了原本由 PD 传送层做的那次 reshard**。
+
+---
+
 ## 实测：单机下它们坏了什么
 
 隔离测试（`temperature=0` 贪心，排除采样噪声）：
