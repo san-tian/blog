@@ -78,84 +78,199 @@
 
 <h2>为什么 prefill 的 CP 优化，不能带到单机 decode？</h2>
 <h2>一句话总结</h2>
-<p>sglang 里 <code>--enable-prefill-cp</code>（配合 <code>--cp-strategy interleave</code>）和 <code>--enable-dsa-prefill-cp-layersplit</code> 是两个 <strong>prefill 专属</strong>的并行优化。在 PD 分离架构里它们各安其位；可一旦把服务以<strong>单机一体（prefill+decode 同进程）</strong>的方式起，这两个开关就会把 decode 阶段搞坏——一个让输出退化成"一句话"式的重复，另一个让输出直接变成随机 token。原理根子在<strong>这两个优化从语义上就跟 decode 的自回归特性冲突</strong>，只能整个去掉。</p>
+<p>sglang 里 <code>--enable-prefill-cp</code>（配合 <code>--cp-strategy interleave</code>）和 <code>--enable-dsa-prefill-cp-layersplit</code> 是两个 <strong>prefill 专属</strong>的并行优化。在 PD 分离架构里它们各安其位；可一旦把服务以<strong>单机一体（prefill+decode 同进程）</strong>的方式起，这两个开关就会把 decode 阶段搞坏——一个让输出退化成重复，另一个让输出直接变成随机 token。根子在于：<strong>这两个优化从语义上就跟 decode 的自回归特性冲突</strong>，只能整个去掉。</p>
 <hr>
-<h2>模型结构：先看清要切的东西</h2>
-<p>讲切分之前，先看 GLM-5.2 本身。它是一个用 <strong>DSA（Dynamic Sparse Attention，动态稀疏注意力）的 MoE 模型</strong>：</p>
+<h2>导读：这篇文章由浅入深讲清楚 8 层</h2>
+<p>顺着读，每一层都建立在上一层之上，不需要任何并行训练/推理背景：</p>
+<ol><li><strong>先看现象</strong> —— 一个"关两个参数就能修好乱码"的真实案例，先有个感性认识</li><li><strong>三个基础概念</strong> —— 注意力与 KV cache、prefill vs decode、三种切分维度</li><li><strong>GLM-5.2 的特殊结构</strong> —— 什么是 DSA 稀疏注意力、indexer、top-k</li><li><strong>两个 flag 的原理</strong> —— 它们各自切的是什么</li><li><strong>一个关键事实</strong> —— prefill CP 和 decode CP 的 token 排列是反的</li><li><strong>为什么坏</strong> —— 三种坏法（重复 / 乱码 / 对称错位）</li><li><strong>源码证据</strong> —— 用源码把结论钉死</li><li><strong>要不要改代码</strong> —— 工程判断 + 结论</li></ol>
+<p>文末附「相关知识点速查」，可当索引用。</p>
+<hr>
+<h2>第 1 层：先看现象</h2>
+<p>在 8×B200 上，用 sglang 以<strong>单机（standalone，不做 PD 分离）</strong>跑 GLM-5.2 时，发现输出是乱的：<code>1+1=</code> 答成 <code>2a&amp;apos in'ss…</code> 这种随机 token，或者"一句话一句话一句话…"的无限重复。</p>
+<p>排查一圈后，把启动参数里的这两条去掉，输出立刻正常（<code>1+1=</code> → <code>2</code>）：</p>
 <pre><code>
-GLM-5.2（78 层，hidden=6144，64 个注意力头）
-
-输入 token 序列：  t0  t1  t2  ...  tN
-                      │ 逐层往下传
-        ┌─────────────────────────────────┐
-        │ 第 i 层（i = 0 .. 77，共 78 层）   │
-        │                                 │
-        │   ① QKV 投影（MLA 多头潜在注意力）  │
-        │   ② 索引器 indexer（32 头 × 128 维）│
-        │        —— 动态选出 top-2048 个 token│
-        │   ③ 稀疏注意力（只 attend 这 2048） │
-        │   ④ MLP（MoE 专家混合）            │
-        └─────────────────────────────────┘
-                      │
-                      ▼
-                  输出 logits
+# ❌ 单机里不要带
+--enable-prefill-cp --cp-strategy interleave
+--enable-dsa-prefill-cp-layersplit
 </code></pre>
-<p><strong>DSA 的关键</strong>：它不做传统全注意力（每个 token 看所有 token，O(N²)），而是用<strong>索引器（indexer）</strong>这个小网络，动态给每个 token 挑最相关的 <strong><code>index_topk=2048</code> 个</strong> token，attention 只在这 2048 个里算。所以复杂度是 O(N × 2048)，远低于全注意力。索引器每 4 层共享一次（<code>index_topk_freq=4</code>）。</p>
-<p>下面两个 flag 做的都是"并行化 / 存放"这一套东西。</p>
+<p><strong>为什么这两个参数在别的场景是合理的、在单机却是毒药？</strong> 这就是全文要讲清楚的。先从地基开始。</p>
 <hr>
-<h2>三个"切分维度"：切的是完全不同的东西</h2>
-<table>
-<tr><th>切法</th><th>切的是什么</th><th>8 张卡各拿</th><th>什么时候有用</th></tr>
-<tr><td><strong>TP（张量并行）</strong></td><td>权重（<code>Wq/Wk/Wv</code>）</td><td>1/8 权重，算<strong>整条序列</strong></td><td>权重太大单卡放不下</td></tr>
-<tr><td><strong>CP（上下文并行）</strong></td><td><strong>序列长度</strong>（token）</td><td>1/8 token，算<strong>全部权重</strong></td><td>序列太长算不动</td></tr>
-<tr><td><strong>layersplit（层切分）</strong></td><td><strong>78 层</strong></td><td>own ~10 层，其它层靠临时广播</td><td>prefill 层间流水线 / 每卡只存 1/8 层 KV</td></tr>
-</table>
-<p>关键：<strong>TP 和 CP 是正交的</strong>。TP8 让每张卡算 1/8 权重；CP8 再让每张卡只算 1/8 序列。两者叠加，prefill 的"长 prompt × 全权重"就被切成了"1/8 序列 × 1/8 权重"。</p>
-<hr>
-<h2>为什么 prefill 能吃 CP，decode 不能</h2>
-<p>prefill 和 decode 是两种完全不同的计算，这是整套理解的根：</p>
+<h2>第 2 层：三个基础概念</h2>
+<h3>2.1 注意力与 KV cache</h3>
+<p>Transformer 的注意力：每个 token 生成一个 <strong>Query（Q）</strong>，去和所有历史 token 的 <strong>Key（K）</strong> 算相似度，再用相似度加权 <strong>Value（V）</strong> 得到输出。历史 token 的 K、V 会被缓存下来，就是 <strong>KV cache</strong>——decode 每生成一个 token，都要回头读一遍全部 KV cache。</p>
+<div style="text-align:center;margin:24px 0">
+<svg viewBox="0 0 720 240" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+<text x="20" y="32" font-size="15" font-weight="700" fill="#111">注意力 = Query 去找 Key 算相似度，再加权 Value</text>
+<!-- 历史 tokens 及其 K/V -->
+<g font-size="12" text-anchor="middle">
+  <rect x="40" y="60" width="52" height="44" rx="6" fill="#e7e5e4"/><text x="66" y="78" fill="#444">t0</text><text x="66" y="94" fill="#78716c">K V</text>
+  <rect x="100" y="60" width="52" height="44" rx="6" fill="#e7e5e4"/><text x="126" y="78" fill="#444">t1</text><text x="126" y="94" fill="#78716c">K V</text>
+  <rect x="160" y="60" width="52" height="44" rx="6" fill="#e7e5e4"/><text x="186" y="78" fill="#444">t2</text><text x="186" y="94" fill="#78716c">K V</text>
+  <rect x="220" y="60" width="52" height="44" rx="6" fill="#e7e5e4"/><text x="246" y="78" fill="#444">t3</text><text x="246" y="94" fill="#78716c">K V</text>
+  <text x="290" y="88" font-size="16" fill="#78716c">…</text>
+  <rect x="320" y="60" width="52" height="44" rx="6" fill="#e7e5e4"/><text x="346" y="78" fill="#444">tN</text><text x="346" y="94" fill="#78716c">K V</text>
+</g>
+<text x="120" y="55" font-size="11" fill="#78716c">历史 token 的 K、V 被缓存（KV cache）</text>
+<!-- 当前 query -->
+<rect x="160" y="150" width="80" height="40" rx="6" fill="#1d4ed8"/><text x="200" y="175" font-size="13" fill="#fff" text-anchor="middle" font-weight="600">当前 Q</text>
+<!-- 箭头 Q -> 所有 K/V -->
+<g stroke="#1d4ed8" stroke-width="1.5" fill="none" marker-end="url(#ar1)">
+  <path d="M190 150 C 120 120, 70 115, 66 106"/>
+  <path d="M195 150 C 150 120, 130 115, 126 106"/>
+  <path d="M200 150 C 190 125, 186 115, 186 106"/>
+  <path d="M210 150 C 260 120, 300 115, 346 106"/>
+</g>
+<defs><marker id="ar1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#1d4ed8"/></marker></defs>
+<text x="20" y="220" font-size="13" fill="#444">score = Q · Kᵀ  →  softmax(score) · V  = 输出</text>
+</svg>
+</div>
+<h3>2.2 prefill 和 decode 是两个完全不同的阶段</h3>
 <pre><code>
 prefill（预填充）：一次性把整段 prompt 喂进去
-   [t0 t1 t2 ... tN] ──────▶ 所有 token 并行前向，边算边写 KV
-   特点：token 一次性并行 → 可切分、可加速
+  [t0 t1 t2 ... tN] ──▶ 所有 token 并行前向，边算边写 KV
+  特点：token 多、一次性、可并行
 
-decode（解码）：自回归生成
-   每 1 步只有 1 个新 token ──attend──▶ 全部历史 KV ──▶ 再出下 1 个
-   特点：每步只有 1 个 token、要读全量 KV、逐步串行
+decode（解码）：自回归逐 token 生成
+  每 1 步：1 个新 token ──attend──▶ 全部历史 KV ──▶ 出下 1 个
+  特点：每步只有 1 个 token、要读全量 KV、逐步串行
 </code></pre>
-<ul><li><strong>prefill</strong>：一次处理整段 prompt（比如 8 万 token），切成 8 段、每卡算 1 万段 → <strong>接近 8 倍加速</strong>。这是 CP 的真金收益。</li><li><strong>decode</strong>：每步只出 1 个 token。"1 个 token" 没法再切 8 份并行；而且它要读的是<strong>全部历史 KV</strong>，切序列反而添乱。</li></ul>
-<p><strong>这就是"prefill 专属"的根。</strong> 下面两个 flag 违反这一条的两种方式各不相同。</p>
+<div style="text-align:center;margin:24px 0">
+<svg viewBox="0 0 720 260" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+<text x="20" y="32" font-size="15" font-weight="700" fill="#111">prefill：多 token 一次性并行  vs  decode：单 token 串行</text>
+<!-- prefill 面板 -->
+<rect x="20" y="50" width="330" height="180" rx="10" fill="#f8fafc" stroke="#e7e5e4"/>
+<text x="36" y="74" font-size="14" font-weight="600" fill="#1d4ed8">prefill（预填充）</text>
+<g font-size="11" text-anchor="middle">
+  <rect x="36" y="88" width="30" height="26" rx="4" fill="#dbeafe"/><text x="51" y="105" fill="#1d4ed8">t0</text>
+  <rect x="70" y="88" width="30" height="26" rx="4" fill="#dbeafe"/><text x="85" y="105" fill="#1d4ed8">t1</text>
+  <rect x="104" y="88" width="30" height="26" rx="4" fill="#dbeafe"/><text x="119" y="105" fill="#1d4ed8">t2</text>
+  <text x="148" y="106" fill="#78716c">…</text>
+  <rect x="170" y="88" width="30" height="26" rx="4" fill="#dbeafe"/><text x="185" y="105" fill="#1d4ed8">tN</text>
+</g>
+<text x="36" y="140" font-size="12" fill="#444">整段一次并行前向</text>
+<text x="36" y="160" font-size="12" fill="#444">边算边写 KV</text>
+<text x="36" y="185" font-size="11" fill="#059669" font-weight="600">可切分序列、可加速</text>
+<text x="36" y="210" font-size="11" fill="#78716c">token 多 · 一次性 · 并行</text>
+<!-- decode 面板 -->
+<rect x="370" y="50" width="330" height="180" rx="10" fill="#f8fafc" stroke="#e7e5e4"/>
+<text x="386" y="74" font-size="14" font-weight="600" fill="#059669">decode（解码）</text>
+<rect x="386" y="88" width="60" height="26" rx="4" fill="#d1fae5"/><text x="416" y="106" font-size="11" fill="#059669" text-anchor="middle">1 个新 token</text>
+<text x="466" y="106" font-size="13" fill="#444">─attend─▶</text>
+<rect x="540" y="84" width="120" height="34" rx="4" fill="#fef3c7" stroke="#f59e0b"/><text x="600" y="106" font-size="11" fill="#b45309" text-anchor="middle">全部历史 KV</text>
+<text x="386" y="150" font-size="12" fill="#444">每步只出 1 个 token</text>
+<text x="386" y="170" font-size="12" fill="#444">要读全量 KV</text>
+<text x="386" y="195" font-size="11" fill="#dc2626" font-weight="600">"1 个 token" 没法切 8 段并行</text>
+<text x="386" y="210" font-size="11" fill="#78716c">单 token · 读全量 · 串行</text>
+</svg>
+</div>
+<p>一句话记住区别：<strong>prefill 是"多 token 一次性并行"，decode 是"单 token 反复读全量"。</strong> 这个区别是后面一切冲突的根源。</p>
+<h3>2.3 并行的三个切分维度</h3>
+<p>模型大、放不下，就得"切"。可切的维度有三个，切的是完全不同的东西：</p>
+<table>
+<tr><th>切法</th><th>切的是什么</th><th>8 张卡各拿</th><th>解决什么</th></tr>
+<tr><td><strong>TP（张量并行）</strong></td><td>权重</td><td>1/8 权重，算整条序列</td><td>权重太大放不下</td></tr>
+<tr><td><strong>CP（上下文并行）</strong></td><td>序列长度</td><td>1/8 token，算全部权重</td><td>序列太长算不动</td></tr>
+<tr><td><strong>layersplit（层切分）</strong></td><td>78 层</td><td>own ~10 层，其它层靠临时广播</td><td>prefill 层间流水线</td></tr>
+</table>
+<p>关键：<strong>TP 和 CP 是正交的</strong>。TP8 让每卡算 1/8 权重，CP8 再让每卡算 1/8 序列，两者可叠加。</p>
+<div style="text-align:center;margin:24px 0">
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+<text x="20" y="32" font-size="15" font-weight="700" fill="#111">三个切分维度：TP 切权重 · CP 切序列 · layersplit 切层</text>
+<!-- TP -->
+<g>
+  <text x="40" y="70" font-size="14" font-weight="600" fill="#1d4ed8">TP：切权重</text>
+  <rect x="40" y="84" width="160" height="20" fill="#dbeafe"/>
+  <g font-size="10" fill="#1d4ed8" text-anchor="middle">
+    <line x1="60" y1="84" x2="60" y2="104" stroke="#fff" stroke-width="2"/>
+    <line x1="80" y1="84" x2="80" y2="104" stroke="#fff" stroke-width="2"/>
+    <line x1="100" y1="84" x2="100" y2="104" stroke="#fff" stroke-width="2"/>
+    <line x1="120" y1="84" x2="120" y2="104" stroke="#fff" stroke-width="2"/>
+    <line x1="140" y1="84" x2="140" y2="104" stroke="#fff" stroke-width="2"/>
+    <line x1="160" y1="84" x2="160" y2="104" stroke="#fff" stroke-width="2"/>
+    <line x1="180" y1="84" x2="180" y2="104" stroke="#fff" stroke-width="2"/>
+  </g>
+  <text x="40" y="122" font-size="11" fill="#78716c">每卡 1/8 权重，算整条序列</text>
+</g>
+<!-- CP -->
+<g>
+  <text x="270" y="70" font-size="14" font-weight="600" fill="#059669">CP：切序列</text>
+  <rect x="270" y="84" width="180" height="20" fill="#d1fae5"/>
+  <g stroke="#fff" stroke-width="2">
+    <line x1="292" y1="84" x2="292" y2="104"/><line x1="315" y1="84" x2="315" y2="104"/><line x1="337" y1="84" x2="337" y2="104"/><line x1="360" y1="84" x2="360" y2="104"/><line x1="382" y1="84" x2="382" y2="104"/><line x1="405" y1="84" x2="405" y2="104"/><line x1="427" y1="84" x2="427" y2="104"/>
+  </g>
+  <text x="270" y="122" font-size="11" fill="#78716c">每卡 1/8 token，算全部权重</text>
+</g>
+<!-- layersplit -->
+<g>
+  <text x="520" y="70" font-size="14" font-weight="600" fill="#7c3aed">layersplit：切层</text>
+  <rect x="520" y="84" width="20" height="140" fill="#ede9fe"/>
+  <g stroke="#fff" stroke-width="2">
+    <line x1="520" y1="98" x2="540" y2="98"/><line x1="520" y1="115" x2="540" y2="115"/><line x1="520" y1="132" x2="540" y2="132"/><line x1="520" y1="149" x2="540" y2="149"/><line x1="520" y1="166" x2="540" y2="166"/><line x1="520" y1="183" x2="540" y2="183"/><line x1="520" y1="200" x2="540" y2="200"/>
+  </g>
+  <text x="550" y="160" font-size="11" fill="#78716c">78 层拆 8 组<br/>每卡 own ~10 层</text>
+</g>
+<text x="20" y="275" font-size="12" fill="#444">TP 与 CP 正交：TP8 × CP8 = "1/8 权重 × 1/8 序列"</text>
+</svg>
+</div>
 <hr>
-<h2>两个 flag 的原理</h2>
-<h3><code>--enable-prefill-cp --cp-strategy interleave</code>：沿序列维切</h3>
-<p>打开它，sglang 把 <code>attn_cp_size</code> 设成等于 TP（TP8 → CP8），prefill 把长序列切 8 段：</p>
+<h2>第 3 层：GLM-5.2 的特殊结构（DSA）</h2>
+<p>GLM-5.2 不是普通 Transformer，它的注意力是 <strong>DSA（Dynamic Sparse Attention，动态稀疏注意力）</strong>：</p>
 <pre><code>
-整段 prompt:   [════════ t0 … tN ════════]
-                    切成 8 段
-   ┌─────┐  ┌─────┐  ┌─────┐      ┌─────┐
-   卡 0      卡 1      卡 2   …     卡 7
-每张算自家 1/8 段的 DSA 稀疏注意力 + 索引器，再通信归并
+GLM-5.2（78 层，hidden=6144，64 注意力头）
+
+输入 tokens ──▶ 第 i 层（i=0..77）：
+                ① QKV 投影（MLA）
+                ② 索引器 indexer（32 头 × 128 维）—— 动态选出 top-2048 个相关 token
+                ③ 稀疏注意力（只 attend 这 2048 个，而非全部）
+                ④ MLP（MoE 专家）
+            ──▶ 输出 logits
 </code></pre>
-<p>对 prefill 这是对的。<strong>但 <code>attn_cp_size</code> 是全局量，不只 prefill</strong>——decode 也带着"序列已切 8 段"的布局去跑，于是出问题。</p>
-<h3><code>--enable-dsa-prefill-cp-layersplit</code>：沿层维切 KV</h3>
-<p>这个切的是 <strong>KV cache 的存放</strong>，按<strong>层</strong>切。启动日志直接写明：</p>
+<p><strong>DSA 的关键</strong>：不做全注意力（每个 token 看所有 token，O(N²)），而是让 indexer 动态挑最相关的 <strong><code>index_topk=2048</code></strong> 个 token 来 attend，复杂度降到 O(N×2048)。indexer 每 4 层共享一次（<code>index_topk_freq=4</code>）。</p>
+<p><div style="text-align:center;margin:24px 0">
+<svg viewBox="0 0 720 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+<text x="20" y="32" font-size="15" font-weight="700" fill="#111">GLM-5.2 一层：DSA 稀疏注意力 + MoE</text>
+<!-- 输入 -->
+<rect x="250" y="46" width="220" height="34" rx="6" fill="#e7e5e4"/><text x="360" y="68" font-size="12" fill="#444" text-anchor="middle">输入 tokens（t0 … tN）</text>
+<line x1="360" y1="80" x2="360" y2="100" stroke="#78716c" stroke-width="1.5" marker-end="url(#ar4)"/>
+<!-- 层框 -->
+<rect x="150" y="100" width="420" height="170" rx="10" fill="#f8fafc" stroke="#e7e5e4"/>
+<text x="170" y="124" font-size="12" font-weight="600" fill="#111">第 i 层（i = 0 .. 77，共 78 层）</text>
+<rect x="170" y="134" width="190" height="30" rx="5" fill="#dbeafe"/><text x="265" y="154" font-size="11" fill="#1d4ed8" text-anchor="middle">① QKV 投影（MLA）</text>
+<rect x="170" y="170" width="190" height="30" rx="5" fill="#fef3c7" stroke="#f59e0b"/><text x="265" y="190" font-size="11" fill="#b45309" text-anchor="middle">② 索引器 indexer（32 头×128）</text>
+<rect x="170" y="206" width="190" height="30" rx="5" fill="#d1fae5"/><text x="265" y="226" font-size="11" fill="#059669" text-anchor="middle">③ 稀疏注意力（attend top-2048）</text>
+<rect x="380" y="134" width="170" height="102" rx="5" fill="#ede9fe"/><text x="465" y="190" font-size="11" fill="#7c3aed" text-anchor="middle">④ MLP<br/>（MoE 专家）</text>
+<text x="170" y="256" font-size="11" fill="#78716c">indexer 动态挑 top-2048 个相关 token，attention 只在其中算（O(N×2048)）</text>
+<!-- 输出 -->
+<line x1="360" y1="270" x2="360" y2="290" stroke="#78716c" stroke-width="1.5" marker-end="url(#ar4)"/>
+<rect x="250" y="290" width="220" height="30" rx="6" fill="#e7e5e4"/><text x="360" y="310" font-size="12" fill="#444" text-anchor="middle">输出 logits</text>
+<defs><marker id="ar4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#78716c"/></marker></defs>
+</svg>
+</div>
+记住：<strong>indexer 和 top-k 是 DSA 的核心</strong>，下面两个 flag 都是在"并行化 / 存放"这一套东西。</p>
+<hr>
+<h2>第 4 层：两个 flag 的原理</h2>
+<h3>4.1 <code>--enable-prefill-cp --cp-strategy interleave</code>：切序列</h3>
+<p>打开后 <code>attn_cp_size</code> = TP 大小（TP8 → CP8），prefill 把长序列切成 8 段，每卡算 1/8 段的 DSA 稀疏注意力再归并。</p>
+<pre><code>
+整段 prompt: [══════ t0 … tN ══════]
+                   切 8 段
+   卡0      卡1      卡2   …   卡7
+</code></pre>
+<p>对 prefill 这是对的。<strong>但 <code>attn_cp_size</code> 是全局量</strong>——decode 也带着"序列已切 8 段"的布局去跑。</p>
+<h3>4.2 <code>--enable-dsa-prefill-cp-layersplit</code>：切层 KV</h3>
+<p>这个切的是 <strong>KV cache 的存放</strong>，按<strong>层</strong>切。启动日志写明：</p>
 <pre><code>
 CP layer-split rank 0/8: owns layers [0, 10) (10 layers).
   Allocates 1 transient slot to hold each non-owned layer's prefix KV
   broadcast from its owner rank.
 </code></pre>
-<p>含义：78 层拆给 8 张卡，<strong>每张卡只"拥有"约 10 层的 KV</strong>；对其它 7/8 的层，它只留一个 <strong>transient slot（临时槽位）</strong>，等对方广播时临时占用。因为 prefill 前向是从第 0 层到第 77 层顺序往下跑，这套广播能"接一次、用一次、再传下一个"：</p>
-<pre><code>
-prefill 顺序前向（transient 槽位有效）：
-  卡0 算 L0-9 的 KV ──广播──▶ 卡1 的 transient slot ──▶ 卡1 接着算 L10-19
-  卡1 算 L10-19    ──广播──▶ 卡2 ──▶ 算了 L20-29 …
-  …（算一次、广播一次、用一次，流水线往后传）
-</code></pre>
-<p>这套机制是给 prefill 的<strong>一次性顺序前向</strong>设计的。decode 撞上它就坏（下面讲）。</p>
+<p>含义：78 层拆给 8 卡，每卡只"拥有"约 10 层的 KV；其它层靠一个 <strong>transient slot（临时槽位）</strong> 接对方广播。因为 prefill 前向从第 0 层顺序走到第 77 层，这套广播能"算一次、广播一次、用一次"地流水往下传。</p>
+<h3>4.3 顺带引出：decode 也有自己的 CP（dcp_size）</h3>
+<p>sglang 其实<strong>还实现了 decode 端自己的 CP</strong>，叫 DCP，由 <code>--decode-context-parallel-size</code>（内部 <code>dcp_size</code>）控制，默认是 1（关）。它是下一层的关键对照。</p>
 <hr>
-<h2>prefill CP 与 decode CP 的 token 排列不一样（关键）</h2>
-<p>这里有一个最容易被忽略、却又最关键的区别：<strong>prefill CP 和 decode CP 把 token 分给不同 rank 的方式是相反的</strong>。</p>
-<p>源码 <code>srt/layers/dcp/layout.py</code> 里 decode CP 的 owner 规则是 <code>pos % dcp_size == dcp_rank</code>（轮询分条）；而 prefill CP 是连续分块。同一 12 个 token，两种布局里的归属完全不同：</p>
+<h2>第 5 层：一个关键事实——两种 CP 的 token 排列是反的</h2>
+<p>这是全文最容易被忽略、却最核心的一点：<strong>prefill CP 和 decode CP 把 token 分给 rank 的方式是相反的</strong>。</p>
+<p>源码 <code>srt/layers/dcp/layout.py</code> 里 decode CP 的 owner 规则是 <code>pos % dcp_size == dcp_rank</code>（轮询分条）；而 prefill CP 是连续分块。同一批 token，两种布局的归属完全不同：</p>
 <pre><code>
 prefill CP（attn_cp_size=4，连续分块）:
   rank0 = [0 1 2]   rank1 = [3 4 5]   rank2 = [6 7 8]   rank3 = [9 10 11]
@@ -166,149 +281,128 @@ decode CP（dcp_size=4，轮询 pos%4）:
 <div style="text-align:center;margin:24px 0">
 <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
 <text x="20" y="40" font-size="16" font-weight="700" fill="#111">prefill CP 与 decode CP 的 token→rank 排列不同</text>
-<text x="20" y="110" font-size="14" font-weight="600" fill="#1d4ed8">prefill CP（attn_cp_size=4）：连续分块</text>
-<rect x="40" y="120" width="44" height="44" rx="6" fill="#1d4ed8" />
+<text x="20" y="90" font-size="14" font-weight="600" fill="#1d4ed8">prefill CP（attn_cp_size=4）：连续分块</text>
+<rect x="40" y="120" width="44" height="44" rx="6" fill="#1d4ed8"/>
 <text x="62" y="147" font-size="13" fill="#fff" text-anchor="middle">0</text>
-<rect x="100" y="120" width="44" height="44" rx="6" fill="#1d4ed8" />
+<rect x="100" y="120" width="44" height="44" rx="6" fill="#1d4ed8"/>
 <text x="122" y="147" font-size="13" fill="#fff" text-anchor="middle">1</text>
-<rect x="160" y="120" width="44" height="44" rx="6" fill="#1d4ed8" />
+<rect x="160" y="120" width="44" height="44" rx="6" fill="#1d4ed8"/>
 <text x="182" y="147" font-size="13" fill="#fff" text-anchor="middle">2</text>
-<rect x="220" y="120" width="44" height="44" rx="6" fill="#059669" />
+<rect x="220" y="120" width="44" height="44" rx="6" fill="#059669"/>
 <text x="242" y="147" font-size="13" fill="#fff" text-anchor="middle">3</text>
-<rect x="280" y="120" width="44" height="44" rx="6" fill="#059669" />
+<rect x="280" y="120" width="44" height="44" rx="6" fill="#059669"/>
 <text x="302" y="147" font-size="13" fill="#fff" text-anchor="middle">4</text>
-<rect x="340" y="120" width="44" height="44" rx="6" fill="#059669" />
+<rect x="340" y="120" width="44" height="44" rx="6" fill="#059669"/>
 <text x="362" y="147" font-size="13" fill="#fff" text-anchor="middle">5</text>
-<rect x="400" y="120" width="44" height="44" rx="6" fill="#d97706" />
+<rect x="400" y="120" width="44" height="44" rx="6" fill="#d97706"/>
 <text x="422" y="147" font-size="13" fill="#fff" text-anchor="middle">6</text>
-<rect x="460" y="120" width="44" height="44" rx="6" fill="#d97706" />
+<rect x="460" y="120" width="44" height="44" rx="6" fill="#d97706"/>
 <text x="482" y="147" font-size="13" fill="#fff" text-anchor="middle">7</text>
-<rect x="520" y="120" width="44" height="44" rx="6" fill="#d97706" />
+<rect x="520" y="120" width="44" height="44" rx="6" fill="#d97706"/>
 <text x="542" y="147" font-size="13" fill="#fff" text-anchor="middle">8</text>
-<rect x="580" y="120" width="44" height="44" rx="6" fill="#7c3aed" />
+<rect x="580" y="120" width="44" height="44" rx="6" fill="#7c3aed"/>
 <text x="602" y="147" font-size="13" fill="#fff" text-anchor="middle">9</text>
-<rect x="640" y="120" width="44" height="44" rx="6" fill="#7c3aed" />
+<rect x="640" y="120" width="44" height="44" rx="6" fill="#7c3aed"/>
 <text x="662" y="147" font-size="13" fill="#fff" text-anchor="middle">10</text>
-<rect x="700" y="120" width="44" height="44" rx="6" fill="#7c3aed" />
+<rect x="700" y="120" width="44" height="44" rx="6" fill="#7c3aed"/>
 <text x="722" y="147" font-size="13" fill="#fff" text-anchor="middle">11</text>
-<text x="40" y="180" font-size="12" fill="#78716c">rank0</text>
-<text x="100" y="180" font-size="12" fill="#059669">rank1</text>
-<text x="160" y="180" font-size="12" fill="#d97706">rank2</text>
-<text x="220" y="180" font-size="12" fill="#7c3aed">rank3</text>
-<text x="20" y="250" font-size="14" font-weight="600" fill="#059669">decode CP（dcp_size=4）：轮询分条（pos % 4）</text>
-<rect x="40" y="260" width="44" height="40" rx="6" fill="#1d4ed8" />
-<text x="62" y="285" font-size="13" fill="#fff" text-anchor="middle">0</text>
-<rect x="100" y="260" width="44" height="40" rx="6" fill="#059669" />
-<text x="122" y="285" font-size="13" fill="#fff" text-anchor="middle">1</text>
-<rect x="160" y="260" width="44" height="40" rx="6" fill="#d97706" />
-<text x="182" y="285" font-size="13" fill="#fff" text-anchor="middle">2</text>
-<rect x="220" y="260" width="44" height="40" rx="6" fill="#7c3aed" />
-<text x="242" y="285" font-size="13" fill="#fff" text-anchor="middle">3</text>
-<rect x="280" y="260" width="44" height="40" rx="6" fill="#1d4ed8" />
-<text x="302" y="285" font-size="13" fill="#fff" text-anchor="middle">4</text>
-<rect x="340" y="260" width="44" height="40" rx="6" fill="#059669" />
-<text x="362" y="285" font-size="13" fill="#fff" text-anchor="middle">5</text>
-<rect x="400" y="260" width="44" height="40" rx="6" fill="#d97706" />
-<text x="422" y="285" font-size="13" fill="#fff" text-anchor="middle">6</text>
-<rect x="460" y="260" width="44" height="40" rx="6" fill="#7c3aed" />
-<text x="482" y="285" font-size="13" fill="#fff" text-anchor="middle">7</text>
-<rect x="520" y="260" width="44" height="40" rx="6" fill="#1d4ed8" />
-<text x="542" y="285" font-size="13" fill="#fff" text-anchor="middle">8</text>
-<rect x="580" y="260" width="44" height="40" rx="6" fill="#059669" />
-<text x="602" y="285" font-size="13" fill="#fff" text-anchor="middle">9</text>
-<rect x="640" y="260" width="44" height="40" rx="6" fill="#d97706" />
-<text x="662" y="285" font-size="13" fill="#fff" text-anchor="middle">10</text>
-<rect x="700" y="260" width="44" height="40" rx="6" fill="#7c3aed" />
-<text x="722" y="285" font-size="13" fill="#fff" text-anchor="middle">11</text>
+<text x="40" y="182" font-size="12" fill="#78716c">rank0</text><text x="100" y="182" font-size="12" fill="#059669">rank1</text><text x="160" y="182" font-size="12" fill="#d97706">rank2</text><text x="220" y="182" font-size="12" fill="#7c3aed">rank3</text>
+<text x="20" y="240" font-size="14" font-weight="600" fill="#059669">decode CP（dcp_size=4）：轮询分条（pos % 4）</text>
+<rect x="40" y="270" width="44" height="44" rx="6" fill="#1d4ed8"/>
+<text x="62" y="297" font-size="13" fill="#fff" text-anchor="middle">0</text>
+<rect x="100" y="270" width="44" height="44" rx="6" fill="#059669"/>
+<text x="122" y="297" font-size="13" fill="#fff" text-anchor="middle">1</text>
+<rect x="160" y="270" width="44" height="44" rx="6" fill="#d97706"/>
+<text x="182" y="297" font-size="13" fill="#fff" text-anchor="middle">2</text>
+<rect x="220" y="270" width="44" height="44" rx="6" fill="#7c3aed"/>
+<text x="242" y="297" font-size="13" fill="#fff" text-anchor="middle">3</text>
+<rect x="280" y="270" width="44" height="44" rx="6" fill="#1d4ed8"/>
+<text x="302" y="297" font-size="13" fill="#fff" text-anchor="middle">4</text>
+<rect x="340" y="270" width="44" height="44" rx="6" fill="#059669"/>
+<text x="362" y="297" font-size="13" fill="#fff" text-anchor="middle">5</text>
+<rect x="400" y="270" width="44" height="44" rx="6" fill="#d97706"/>
+<text x="422" y="297" font-size="13" fill="#fff" text-anchor="middle">6</text>
+<rect x="460" y="270" width="44" height="44" rx="6" fill="#7c3aed"/>
+<text x="482" y="297" font-size="13" fill="#fff" text-anchor="middle">7</text>
+<rect x="520" y="270" width="44" height="44" rx="6" fill="#1d4ed8"/>
+<text x="542" y="297" font-size="13" fill="#fff" text-anchor="middle">8</text>
+<rect x="580" y="270" width="44" height="44" rx="6" fill="#059669"/>
+<text x="602" y="297" font-size="13" fill="#fff" text-anchor="middle">9</text>
+<rect x="640" y="270" width="44" height="44" rx="6" fill="#d97706"/>
+<text x="662" y="297" font-size="13" fill="#fff" text-anchor="middle">10</text>
+<rect x="700" y="270" width="44" height="44" rx="6" fill="#7c3aed"/>
+<text x="722" y="297" font-size="13" fill="#fff" text-anchor="middle">11</text>
 <text x="20" y="340" font-size="13" fill="#dc2626" font-weight="600">同一 token 在两种布局里落在不同 rank → 必须 reshard 转移，standalone 缺失 → 读错</text>
 </svg>
 </div>
-<p>比如 token 4：prefill 在 rank1，decode 却要在 rank0——<strong>同一个 token 在两种布局里落在不同的 rank 上</strong>。</p>
-<p>在 PD 里，这个错位靠一次<strong>「DCP reshard」</strong>跨机传输时重新切分来桥接（源码 <code>srt/disaggregation/common/conn.py:620</code>: "each prefill rank will send 1/N token-shard to each decode rank"）。<strong>standalone 没有这段跨机 reshard</strong>，于是：</p>
+<p>比如 <strong>token 4</strong>：prefill 在 rank1，decode 却要在 rank0——同一个 token 落在不同 rank。</p>
+<p><strong>在 PD 架构里，这个错位靠一次「DCP reshard」桥接</strong>：跨机传输时 prefill 把自己连续块里的 KV 重新切条、按 <code>1/N token-shard</code> 分发给 decode 各 rank（源码 <code>srt/disaggregation/common/conn.py:620</code>）。<strong>而 standalone 单机没有这次跨机 reshard</strong>——这就是所有问题的根源。</p>
+<hr>
+<h2>第 6 层：为什么 standalone 会坏（三种坏法）</h2>
 <table>
 <tr><th>只开……</th><th>发生了什么</th><th>结果</th><th>证据</th></tr>
-<tr><td>prefill CP（不开 decode CP）</td><td>prefill 按连续块写 KV，decode 按本地连续读</td><td>破坏 decode</td><td>实测：输出重复</td></tr>
-<tr><td>只开 decode CP（不开 prefill CP）</td><td>prefill 写本地 KV，decode 按 pos%N 轮询读</td><td>同样错位</td><td>源码对称推断，B200 未验证</td></tr>
+<tr><td>prefill CP（不配 decode CP）</td><td>prefill 按连续块写 KV，decode 按本地连续读</td><td>破坏 decode</td><td><strong>实测</strong>：输出重复</td></tr>
+<tr><td>只开 decode CP（不配 prefill CP）</td><td>prefill 写本地 KV，decode 按 pos%N 轮询读</td><td>对称错位</td><td>源码推断，B200 未验证</td></tr>
+<tr><td>layersplit</td><td>decode 读非拥有层时广播 gate 关闭</td><td>随机 token</td><td><strong>实测</strong> + 源码</td></tr>
 </table>
-<p>这就是为什么这两个 CP 开关在 standalone 里都危险——不是某个开关"坏"，而是<strong>两种并行布局在单机里缺少了原本由 PD 传送层做的那次 reshard</strong>。</p>
+<p>具体拆两个 flag：</p>
+<p><strong><code>--enable-prefill-cp</code>：decode 端「没接上」</strong>。decode 每步只有 1 个 token，却要在"序列已切 8 段"的布局里读全量 KV，需要 decode-CP 来兜，DSA 的 decode 端没接上 → 注意力分值算错 → 输出一层层重复。</p>
+<p><strong><code>--enable-dsa-prefill-cp-layersplit</code>：语义上容不下 decode</strong>。decode 是逐 token 反复读全 78 层 KV，而每卡只存 ~10 层、transient 槽只有一层容量，想读的"其它 68 层"不在卡上；且广播 gate（<code>is_extend</code>）只在 prefill 触发，decode 永远不广播 → 读到空槽 → 随机 token。</p>
 <hr>
-<h2>实测：单机下它们坏了什么</h2>
-<p>隔离测试（<code>temperature=0</code> 贪心，排除采样噪声）：</p>
-<table>
-<tr><th>配置</th><th><code>1+1=</code> 的输出</th><th>现象</th></tr>
-<tr><td>无 CP</td><td><code>2</code></td><td>✅ 正常</td></tr>
-<tr><td>只开 <code>--enable-prefill-cp --cp-strategy interleave</code></td><td><code>1111+1++++</code></td><td>decode 退化重复</td></tr>
-<tr><td>两者都开</td><td>随机、多语言混杂</td><td>decode 读到错 KV</td></tr>
-</table>
-<blockquote class="honest"><p>⚠️ 诚实标注："只开 prefill-CP" 是本次直接隔离实测；"两者都开"的乱码来自最初完整参数集观测。</p></blockquote>
-<hr>
-<h2>为什么坏：两类不同的问题</h2>
-<h3><code>--enable-prefill-cp</code>：decode 端「没接上」</h3>
-<p>decode 每步只有 1 个 token，要 attend 全部历史；而"序列已切 8 段"后，这 1 个 token 要去对 8 段分散 KV 各自算再归并。prefill 用"所有 token 一并算 + 通信归并"能行，但 decode 的"单 query + 已切段"这个组合，需要专门的 <strong>decode-CP</strong> 实现来兜——<strong>而 DSA 的 decode 端没接上</strong> → 注意力分值算错 → 输出一层重复（<code>一句话一句话…</code>）。</p>
-<h3><code>--enable-dsa-prefill-cp-layersplit</code>：语义上容不下 decode</h3>
-<p>layersplit 的 transient 槽位只在 prefill 顺序前向时有意义。<strong>decode 是逐 token 反复读全 78 层 KV</strong>，而每卡只存了 ~10 层、transient 槽位只有一层的容量，decode 想读的"其它 ~68 层"根本不在卡上 → 读到没被填充过的错位数据 → logits 全乱 → 随机 token。</p>
-<pre><code>
-decode 流程（layersplit 下坏）：
-  1 个新 token 的 forward 要过全 78 层：
-    卡0 只存 L0-9，读到 L10 时：
-      广播 gate = is_extend=False → 不广播 → 读到空 transient slot → 错
-</code></pre>
-<p><strong>一句话区分：</strong></p>
-<ul><li><code>--enable-prefill-cp</code> 坏在 <strong>decode 端能力（decode-CP）没实现 / 不兼容</strong>；</li><li><code>--enable-dsa-prefill-cp-layersplit</code> 坏在 <strong>从设计上就不该对 decode 开</strong>。</li></ul>
-<hr>
-<h2>源码证据：坐实上面两个判断</h2>
+<h2>第 7 层：源码证据</h2>
 <p>（sglang 源码树 <code>python/sglang/</code>，带文件:行号）</p>
-<p><strong>1. layersplit 就是 prefill-only</strong></p>
-<p><code>srt/layers/cp/utils.py:52</code> docstring：</p>
-<blockquote><p>"Layer split is a <strong>prefill-CP-only optimization</strong> for DSA..."</p></blockquote>
-<p><code>srt/server_args.py:4427</code> 非 prefill 模式直接抛异常：</p>
+<p><strong>1. layersplit 是 prefill-only</strong></p>
+<p><code>srt/layers/cp/utils.py:52</code> docstring：「Layer split is a <strong>prefill-CP-only optimization</strong> for DSA...」</p>
+<p><code>srt/server_args.py:4427</code> 非 prefill 直接抛异常：</p>
 <pre><code>
 raise ValueError(
     "--enable-dsa-cache-layer-split is only supported on PD prefill workers. "
     "Non-PD workers also run decode and require ordinary local decode cache semantics."
 )
 </code></pre>
-<p>即作者白纸黑字：<strong>「非 PD worker 还要跑 decode，需要普通本地 decode cache 语义」</strong>。</p>
-<p>更硬的是 <code>srt/layers/utils/cp_utils.py:540</code> 的广播 gate：</p>
+<p>广播 gate <code>srt/layers/utils/cp_utils.py:540</code>：</p>
 <pre><code>
 return (
     get_global_server_args().enable_dsa_prefill_cp_layersplit
-    and forward_batch.forward_mode.is_extend_without_speculative()  # 只有 prefill(extend) 才广播
+    and forward_batch.forward_mode.is_extend_without_speculative()  # 只有 prefill 才广播
 )
 </code></pre>
-<p><code>is_extend</code> = prefill 阶段。<strong>decode 时这个广播永不触发</strong>——印证"读到空槽位"。</p>
-<p><strong>2. prefill-CP 和 decode-CP 是两套独立 flag</strong></p>
+<p><strong>2. prefill CP 与 decode CP 是两套独立 flag</strong></p>
 <table>
-<tr><th></th><th>prefill-CP</th><th>decode-CP（DCP）</th></tr>
-<tr><td>flag</td><td><code>--enable-prefill-cp</code></td><td><code>--decode-context-parallel-size</code> / <code>--dcp-size</code></td></tr>
+<tr><th></th><th>prefill CP</th><th>decode CP（DCP）</th></tr>
+<tr><td>flag</td><td><code>--enable-prefill-cp</code></td><td><code>--decode-context-parallel-size</code></td></tr>
 <tr><td>内部字段</td><td><code>attn_cp_size</code></td><td><code>dcp_size</code></td></tr>
-<tr><td>默认</td><td>关</td><td><strong>1（关）</strong></td></tr>
+<tr><td>默认</td><td>关</td><td>1（关）</td></tr>
 </table>
-<p>sglang 其实<strong>已经实现了 decode 端 CP</strong>（<code>srt/layers/dcp/</code> 整个模块 + dsa_backend 里的 "DCP decode path"）。</p>
-<p><strong>3. DCP 在 B200 上没验证过</strong></p>
-<p><code>srt/server_args.py:3153</code> 注释：</p>
-<blockquote><p>"…DCP is validated on both HIP and CUDA (<strong>B300 SM103</strong>)."</p></blockquote>
-<p><strong>B200（SM100）不在验证范围内。</strong></p>
+<p><strong>3. DCP 在 B200 没验证过</strong>：<code>srt/server_args.py:3153</code> 注释「DCP is validated on both HIP and CUDA (<strong>B300 SM103</strong>)」，B200（SM100）不在范围内。</p>
 <hr>
-<h2>要不要实现代码，让 prefill-CP 能开？</h2>
-<h3>layersplit：不要，也没法"实现"</h3>
-<p>它不是"缺代码"，是"语义上只属于 prefill"。源码明说 decode 需要 ordinary local cache。想在 standalone 开它，等于重写 decode 的 KV cache 语义去迁就一个 prefill 优化——方向就错。<strong>结论：任何情况下 standalone 都关掉它。</strong></p>
-<h3>prefill-CP：技术上可行，但投入产出不划算</h3>
-<ul><li>decode 端 CP（DCP）<strong>代码已存在</strong>，不是从零写。真正缺的是<strong>在 B200(SM100) 上把 DCP 验证/适配好</strong>。</li><li>prefill-CP 的收益只在<strong>「单条超长 prompt + 低并发」</strong>才明显（长序列 prefill 被切 8 段并行）；短 prompt 高并发下通信开销甚至倒贴。</li><li><strong>PD 分离已经解决了这个问题</strong>：prefill 机开 CP 拿满收益，decode 机不开 CP 干净跑——这就是这套参数的设计用法。standalone 硬要单机同时吃 prefill 的 CP，等于重新造一个 PD 已经解决的轮子。</li></ul>
-<p><strong>建议：不为 B200 standalone 去适配 DCP。</strong> 真有"长上下文 + 单机"硬需求，两条更便宜的路：</p>
-<ol><li>直接用 <strong>PD 分离</strong>（prefill 机带 CP + decode 机不带）；</li><li>或 standalone 不开 CP，靠 <code>max-total-tokens</code> + hicache 撑住长上下文。</li></ol>
-<hr>
-<h2>结论</h2>
-<p>PD 分离（prefill 机 + decode 机分开）里这两个 flag 是 prefill 机的合理优化，<strong>保留</strong>；但<strong>单机一体</strong>服务这三个开关必须全去掉：</p>
+<h2>第 8 层：要不要改代码 + 结论</h2>
+<p><strong>layersplit：不要，也没法"实现"</strong>。它不是缺代码，是语义上只属于 prefill。源码明说 decode 需要 ordinary local cache。任何情况 standalone 都关它。</p>
+<p><strong>prefill-CP：技术上可行，但投入产出不划算</strong>。decode-CP（DCP）代码已存在，真正缺的是在 B200(SM100) 上验证/适配；而 prefill-CP 的收益只在「单条超长 prompt + 低并发」才明显，且 <strong>PD 分离本来就是这么设计的</strong>（prefill 机开 CP、decode 机不开）。standalone 硬要单机同时吃，等于重造 PD 已经解决的轮子。</p>
+<p><strong>结论</strong>：</p>
 <pre><code>
-# ❌ 单机里不要带
---enable-prefill-cp --cp-strategy interleave
---enable-dsa-prefill-cp-layersplit
+# 单机一体服务，三个开关必须全去掉
+# ❌ --enable-prefill-cp --cp-strategy interleave
+# ❌ --enable-dsa-prefill-cp-layersplit
 </code></pre>
-<p>去掉后输出恢复正常。哪天单机发现"输出变成重复 / 乱码"，先查启动参数里有没有这两条——它们比采样参数、fp8 scale 都更可能是元凶。</p>
+<p>去掉后输出恢复正常。哪天单机发现"输出变成重复 / 乱码"，先查这两条——它们比采样参数、fp8 scale 都更可能是元凶。</p>
 <hr>
-<h2>参考</h2>
-<ul><li>sglang PD 部署（GLM-5.2 FP8 / B200）的 standalone 排障实录；源码证据来自 sglang 源码树 <code>python/sglang/</code>。</li><li>相关但不同：vLLM 的 decode-CP（DCP）见本站《DCP 实测：消除张量并行下的 KV Cache 重复存储》。</li></ul>
+<h2>附录：相关知识点速查</h2>
+<table>
+<tr><th>概念</th><th>一句话</th><th>与本文关系</th></tr>
+<tr><td><strong>注意力 / KV cache</strong></td><td>token 用 Q 找 K 算相似度、加权 V；历史 K/V 缓存</td><td>第 2 层地基</td></tr>
+<tr><td><strong>prefill / decode</strong></td><td>多 token 并行 vs 单 token 自回归</td><td>冲突根源</td></tr>
+<tr><td><strong>TP（张量并行）</strong></td><td>切权重</td><td>CP 的对照</td></tr>
+<tr><td><strong>CP（上下文并行）</strong></td><td>切序列长度</td><td>本文主角之一</td></tr>
+<tr><td><strong>DCP（decode CP）</strong></td><td>decode 端切 KV，轮询条</td><td>主角之二（对照）</td></tr>
+<tr><td><strong>layersplit（层切分）</strong></td><td>切层 + transient 广播</td><td>主角之三</td></tr>
+<tr><td><strong>DSA（动态稀疏注意力）</strong></td><td>indexer 挑 top-k，稀疏 attention</td><td>模型特性</td></tr>
+<tr><td><strong>MLA（多头潜在注意力）</strong></td><td>压缩 KV 的注意力变体</td><td>GLM-5.2 用</td></tr>
+<tr><td><strong>PD 分离</strong></td><td>prefill/decode 分机</td><td>reshard 发生的场所</td></tr>
+<tr><td><strong>DCP reshard</strong></td><td>跨机传输时重排 KV 布局</td><td>单机缺失的关键步骤</td></tr>
+</table>
+<p>相关阅读：</p>
+<ul><li>vLLM 的 decode-CP（DCP）：《DCP 实测：消除张量并行下的 KV Cache 重复存储》（本站）</li><li>sglang 源码：<code>srt/layers/dcp/</code>、<code>srt/layers/attention/dsa/</code>、<code>srt/mem_cache/cp_layersplit_pool.py</code></li></ul>
 
 <footer>
   <p>本文结论来自 sglang PD 容器化部署（GLM-5.2 FP8 / B200）的 standalone 排障实录，源码证据来自 sglang 源码树 <code>python/sglang/</code>。</p>

@@ -2,91 +2,115 @@
 
 ## 一句话总结
 
-sglang 里 `--enable-prefill-cp`（配合 `--cp-strategy interleave`）和 `--enable-dsa-prefill-cp-layersplit` 是两个 **prefill 专属**的并行优化。在 PD 分离架构里它们各安其位；可一旦把服务以**单机一体（prefill+decode 同进程）**的方式起，这两个开关就会把 decode 阶段搞坏——一个让输出退化成"一句话"式的重复，另一个让输出直接变成随机 token。原理根子在**这两个优化从语义上就跟 decode 的自回归特性冲突**，只能整个去掉。
+sglang 里 `--enable-prefill-cp`（配合 `--cp-strategy interleave`）和 `--enable-dsa-prefill-cp-layersplit` 是两个 **prefill 专属**的并行优化。在 PD 分离架构里它们各安其位；可一旦把服务以**单机一体（prefill+decode 同进程）**的方式起，这两个开关就会把 decode 阶段搞坏——一个让输出退化成重复，另一个让输出直接变成随机 token。根子在于：**这两个优化从语义上就跟 decode 的自回归特性冲突**，只能整个去掉。
 
 ---
 
-## 模型结构：先看清要切的东西
+## 导读：这篇文章由浅入深讲清楚 8 层
 
-讲切分之前，先看 GLM-5.2 本身。它是一个用 **DSA（Dynamic Sparse Attention，动态稀疏注意力）的 MoE 模型**：
+顺着读，每一层都建立在上一层之上，不需要任何并行训练/推理背景：
 
+1. **先看现象** —— 一个"关两个参数就能修好乱码"的真实案例，先有个感性认识
+2. **三个基础概念** —— 注意力与 KV cache、prefill vs decode、三种切分维度
+3. **GLM-5.2 的特殊结构** —— 什么是 DSA 稀疏注意力、indexer、top-k
+4. **两个 flag 的原理** —— 它们各自切的是什么
+5. **一个关键事实** —— prefill CP 和 decode CP 的 token 排列是反的
+6. **为什么坏** —— 三种坏法（重复 / 乱码 / 对称错位）
+7. **源码证据** —— 用源码把结论钉死
+8. **要不要改代码** —— 工程判断 + 结论
+
+文末附「相关知识点速查」，可当索引用。
+
+---
+
+## 第 1 层：先看现象
+
+在 8×B200 上，用 sglang 以**单机（standalone，不做 PD 分离）**跑 GLM-5.2 时，发现输出是乱的：`1+1=` 答成 `2a&apos in'ss…` 这种随机 token，或者"一句话一句话一句话…"的无限重复。
+
+排查一圈后，把启动参数里的这两条去掉，输出立刻正常（`1+1=` → `2`）：
+
+```bash
+# ❌ 单机里不要带
+--enable-prefill-cp --cp-strategy interleave
+--enable-dsa-prefill-cp-layersplit
 ```
-GLM-5.2（78 层，hidden=6144，64 个注意力头）
 
-输入 token 序列：  t0  t1  t2  ...  tN
-                      │ 逐层往下传
-        ┌─────────────────────────────────┐
-        │ 第 i 层（i = 0 .. 77，共 78 层）   │
-        │                                 │
-        │   ① QKV 投影（MLA 多头潜在注意力）  │
-        │   ② 索引器 indexer（32 头 × 128 维）│
-        │        —— 动态选出 top-2048 个 token│
-        │   ③ 稀疏注意力（只 attend 这 2048） │
-        │   ④ MLP（MoE 专家混合）            │
-        └─────────────────────────────────┘
-                      │
-                      ▼
-                  输出 logits
-```
-
-**DSA 的关键**：它不做传统全注意力（每个 token 看所有 token，O(N²)），而是用**索引器（indexer）**这个小网络，动态给每个 token 挑最相关的 **`index_topk=2048` 个** token，attention 只在这 2048 个里算。所以复杂度是 O(N × 2048)，远低于全注意力。索引器每 4 层共享一次（`index_topk_freq=4`）。
-
-下面两个 flag 做的都是"并行化 / 存放"这一套东西。
+**为什么这两个参数在别的场景是合理的、在单机却是毒药？** 这就是全文要讲清楚的。先从地基开始。
 
 ---
 
-## 三个"切分维度"：切的是完全不同的东西
+## 第 2 层：三个基础概念
 
-| 切法 | 切的是什么 | 8 张卡各拿 | 什么时候有用 |
-|---|---|---|---|
-| **TP（张量并行）** | 权重（`Wq/Wk/Wv`） | 1/8 权重，算**整条序列** | 权重太大单卡放不下 |
-| **CP（上下文并行）** | **序列长度**（token） | 1/8 token，算**全部权重** | 序列太长算不动 |
-| **layersplit（层切分）** | **78 层** | own ~10 层，其它层靠临时广播 | prefill 层间流水线 / 每卡只存 1/8 层 KV |
+### 2.1 注意力与 KV cache
 
-关键：**TP 和 CP 是正交的**。TP8 让每张卡算 1/8 权重；CP8 再让每张卡只算 1/8 序列。两者叠加，prefill 的"长 prompt × 全权重"就被切成了"1/8 序列 × 1/8 权重"。
+Transformer 的注意力：每个 token 生成一个 **Query（Q）**，去和所有历史 token 的 **Key（K）** 算相似度，再用相似度加权 **Value（V）** 得到输出。历史 token 的 K、V 会被缓存下来，就是 **KV cache**——decode 每生成一个 token，都要回头读一遍全部 KV cache。
 
----
-
-## 为什么 prefill 能吃 CP，decode 不能
-
-prefill 和 decode 是两种完全不同的计算，这是整套理解的根：
+### 2.2 prefill 和 decode 是两个完全不同的阶段
 
 ```
 prefill（预填充）：一次性把整段 prompt 喂进去
-   [t0 t1 t2 ... tN] ──────▶ 所有 token 并行前向，边算边写 KV
-   特点：token 一次性并行 → 可切分、可加速
+  [t0 t1 t2 ... tN] ──▶ 所有 token 并行前向，边算边写 KV
+  特点：token 多、一次性、可并行
 
-decode（解码）：自回归生成
-   每 1 步只有 1 个新 token ──attend──▶ 全部历史 KV ──▶ 再出下 1 个
-   特点：每步只有 1 个 token、要读全量 KV、逐步串行
+decode（解码）：自回归逐 token 生成
+  每 1 步：1 个新 token ──attend──▶ 全部历史 KV ──▶ 出下 1 个
+  特点：每步只有 1 个 token、要读全量 KV、逐步串行
 ```
 
-- **prefill**：一次处理整段 prompt（比如 8 万 token），切成 8 段、每卡算 1 万段 → **接近 8 倍加速**。这是 CP 的真金收益。
-- **decode**：每步只出 1 个 token。"1 个 token" 没法再切 8 份并行；而且它要读的是**全部历史 KV**，切序列反而添乱。
+一句话记住区别：**prefill 是"多 token 一次性并行"，decode 是"单 token 反复读全量"。** 这个区别是后面一切冲突的根源。
 
-**这就是"prefill 专属"的根。** 下面两个 flag 违反这一条的两种方式各不相同。
+### 2.3 并行的三个切分维度
+
+模型大、放不下，就得"切"。可切的维度有三个，切的是完全不同的东西：
+
+| 切法 | 切的是什么 | 8 张卡各拿 | 解决什么 |
+|---|---|---|---|
+| **TP（张量并行）** | 权重 | 1/8 权重，算整条序列 | 权重太大放不下 |
+| **CP（上下文并行）** | 序列长度 | 1/8 token，算全部权重 | 序列太长算不动 |
+| **layersplit（层切分）** | 78 层 | own ~10 层，其它层靠临时广播 | prefill 层间流水线 |
+
+关键：**TP 和 CP 是正交的**。TP8 让每卡算 1/8 权重，CP8 再让每卡算 1/8 序列，两者可叠加。
 
 ---
 
-## 两个 flag 的原理
+## 第 3 层：GLM-5.2 的特殊结构（DSA）
 
-### `--enable-prefill-cp --cp-strategy interleave`：沿序列维切
-
-打开它，sglang 把 `attn_cp_size` 设成等于 TP（TP8 → CP8），prefill 把长序列切 8 段：
+GLM-5.2 不是普通 Transformer，它的注意力是 **DSA（Dynamic Sparse Attention，动态稀疏注意力）**：
 
 ```
-整段 prompt:   [════════ t0 … tN ════════]
-                    切成 8 段
-   ┌─────┐  ┌─────┐  ┌─────┐      ┌─────┐
-   卡 0      卡 1      卡 2   …     卡 7
-每张算自家 1/8 段的 DSA 稀疏注意力 + 索引器，再通信归并
+GLM-5.2（78 层，hidden=6144，64 注意力头）
+
+输入 tokens ──▶ 第 i 层（i=0..77）：
+                ① QKV 投影（MLA）
+                ② 索引器 indexer（32 头 × 128 维）—— 动态选出 top-2048 个相关 token
+                ③ 稀疏注意力（只 attend 这 2048 个，而非全部）
+                ④ MLP（MoE 专家）
+            ──▶ 输出 logits
 ```
 
-对 prefill 这是对的。**但 `attn_cp_size` 是全局量，不只 prefill**——decode 也带着"序列已切 8 段"的布局去跑，于是出问题。
+**DSA 的关键**：不做全注意力（每个 token 看所有 token，O(N²)），而是让 indexer 动态挑最相关的 **`index_topk=2048`** 个 token 来 attend，复杂度降到 O(N×2048)。indexer 每 4 层共享一次（`index_topk_freq=4`）。
 
-### `--enable-dsa-prefill-cp-layersplit`：沿层维切 KV
+记住：**indexer 和 top-k 是 DSA 的核心**，下面两个 flag 都是在"并行化 / 存放"这一套东西。
 
-这个切的是 **KV cache 的存放**，按**层**切。启动日志直接写明：
+---
+
+## 第 4 层：两个 flag 的原理
+
+### 4.1 `--enable-prefill-cp --cp-strategy interleave`：切序列
+
+打开后 `attn_cp_size` = TP 大小（TP8 → CP8），prefill 把长序列切成 8 段，每卡算 1/8 段的 DSA 稀疏注意力再归并。
+
+```
+整段 prompt: [══════ t0 … tN ══════]
+                   切 8 段
+   卡0      卡1      卡2   …   卡7
+```
+
+对 prefill 这是对的。**但 `attn_cp_size` 是全局量**——decode 也带着"序列已切 8 段"的布局去跑。
+
+### 4.2 `--enable-dsa-prefill-cp-layersplit`：切层 KV
+
+这个切的是 **KV cache 的存放**，按**层**切。启动日志写明：
 
 ```
 CP layer-split rank 0/8: owns layers [0, 10) (10 layers).
@@ -94,24 +118,19 @@ CP layer-split rank 0/8: owns layers [0, 10) (10 layers).
   broadcast from its owner rank.
 ```
 
-含义：78 层拆给 8 张卡，**每张卡只"拥有"约 10 层的 KV**；对其它 7/8 的层，它只留一个 **transient slot（临时槽位）**，等对方广播时临时占用。因为 prefill 前向是从第 0 层到第 77 层顺序往下跑，这套广播能"接一次、用一次、再传下一个"：
+含义：78 层拆给 8 卡，每卡只"拥有"约 10 层的 KV；其它层靠一个 **transient slot（临时槽位）** 接对方广播。因为 prefill 前向从第 0 层顺序走到第 77 层，这套广播能"算一次、广播一次、用一次"地流水往下传。
 
-```
-prefill 顺序前向（transient 槽位有效）：
-  卡0 算 L0-9 的 KV ──广播──▶ 卡1 的 transient slot ──▶ 卡1 接着算 L10-19
-  卡1 算 L10-19    ──广播──▶ 卡2 ──▶ 算了 L20-29 …
-  …（算一次、广播一次、用一次，流水线往后传）
-```
+### 4.3 顺带引出：decode 也有自己的 CP（dcp_size）
 
-这套机制是给 prefill 的**一次性顺序前向**设计的。decode 撞上它就坏（下面讲）。
+sglang 其实**还实现了 decode 端自己的 CP**，叫 DCP，由 `--decode-context-parallel-size`（内部 `dcp_size`）控制，默认是 1（关）。它是下一层的关键对照。
 
 ---
 
-## prefill CP 与 decode CP 的 token 排列不一样（关键）
+## 第 5 层：一个关键事实——两种 CP 的 token 排列是反的
 
-这里有一个最容易被忽略、却又最关键的区别：**prefill CP 和 decode CP 把 token 分给不同 rank 的方式是相反的**。
+这是全文最容易被忽略、却最核心的一点：**prefill CP 和 decode CP 把 token 分给 rank 的方式是相反的**。
 
-源码 `srt/layers/dcp/layout.py` 里 decode CP 的 owner 规则是 `pos % dcp_size == dcp_rank`（轮询分条）；而 prefill CP 是连续分块。同一 12 个 token，两种布局里的归属完全不同：
+源码 `srt/layers/dcp/layout.py` 里 decode CP 的 owner 规则是 `pos % dcp_size == dcp_rank`（轮询分条）；而 prefill CP 是连续分块。同一批 token，两种布局的归属完全不同：
 
 ```
 prefill CP（attn_cp_size=4，连续分块）:
@@ -121,68 +140,37 @@ decode CP（dcp_size=4，轮询 pos%4）:
   rank0 = [0 4 8]   rank1 = [1 5 9]   rank2 = [2 6 10]  rank3 = [3 7 11]
 ```
 
-比如 token 4：prefill 在 rank1，decode 却要在 rank0——**同一个 token 在两种布局里落在不同的 rank 上**。
+比如 **token 4**：prefill 在 rank1，decode 却要在 rank0——同一个 token 落在不同 rank。
 
-在 PD 里，这个错位靠一次**「DCP reshard」**跨机传输时重新切分来桥接（源码 `srt/disaggregation/common/conn.py:620`: "each prefill rank will send 1/N token-shard to each decode rank"）。**standalone 没有这段跨机 reshard**，于是：
+**在 PD 架构里，这个错位靠一次「DCP reshard」桥接**：跨机传输时 prefill 把自己连续块里的 KV 重新切条、按 `1/N token-shard` 分发给 decode 各 rank（源码 `srt/disaggregation/common/conn.py:620`）。**而 standalone 单机没有这次跨机 reshard**——这就是所有问题的根源。
+
+---
+
+## 第 6 层：为什么 standalone 会坏（三种坏法）
 
 | 只开…… | 发生了什么 | 结果 | 证据 |
 |---|---|---|---|
-| prefill CP（不开 decode CP） | prefill 按连续块写 KV，decode 按本地连续读 | 破坏 decode | 实测：输出重复 |
-| 只开 decode CP（不开 prefill CP） | prefill 写本地 KV，decode 按 pos%N 轮询读 | 同样错位 | 源码对称推断，B200 未验证 |
+| prefill CP（不配 decode CP） | prefill 按连续块写 KV，decode 按本地连续读 | 破坏 decode | **实测**：输出重复 |
+| 只开 decode CP（不配 prefill CP） | prefill 写本地 KV，decode 按 pos%N 轮询读 | 对称错位 | 源码推断，B200 未验证 |
+| layersplit | decode 读非拥有层时广播 gate 关闭 | 随机 token | **实测** + 源码 |
 
-这就是为什么这两个 CP 开关在 standalone 里都危险——不是某个开关"坏"，而是**两种并行布局在单机里缺少了原本由 PD 传送层做的那次 reshard**。
+具体拆两个 flag：
 
----
+**`--enable-prefill-cp`：decode 端「没接上」**。decode 每步只有 1 个 token，却要在"序列已切 8 段"的布局里读全量 KV，需要 decode-CP 来兜，DSA 的 decode 端没接上 → 注意力分值算错 → 输出一层层重复。
 
-## 实测：单机下它们坏了什么
-
-隔离测试（`temperature=0` 贪心，排除采样噪声）：
-
-| 配置 | `1+1=` 的输出 | 现象 |
-|---|---|---|
-| 无 CP | `2` | ✅ 正常 |
-| 只开 `--enable-prefill-cp --cp-strategy interleave` | `1111+1++++` | decode 退化重复 |
-| 两者都开 | 随机、多语言混杂 | decode 读到错 KV |
-
-> ⚠️ 诚实标注："只开 prefill-CP" 是本次直接隔离实测；"两者都开"的乱码来自最初完整参数集观测。
+**`--enable-dsa-prefill-cp-layersplit`：语义上容不下 decode**。decode 是逐 token 反复读全 78 层 KV，而每卡只存 ~10 层、transient 槽只有一层容量，想读的"其它 68 层"不在卡上；且广播 gate（`is_extend`）只在 prefill 触发，decode 永远不广播 → 读到空槽 → 随机 token。
 
 ---
 
-## 为什么坏：两类不同的问题
-
-### `--enable-prefill-cp`：decode 端「没接上」
-
-decode 每步只有 1 个 token，要 attend 全部历史；而"序列已切 8 段"后，这 1 个 token 要去对 8 段分散 KV 各自算再归并。prefill 用"所有 token 一并算 + 通信归并"能行，但 decode 的"单 query + 已切段"这个组合，需要专门的 **decode-CP** 实现来兜——**而 DSA 的 decode 端没接上** → 注意力分值算错 → 输出一层重复（`一句话一句话…`）。
-
-### `--enable-dsa-prefill-cp-layersplit`：语义上容不下 decode
-
-layersplit 的 transient 槽位只在 prefill 顺序前向时有意义。**decode 是逐 token 反复读全 78 层 KV**，而每卡只存了 ~10 层、transient 槽位只有一层的容量，decode 想读的"其它 ~68 层"根本不在卡上 → 读到没被填充过的错位数据 → logits 全乱 → 随机 token。
-
-```
-decode 流程（layersplit 下坏）：
-  1 个新 token 的 forward 要过全 78 层：
-    卡0 只存 L0-9，读到 L10 时：
-      广播 gate = is_extend=False → 不广播 → 读到空 transient slot → 错
-```
-
-**一句话区分：**
-
-- `--enable-prefill-cp` 坏在 **decode 端能力（decode-CP）没实现 / 不兼容**；
-- `--enable-dsa-prefill-cp-layersplit` 坏在 **从设计上就不该对 decode 开**。
-
----
-
-## 源码证据：坐实上面两个判断
+## 第 7 层：源码证据
 
 （sglang 源码树 `python/sglang/`，带文件:行号）
 
-**1. layersplit 就是 prefill-only**
+**1. layersplit 是 prefill-only**
 
-`srt/layers/cp/utils.py:52` docstring：
+`srt/layers/cp/utils.py:52` docstring：「Layer split is a **prefill-CP-only optimization** for DSA...」
 
-> "Layer split is a **prefill-CP-only optimization** for DSA..."
-
-`srt/server_args.py:4427` 非 prefill 模式直接抛异常：
+`srt/server_args.py:4427` 非 prefill 直接抛异常：
 
 ```python
 raise ValueError(
@@ -191,73 +179,61 @@ raise ValueError(
 )
 ```
 
-即作者白纸黑字：**「非 PD worker 还要跑 decode，需要普通本地 decode cache 语义」**。
-
-更硬的是 `srt/layers/utils/cp_utils.py:540` 的广播 gate：
+广播 gate `srt/layers/utils/cp_utils.py:540`：
 
 ```python
 return (
     get_global_server_args().enable_dsa_prefill_cp_layersplit
-    and forward_batch.forward_mode.is_extend_without_speculative()  # 只有 prefill(extend) 才广播
+    and forward_batch.forward_mode.is_extend_without_speculative()  # 只有 prefill 才广播
 )
 ```
 
-`is_extend` = prefill 阶段。**decode 时这个广播永不触发**——印证"读到空槽位"。
+**2. prefill CP 与 decode CP 是两套独立 flag**
 
-**2. prefill-CP 和 decode-CP 是两套独立 flag**
-
-| | prefill-CP | decode-CP（DCP）|
+| | prefill CP | decode CP（DCP）|
 |---|---|---|
-| flag | `--enable-prefill-cp` | `--decode-context-parallel-size` / `--dcp-size` |
+| flag | `--enable-prefill-cp` | `--decode-context-parallel-size` |
 | 内部字段 | `attn_cp_size` | `dcp_size` |
-| 默认 | 关 | **1（关）** |
+| 默认 | 关 | 1（关） |
 
-sglang 其实**已经实现了 decode 端 CP**（`srt/layers/dcp/` 整个模块 + dsa_backend 里的 "DCP decode path"）。
-
-**3. DCP 在 B200 上没验证过**
-
-`srt/server_args.py:3153` 注释：
-
-> "…DCP is validated on both HIP and CUDA (**B300 SM103**)."
-
-**B200（SM100）不在验证范围内。**
+**3. DCP 在 B200 没验证过**：`srt/server_args.py:3153` 注释「DCP is validated on both HIP and CUDA (**B300 SM103**)」，B200（SM100）不在范围内。
 
 ---
 
-## 要不要实现代码，让 prefill-CP 能开？
+## 第 8 层：要不要改代码 + 结论
 
-### layersplit：不要，也没法"实现"
+**layersplit：不要，也没法"实现"**。它不是缺代码，是语义上只属于 prefill。源码明说 decode 需要 ordinary local cache。任何情况 standalone 都关它。
 
-它不是"缺代码"，是"语义上只属于 prefill"。源码明说 decode 需要 ordinary local cache。想在 standalone 开它，等于重写 decode 的 KV cache 语义去迁就一个 prefill 优化——方向就错。**结论：任何情况下 standalone 都关掉它。**
+**prefill-CP：技术上可行，但投入产出不划算**。decode-CP（DCP）代码已存在，真正缺的是在 B200(SM100) 上验证/适配；而 prefill-CP 的收益只在「单条超长 prompt + 低并发」才明显，且 **PD 分离本来就是这么设计的**（prefill 机开 CP、decode 机不开）。standalone 硬要单机同时吃，等于重造 PD 已经解决的轮子。
 
-### prefill-CP：技术上可行，但投入产出不划算
-
-- decode 端 CP（DCP）**代码已存在**，不是从零写。真正缺的是**在 B200(SM100) 上把 DCP 验证/适配好**。
-- prefill-CP 的收益只在**「单条超长 prompt + 低并发」**才明显（长序列 prefill 被切 8 段并行）；短 prompt 高并发下通信开销甚至倒贴。
-- **PD 分离已经解决了这个问题**：prefill 机开 CP 拿满收益，decode 机不开 CP 干净跑——这就是这套参数的设计用法。standalone 硬要单机同时吃 prefill 的 CP，等于重新造一个 PD 已经解决的轮子。
-
-**建议：不为 B200 standalone 去适配 DCP。** 真有"长上下文 + 单机"硬需求，两条更便宜的路：
-
-1. 直接用 **PD 分离**（prefill 机带 CP + decode 机不带）；
-2. 或 standalone 不开 CP，靠 `max-total-tokens` + hicache 撑住长上下文。
-
----
-
-## 结论
-
-PD 分离（prefill 机 + decode 机分开）里这两个 flag 是 prefill 机的合理优化，**保留**；但**单机一体**服务这三个开关必须全去掉：
+**结论**：
 
 ```bash
-# ❌ 单机里不要带
---enable-prefill-cp --cp-strategy interleave
---enable-dsa-prefill-cp-layersplit
+# 单机一体服务，三个开关必须全去掉
+# ❌ --enable-prefill-cp --cp-strategy interleave
+# ❌ --enable-dsa-prefill-cp-layersplit
 ```
 
-去掉后输出恢复正常。哪天单机发现"输出变成重复 / 乱码"，先查启动参数里有没有这两条——它们比采样参数、fp8 scale 都更可能是元凶。
+去掉后输出恢复正常。哪天单机发现"输出变成重复 / 乱码"，先查这两条——它们比采样参数、fp8 scale 都更可能是元凶。
 
 ---
 
-## 参考
+## 附录：相关知识点速查
 
-- sglang PD 部署（GLM-5.2 FP8 / B200）的 standalone 排障实录；源码证据来自 sglang 源码树 `python/sglang/`。
-- 相关但不同：vLLM 的 decode-CP（DCP）见本站《DCP 实测：消除张量并行下的 KV Cache 重复存储》。
+| 概念 | 一句话 | 与本文关系 |
+|---|---|---|
+| **注意力 / KV cache** | token 用 Q 找 K 算相似度、加权 V；历史 K/V 缓存 | 第 2 层地基 |
+| **prefill / decode** | 多 token 并行 vs 单 token 自回归 | 冲突根源 |
+| **TP（张量并行）** | 切权重 | CP 的对照 |
+| **CP（上下文并行）** | 切序列长度 | 本文主角之一 |
+| **DCP（decode CP）** | decode 端切 KV，轮询条 | 主角之二（对照） |
+| **layersplit（层切分）** | 切层 + transient 广播 | 主角之三 |
+| **DSA（动态稀疏注意力）** | indexer 挑 top-k，稀疏 attention | 模型特性 |
+| **MLA（多头潜在注意力）** | 压缩 KV 的注意力变体 | GLM-5.2 用 |
+| **PD 分离** | prefill/decode 分机 | reshard 发生的场所 |
+| **DCP reshard** | 跨机传输时重排 KV 布局 | 单机缺失的关键步骤 |
+
+相关阅读：
+
+- vLLM 的 decode-CP（DCP）：《DCP 实测：消除张量并行下的 KV Cache 重复存储》（本站）
+- sglang 源码：`srt/layers/dcp/`、`srt/layers/attention/dsa/`、`srt/mem_cache/cp_layersplit_pool.py`
