@@ -103,6 +103,18 @@
   <h1>san-tian 的技术 blog</h1>
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
+  <a class="post" href="why-prefill-cp-breaks-standalone-decode.html">
+    <div class="title">为什么 prefill 的 CP 优化，不能带到单机 decode？</div>
+    <div class="desc">sglang 里 <code>--enable-prefill-cp</code> 与 <code>--enable-dsa-prefill-cp-layersplit</code> 是两个 prefill 专属的并行优化。在单机一体（prefill+decode 同进程）部署下它们会把 decode 搞坏——前者让输出退化重复、后者让输出变成随机 token。讲清两类不同问题：一个“decode 端没接上”，一个“语义上容不下 decode”。</div>
+    <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
+      <span class="tag">sglang</span>
+      <span class="tag">Context Parallel</span>
+      <span class="tag">layersplit</span>
+      <span class="tag">prefill/decode</span>
+    </div>
+  </a>
+
   <a class="post" href="dynamic-context-parallelism.html">
     <div class="title">DCP 实测：消除张量并行下的 KV Cache 重复存储</div>
     <div class="desc">vLLM Decode Context Parallel 实测。GQA 模型在高张量并行度下会产生 KV Cache 重复存储，DCP 通过沿序列维切分消除冗余，显存容量翻倍（1.98×）。长上下文低并发场景 TPOT 提升 45%，但高并发下 TTFT 代价可达 30%。含开启判据、布局选型与三方互证。</div>
