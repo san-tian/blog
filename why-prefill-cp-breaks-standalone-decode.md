@@ -144,14 +144,17 @@ decode CP（dcp_size=4，轮询 pos%4）:
 
 **在 PD 架构里，这个错位靠一次「DCP reshard」桥接**：跨机传输时 prefill 把自己连续块里的 KV 重新切条、按 `1/N token-shard` 分发给 decode 各 rank（源码 `srt/disaggregation/common/conn.py:620`）。**而 standalone 单机没有这次跨机 reshard**——这就是所有问题的根源。
 
+这里要澄清一个常见误解：**这不是“开了 prefill CP 就不能开 decode CP”的二选一开关**。本质是**同一份 KV cache 的写方（prefill）和读方（decode）必须用同一套布局**——PD 里 prefill 机和 decode 机各用各的布局、靠 reshard 对接（所以两台机器可以同时各自开一个）；单机里没有 reshard，写与读的布局不一致就必然错位。换句话说，不是“谁把谁关掉”，而是“一份 KV 装不下两种布局，单机又缺了那个重排步骤”。
+
 ---
 
-## 第 6 层：为什么 standalone 会坏（三种坏法）
+## 第 6 层：为什么 standalone 会坏（四种坏法）
 
 | 只开…… | 发生了什么 | 结果 | 证据 |
 |---|---|---|---|
 | prefill CP（不配 decode CP） | prefill 按连续块写 KV，decode 按本地连续读 | 破坏 decode | **实测**：输出重复 |
 | 只开 decode CP（不配 prefill CP） | prefill 写本地 KV，decode 按 pos%N 轮询读 | 对称错位 | 源码推断，B200 未验证 |
+| 两个 CP 都开 | 写按连续块、读按轮询条，仍不一致 | 错位 | 源码推断 |
 | layersplit | decode 读非拥有层时广播 gate 关闭 | 随机 token | **实测** + 源码 |
 
 具体拆两个 flag：
