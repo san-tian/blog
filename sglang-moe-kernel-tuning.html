@@ -48,6 +48,9 @@
 </blockquote>
 <hr />
 <h2>0. 结论速览（TL;DR）</h2>
+<blockquote>
+<p><strong>调优对象明确一下</strong>：这次调的是 <code>fused_moe_triton</code> —— <strong>MoE 专家层（gate/up/down 投影）的 triton kernel，仅此一个</strong>。dense 层（DeepGEMM）是“编译”不是“tune”；注意力/FlashInfer 是预编译库、没有 config 可调。所以下文所有“调优”都特指这个 MoE triton kernel 的 tile 参数搜索。</p>
+</blockquote>
 <table>
 <thead>
 <tr>
@@ -429,6 +432,14 @@ docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
 <p>唯一保留价值的：<strong>DeepGEMM 预编译</strong>（冷机器省 10-20min JIT，与 config 无关）。</p>
 <hr />
 <p><strong>教训</strong>：micro-benchmark 的 kernel 加速 ≠ 端到端加速，必须端到端实测才算数。本次调优的最大产出是这个方法论结论，而非性能收益。</p>
+<h3>方法复盘：调优方式有问题吗？</h3>
+<p><strong>方法本身（官方 <code>tuning_fused_moe_triton.py</code> autotune）是标准做法，没错。但有三处问题：</strong></p>
+<ol>
+<li><strong>流程错误</strong>：拿到 kernel 级结果后没先端到端验证就下了“12% 收益”结论。正确流程应是「tune → 立刻端到端 benchmark → 再谈收益」。</li>
+<li><strong>工具固有局限</strong>：autotune 在「合成随机张量 + 独占 GPU + 分离 kernel」条件下找最优，与真实服务（真实 activation + 多请求竞争 + 融合 kernel）存在系统性偏差——天然高估“大 tile + TMA”的收益、低估“低 occupancy 在竞争下”的代价。</li>
+<li><strong>脚本用错（次要）</strong>：down 投影用了 sep 脚本（给“分离 kernel”调），但 serving 跑的是“融合 kernel”，上下文不匹配。</li>
+</ol>
+<p><strong>为什么 tune 完反而慢</strong>：不是调优动作错，而是「微基准 proxy ≠ 端到端目标」+「没做端到端验证」两条叠加——把 kernel 级 proxy 当成了端到端结果。</p>
 <footer>
   <p>由 san-tian 的部署 agent 自动生成 · 2026-08-24/25 · 报告源文件 sglang-tune-report.md</p>
 </footer>
