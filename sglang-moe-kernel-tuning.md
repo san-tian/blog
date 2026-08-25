@@ -1,8 +1,8 @@
 # sglang MoE 内核调优报告（GLM-5.2 step111 FP8 / B200）
 
 > 日期：2026-08-24
-> 机器：38.255.28.13（.13）+ 38.255.28.8（.8），各 8×B200（179G/卡）
-> 镜像：`b200routeraca.azurecr.io/mindverse/sglang:v0.5.15.post1-cuda13-b200`
+> 机器：两台 B200 机器（8×179G/卡），下称 .13 / .8
+> 镜像：`<ACR>/mindverse/sglang:v0.5.15.post1-cuda13-b200`
 > 模型：`/data0/models/glm52-step111-fp8`（E=257 expert，topk=8，hidden=6144，fp8_w8a8，block[128,128]）
 
 ---
@@ -64,7 +64,7 @@ docker run -d --name moe-tune --gpus all --shm-size=8g \
   -v /data0/models:/data0/models \
   -v /root/tune_out:/out \
   --entrypoint bash \
-  b200routeraca.azurecr.io/mindverse/sglang:v0.5.15.post1-cuda13-b200 \
+  <ACR>/mindverse/sglang:v0.5.15.post1-cuda13-b200 \
   -c "pip install ray >/dev/null 2>&1 && cd /sgl-workspace/sglang && \
       python benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton.py \
         --model /data0/models/glm52-step111-fp8 --tp-size 8 --dtype fp8_w8a8 --tune \
@@ -119,7 +119,7 @@ docker run --rm --gpus all --ipc=host \
   -v /data0/models:/data0/models \
   -v /root/.cache/deep_gemm:/root/.cache/deep_gemm \
   --entrypoint python3 \
-  b200routeraca.azurecr.io/mindverse/sglang:v0.5.15.post1-cuda13-b200 \
+  <ACR>/mindverse/sglang:v0.5.15.post1-cuda13-b200 \
   -m sglang.compile_deep_gemm \
     --model-path /data0/models/glm52-step111-fp8 --tp-size 8 \
     --enforce-disable-flashinfer-allreduce-fusion --disable-custom-all-reduce
