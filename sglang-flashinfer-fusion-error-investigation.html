@@ -45,13 +45,16 @@
 </blockquote>
 
 <h2>TL;DR</h2>
-<table>
-<tr><th>结论</th><th>数据</th></tr>
-<tr><td>两个报错同一个根因</td><td>flashinfer 三个独立包版本不一致</td></tr>
-<tr><td>错配</td><td><code>flashinfer-python</code> 0.6.14 vs <code>flashinfer-cubin</code> 0.6.12 vs <code>flashinfer-jit-cache</code> 0.6.12+cu130</td></tr>
-<tr><td>掩盖机制</td><td><code>FLASHINFER_DISABLE_VERSION_CHECK=1</code> 关掉了 flashinfer 自己的两次版本检查</td></tr>
-<tr><td>修复</td><td>两行 pip 把 cubin / jit-cache 对齐到 0.6.14</td></tr>
-</table>
+<p>之前 serve 的融合相关启动参数（融合全关）：</p>
+<pre><code>--moe-runner-backend triton \
+--enforce-disable-flashinfer-allreduce-fusion \
+--disable-custom-all-reduce</code></pre>
+<p>想改成（开融合加速）：</p>
+<pre><code>--moe-runner-backend flashinfer_trtllm \
+--flashinfer-allreduce-fusion-backend auto \
+（去掉 --disable-custom-all-reduce）</code></pre>
+<p>加速目的：MoE 专家 GEMM 从 triton fallback 换成 Blackwell 推荐的 <code>flashinfer_trtllm</code>；TP 通信的 allreduce 是 decode 头号瓶颈（23.6%），用融合省掉单独 allreduce kernel。实测端到端输出吞吐 <strong>524 → 793 tok/s（+51%）</strong>。</p>
+<p><strong>怎么打开的</strong>：直接改这三个开关会崩两个 tvm_ffi 报错——根因是 flashinfer 三件套版本错配（<code>flashinfer-python</code> 0.6.14 vs <code>flashinfer-cubin</code> 0.6.12 vs <code>flashinfer-jit-cache</code> 0.6.12+cu130），被 <code>FLASHINFER_DISABLE_VERSION_CHECK=1</code> 掩盖。两行 pip 把 cubin / jit-cache 对齐到 0.6.14，融合才真正生效。</p>
 
 <h2>背景：为什么要开这两个融合</h2>
 <p>GLM-5.2 step111（E=257 的 MoE，TP8）部署在 B200 上。之前一直跑在 <code>--moe-runner-backend triton</code> + 关闭 allreduce 融合的配置下，因为开融合就会崩。这次想打开两个融合开关做优化：</p>

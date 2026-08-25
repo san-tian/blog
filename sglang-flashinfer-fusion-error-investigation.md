@@ -4,12 +4,25 @@
 
 ## TL;DR
 
-| 结论 | 数据 |
-|---|---|
-| 两个报错同一个根因 | flashinfer 三个独立包版本不一致 |
-| 错配 | `flashinfer-python` 0.6.14 vs `flashinfer-cubin` 0.6.12 vs `flashinfer-jit-cache` 0.6.12+cu130 |
-| 掩盖机制 | `FLASHINFER_DISABLE_VERSION_CHECK=1` 关掉了 flashinfer 自己的两次版本检查 |
-| 修复 | 两行 pip 把 cubin / jit-cache 对齐到 0.6.14 |
+之前 serve 的融合相关启动参数（融合全关）：
+
+```bash
+--moe-runner-backend triton \
+--enforce-disable-flashinfer-allreduce-fusion \
+--disable-custom-all-reduce
+```
+
+想改成（开融合加速）：
+
+```bash
+--moe-runner-backend flashinfer_trtllm \
+--flashinfer-allreduce-fusion-backend auto \
+（去掉 --disable-custom-all-reduce）
+```
+
+加速目的：MoE 专家 GEMM 从 triton fallback 换成 Blackwell 推荐的 <code>flashinfer_trtllm</code>；TP 通信的 allreduce 是 decode 头号瓶颈（23.6%），用融合省掉单独 allreduce kernel。实测端到端输出吞吐 <strong>524 → 793 tok/s（+51%）</strong>。
+
+<strong>怎么打开的</strong>：直接改这三个开关会崩两个 tvm_ffi 报错——根因是 flashinfer 三件套版本错配（<code>flashinfer-python</code> 0.6.14 vs <code>flashinfer-cubin</code> 0.6.12 vs <code>flashinfer-jit-cache</code> 0.6.12+cu130），被 <code>FLASHINFER_DISABLE_VERSION_CHECK=1</code> 掩盖。两行 pip 把 cubin / jit-cache 对齐到 0.6.14，融合才真正生效。
 
 ## 背景：为什么要开这两个融合
 
