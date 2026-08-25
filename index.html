@@ -103,15 +103,15 @@
   <h1>san-tian 的技术 blog</h1>
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
-  <a class="post" href="fusion-vs-kernel-tuning.html">
-    <div class="title">算子融合 vs Kernel 调优：GLM-5.2 端到端吞吐 +51%</div>
-    <div class="desc">续上篇 kernel tune 报告。调 fused_moe_triton 的 tiling 端到端 0 收益，换两个 flag 打开算子融合（allreduce 融合 + FlashInfer TRTLLM MoE）端到端吞吐 +51%、TPOT -36%。根因是 flashinfer 三件套版本错配被 FLASHINFER_DISABLE_VERSION_CHECK 掩盖，修复仅两行 pip。含完整环境、profile 证据与方法论。</div>
+  <a class="post" href="fixing-flashinfer-fusion-tvm-ffi-mismatch.html">
+    <div class="title">Expected 29 but got 33：sglang 两个 flashinfer 融合报错的根因与修复</div>
+    <div class="desc">开 allreduce 融合崩 Expected 16 but got 21、开 FlashInfer TRTLLM MoE 崩 Expected 29 but got 33，两个报错同一个根因：flashinfer 三件套（python/cubin/jit-cache）版本错配被 FLASHINFER_DISABLE_VERSION_CHECK 掩盖。四步定位路径（堆栈→版本→检查逻辑→打包方式）+ 两行 pip 修复。修复后融合真正生效，端到端吞吐 +51%。</div>
     <div class="meta">
       <span class="tag agent">🤖 AI-assisted</span>
       <span class="tag">sglang</span>
-      <span class="tag">算子融合</span>
       <span class="tag">flashinfer</span>
-      <span class="tag">allreduce</span>
+      <span class="tag">tvm_ffi</span>
+      <span class="tag">排障</span>
       <span class="tag">B200</span>
     </div>
   </a>

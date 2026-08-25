@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Expected 29 but got 33：sglang 两个 flashinfer 融合报错的根因与修复</title>
+<style>
+  :root { --bg:#fafaf9; --card:#ffffff; --card-2:#f8f8f7; --border:#e7e5e4; --text:#1c1917; --text-dim:#78716c; --accent:#1d4ed8; --code-bg:#f8fafc; --inline-code-bg:#f1f5f9; }
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); line-height:1.75; margin:0; padding:0; font-size:16px; }
+  .container { max-width:900px; margin:0 auto; padding:48px 24px 96px; }
+  header.hero { text-align:center; margin-bottom:48px; padding-bottom:28px; border-bottom:1px solid var(--border); }
+  header.hero h1 { font-size:2em; font-weight:700; line-height:1.3; color:#111; margin:0 0 12px; }
+  header.hero .subtitle { color:var(--text-dim); font-size:0.95em; }
+  h1 { color:#111; font-size:1.7em; font-weight:650; margin:40px 0 16px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  h2 { color:#111; font-size:1.4em; font-weight:650; margin:40px 0 14px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  h3 { color:#111; font-size:1.15em; font-weight:600; margin:28px 0 10px; }
+  p { margin:12px 0; }
+  strong { color:#111; font-weight:600; }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  code { font-family:"JetBrains Mono","Fira Code","SF Mono",Consolas,Menlo,monospace; background:var(--inline-code-bg); color:#2563eb; padding:2px 6px; border-radius:4px; font-size:0.88em; }
+  pre { background:var(--code-bg); border:1px solid var(--border); border-radius:8px; padding:16px 18px; overflow-x:auto; margin:16px 0; font-size:0.85em; line-height:1.6; }
+  pre code { background:none; color:var(--text); padding:0; font-size:1em; }
+  blockquote { margin:16px 0; padding:12px 18px; border-left:4px solid var(--accent); background:var(--card); border-radius:0 8px 8px 0; color:var(--text); }
+  table { border-collapse:collapse; width:100%; margin:18px 0; font-size:0.92em; display:block; overflow-x:auto; }
+  th,td { border:1px solid var(--border); padding:9px 13px; text-align:left; vertical-align:top; }
+  th { background:var(--card-2); color:#111; font-weight:600; }
+  tr:nth-child(even) td { background:var(--card); }
+  ul,ol { padding-left:1.5em; }
+  li { margin:5px 0; }
+  footer { margin-top:70px; padding-top:20px; border-top:1px solid var(--border); color:var(--text-dim); font-size:0.85em; text-align:center; }
+  @media (max-width:640px){ .container{padding:24px 16px 64px;} header.hero h1{font-size:1.5em;} table{font-size:0.8em;} }
+</style>
+</head>
+<body>
+<div class="container">
+<header class="hero">
+  <h1>Expected 29 but got 33</h1>
+  <div class="subtitle">sglang 两个 flashinfer 融合报错的根因与修复 · flashinfer 版本错配 · FLASHINFER_DISABLE_VERSION_CHECK · 两行 pip</div>
+</header>
+
+<blockquote>
+<p>开 <code>--flashinfer-allreduce-fusion-backend auto</code> 崩 <code>Expected 16 but got 21</code>，开 <code>--moe-runner-backend flashinfer_trtllm</code> 崩 <code>Expected 29 but got 33</code>。两个报错同一个根因：flashinfer 三件套版本错配被一个环境变量掩盖。这篇讲怎么从报错一步步定位到根因、怎么修。</p>
+</blockquote>
+
+<h2>TL;DR</h2>
+<table>
+<tr><th>结论</th><th>数据</th></tr>
+<tr><td>两个报错同根因</td><td>flashinfer 三个独立包版本不一致</td></tr>
+<tr><td>错配</td><td><code>flashinfer-python</code> 0.6.14 vs <code>flashinfer-cubin</code> 0.6.12 vs <code>flashinfer-jit-cache</code> 0.6.12+cu130</td></tr>
+<tr><td>掩盖机制</td><td><code>FLASHINFER_DISABLE_VERSION_CHECK=1</code> 关掉了 flashinfer 自己的两次版本检查</td></tr>
+<tr><td>修复</td><td>两行 pip 把 cubin / jit-cache 对齐到 0.6.14</td></tr>
+<tr><td>修复后收益</td><td>融合真正生效，端到端输出吞吐 524 → 793 tok/s（+51%）</td></tr>
+</table>
+
+<h2>现象：两个 tvm_ffi 签名报错</h2>
+<p>开融合开关后，模型能 load、能起服务，但一到融合 kernel 的 forward 就崩，报错都指向 <code>tvm_ffi</code> 的 <code>Function.__call__</code>：</p>
+<pre><code>TypeError: trtllm_mnnvl_allreduce_fusion(...) Expected 16 but got 21 arguments
+TypeError: trtllm_fp8_block_scale_moe(...) Expected 29 but got 33 arguments</code></pre>
+<p>「Expected N but got M」是 tvm_ffi 的典型签名错位：python 层调用时传了 M 个参数，但 native kernel 只声明了 N 个。两个报错里 <code>M &gt; N</code>，说明<strong>调用方（python）比 native 层新</strong>。</p>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：.8 容器启动日志（<code>docker logs</code>）。第一个来自 <code>--flashinfer-allreduce-fusion-backend auto</code>，第二个来自 <code>--moe-runner-backend flashinfer_trtllm</code>。</p>
+</blockquote>
+
+<h2>根因：flashinfer 三件套版本错配</h2>
+<p>flashinfer 拆成三个独立安装包，三者必须同版本：</p>
+<table>
+<tr><th>包</th><th>作用</th><th>实际版本</th></tr>
+<tr><td><code>flashinfer-python</code></td><td>python 调用层</td><td>0.6.14</td></tr>
+<tr><td><code>flashinfer-cubin</code></td><td>预编译 kernel 二进制（CUDA 无关）</td><td><strong>0.6.12</strong> ❌</td></tr>
+<tr><td><code>flashinfer-jit-cache</code></td><td>AOT 编译缓存（CUDA 相关）</td><td><strong>0.6.12+cu130</strong> ❌</td></tr>
+</table>
+<p>python 是 0.6.14，native（cubin + jit-cache）是 0.6.12。0.6.12 → 0.6.14 之间 flashinfer 给 MoE/allreduce kernel 加了参数，所以 0.6.14 的 python 去调 0.6.12 的 native，签名就对不上。</p>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：镜像内 <code>import flashinfer_cubin as c; c.__version__</code> 与 <code>import flashinfer_jit_cache as j; j.__version__</code>。</p>
+</blockquote>
+
+<h2>定位路径</h2>
+<p>四步从报错走到根因，每步都有源码证据。</p>
+<h3>1. 报错堆栈指向 native 层</h3>
+<pre><code>File "flashinfer/fused_moe/core.py", line 3500, in trtllm_fp8_block_scale_moe
+  result = get_trtllm_moe_sm100_module().trtllm_fp8_block_scale_moe(...)
+File "python/tvm_ffi/cython/function.pxi", line 968, in tvm_ffi.core.Function.__call__
+TypeError: ... Expected 29 but got 33 arguments</code></pre>
+<p>报错发生在 <code>tvm_ffi</code> 的 <code>Function.__call__</code>，即 native kernel 的入口。这一层不归 python 管，是 flashinfer 的 native 库签名。</p>
+<h3>2. 版本对不上的来源</h3>
+<p>flashinfer 的 MoE kernel 是 JIT 生成的——<code>gen_trtllm_gen_fused_moe_sm100_module()</code> 用 wheel 里的 csrc 模板现场编译出 native module，签名由模板决定。python 调用层（<code>core.py</code>）与这个模板分属两个包，各自带版本号。</p>
+<h3>3. 版本检查被环境变量关掉了</h3>
+<p>flashinfer 自己会检查这三件套版本一致性，位置在 <code>flashinfer/jit/env.py</code>：</p>
+<ul>
+<li><code>_verify_flashinfer_cubin_version()</code>：检查 <code>flashinfer_cubin.__version__ == flashinfer.__version__</code></li>
+<li><code>_get_aot_dir()</code>：检查 <code>flashinfer_jit_cache.__version__.startswith(flashinfer.__version__)</code></li>
+</ul>
+<p>两处都有一行：</p>
+<pre><code>if (
+    not os.getenv("FLASHINFER_DISABLE_VERSION_CHECK")
+    and flashinfer_version != "0.0.0+unknown"
+    and ...  # 版本不一致
+):
+    raise RuntimeError("... does not match ... Set FLASHINFER_DISABLE_VERSION_CHECK=1 to bypass this check.")</code></pre>
+<p>而部署环境里恰好设了 <code>FLASHINFER_DISABLE_VERSION_CHECK=1</code>，把这两次检查都压掉了——所以 load 阶段不报错，到 forward 才崩。</p>
+<h3>4. 三件套版本为什么不同源</h3>
+<p>sglang 的 Dockerfile 里，三件套由不同来源控制（<code>docker/Dockerfile</code>）：</p>
+<pre><code>ARG FLASHINFER_VERSION=0.6.14
+# pyproject.toml 里硬编码：flashinfer_python[cu13]==0.6.14
+# flashinfer_cache stage 里：
+pip install flashinfer-cubin==${FLASHINFER_VERSION}      --index-url https://flashinfer.ai/whl
+pip install flashinfer-jit-cache==${FLASHINFER_VERSION}  --index-url https://flashinfer.ai/whl/cu${CUINDEX}</code></pre>
+<p>python 版由 <code>pyproject.toml</code> 锁定，cubin/jit-cache 版由 build-arg <code>FLASHINFER_VERSION</code> 控制。构建镜像时这个 arg 传成了 0.6.12，而 pyproject 里 python 已经是 0.6.14，于是三件套错配。</p>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：<code>flashinfer/jit/env.py</code>（版本检查逻辑）、<code>docker/Dockerfile:22,381,385</code>（<code>ARG FLASHINFER_VERSION</code> 与三件套安装）、镜像内 <code>pip show</code> 结果。sglang 代码为 <code>sgl-project/sglang</code> release/v0.5.15，HEAD <code>0b3bb0c</code>。</p>
+</blockquote>
+
+<h2>修复：两行 pip</h2>
+<p>把 cubin 和 jit-cache 对齐到 python 的 0.6.14：</p>
+<pre><code>pip install --force-reinstall "flashinfer-cubin==0.6.14"     --index-url https://flashinfer.ai/whl
+pip install --force-reinstall "flashinfer-jit-cache==0.6.14" --index-url https://flashinfer.ai/whl/cu130</code></pre>
+<p>注意第二个索引是 <code>cu130</code> 不是 <code>cu13</code>（CUDA 13.0.1 → <code>CUINDEX=130</code>，见 Dockerfile 的映射）。</p>
+<p>修完后 <code>import flashinfer</code> 的版本检查自然通过，不再需要 <code>FLASHINFER_DISABLE_VERSION_CHECK=1</code>，也不需要 <code>--enforce-disable-flashinfer-allreduce-fusion</code> / <code>--disable-custom-all-reduce</code>。</p>
+
+<h2>验证</h2>
+<p>三层验证，从轻到重：</p>
+<ol>
+<li><strong>版本一致</strong>：<code>flashinfer-python</code> / <code>flashinfer-cubin</code> / <code>flashinfer-jit-cache</code> 三者均 0.6.14。</li>
+<li><strong>import + build</strong>：<code>import flashinfer</code> 通过版本检查；<code>gen_trtllm_gen_fused_moe_sm100_module().build_and_load()</code> 成功构建 native module，签名对齐。</li>
+<li><strong>端到端</strong>：开融合后正常 serve，不再崩。</li>
+</ol>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：验证脚本在 .8 容器内跑（<code>--gpus all</code>，<code>TVM_FFI_CUDA_ARCH_LIST=10.0a</code>），输出 <code>import flashinfer: OK</code> + <code>BUILD_OK</code>。</p>
+</blockquote>
+
+<h2>修复后的端到端收益</h2>
+<p>修复前融合被错配卡死，只能 <code>triton</code> + 全 disable；修复后融合真正生效：</p>
+<table>
+<tr><th>指标</th><th>修复前（triton + disable）</th><th>修复后（flashinfer_trtllm + allreduce 融合）</th><th>差异</th></tr>
+<tr><td>输出吞吐 (tok/s)</td><td>524.62</td><td>793.20</td><td>+51%</td></tr>
+<tr><td>TPOT 均值 (ms)</td><td>26.72</td><td>17.00</td><td>-36%</td></tr>
+<tr><td>TTFT 均值 (ms)</td><td>3884.02</td><td>3254.78</td><td>-16%</td></tr>
+</table>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：<code>python3 -m sglang.bench_serving --backend sglang --host 127.0.0.1 --port 10100 --model glm52-step111-fp8 --dataset-name random --random-input-len 8192 --random-output-len 1024 --random-range-ratio 1.0 --num-prompts 64 --max-concurrency 16 --warmup-requests 64 --flush-cache</code>。两套 serve 只差融合开关（MoE backend、allreduce fusion、custom allreduce 三处），其余完全一致。</p>
+</blockquote>
+
+<h2>完整环境</h2>
+<table>
+<tr><th>组件</th><th>版本</th></tr>
+<tr><td>硬件</td><td>8× NVIDIA B200（179G/卡），<code>yotta-arc-b200-13</code> / <code>yotta-arc-b200-8</code></td></tr>
+<tr><td>镜像</td><td><code>b200routeraca.azurecr.io/mindverse/sglang:v0.5.15.post1-cuda13-b200</code>（digest <code>1839d8f3c89b</code>）</td></tr>
+<tr><td>sglang</td><td><code>sgl-project/sglang</code> release/v0.5.15，HEAD <code>0b3bb0c</code></td></tr>
+<tr><td>torch</td><td>2.11.0+cu130</td></tr>
+<tr><td>apache-tvm-ffi</td><td>0.1.11</td></tr>
+<tr><td>模型</td><td><code>/data0/models/glm52-step111-fp8</code>（E=257 MoE，topk=8，hidden=6144，fp8_w8a8，MLA + DSA）</td></tr>
+</table>
+
+<h2>方法论</h2>
+<p>这类「Expected N but got M」的 tvm_ffi 签名报错，本质是<strong>调用方与 native 层版本不一致</strong>。定位套路固定：</p>
+<ol>
+<li>看报错堆栈落到 <code>tvm_ffi Function.__call__</code> → 确认是 native 签名问题，不是 python 逻辑。</li>
+<li>查这个库拆了几个包、各自的版本号 → 找不一致。</li>
+<li>看这个库自己的版本检查逻辑在哪、有没有被环境变量关掉。</li>
+<li>看它的打包方式（Dockerfile / pyproject）里各包版本分别由谁控制 → 找到错配来源。</li>
+</ol>
+<p>对 flashinfer 来说，就是三件套（python / cubin / jit-cache）+ 一个 <code>FLASHINFER_DISABLE_VERSION_CHECK</code> 环境变量。</p>
+
+<footer>
+  <p>由 san-tian 的部署 agent 自动生成 · 2026-08-25 · 报告源文件 fixing-flashinfer-fusion-tvm-ffi-mismatch.md</p>
+</footer>
+</div>
+</body>
+</html>
