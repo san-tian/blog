@@ -1,4 +1,4 @@
-# sglang 算子融合到顶了吗：剩余四个融合点为什么做不了
+# sglang 算子融合：从天花板到突破，写新 kernel 无损实现 +63%
 
 当前使用的启动命令（GLM-5.2 step111 FP8，B200 TP8）：
 
@@ -25,14 +25,18 @@ python3 -m sglang.launch_server \
 
 ## TL;DR
 
-算子融合已到顶。decode 阶段 66 个 kernel 逐一排除后，只剩 4 个"可融合且未生效"的点，但全部被硬性条件挡住：
+这套配置实测 793 tok/s（比融合全关的 baseline 524 tok/s 快 +51%）。profile 排除法发现 decode 66 个 kernel 里只剩 4 个"可融合且未生效"的点，其中 QK RoPE + KV cache write（4.6%）被"三重不兼容"挡住。但写一个 DSA 专用融合 triton kernel 后无损突破，端到端 **856 tok/s（+63%）**。
 
-| 融合点 | 占比 | 挡路条件 |
-|---|---|---|
-| embedding allreduce | 27.8% | 无下一层 layernorm 吸收（不是融合对象） |
-| shared-expert append | 3.2% | GLM 模型层 + flashinfer_trtllm 双重 disable |
-| QK RoPE + KV cache write | 4.6% | 要求 bf16 KV cache，GLM 用 fp8_e4m3 |
-| FP8 quant + activation | 3.7% | flashinfer_trtllm 闭源 kernel 不开放 epilogue |
+完整性能链条：
+
+| 配置 | 输出吞吐 (tok/s) | TPOT (ms) | vs baseline |
+|---|---:|---:|---:|
+| baseline（融合全关） | 524.62 | 26.72 | — |
+| + allreduce fusion + flashinfer_trtllm | 793.20 | 17.00 | +51% |
+| + QK RoPE 有损融合（改 gate） | 802.78 | 16.92 | +53% |
+| **+ QK RoPE 无损融合（新 kernel）** | **856.64** | **15.61** | **+63%** |
+
+> 📐 **数据来源**：`bench_serving`（8192 input + 1024 output, 64 prompts, concurrency 16），.8 容器 2026-08-25。
 
 ## 排除法：为什么只剩这四个
 
@@ -128,33 +132,9 @@ assert (
 
 > 📐 **数据来源**：`python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py:1194-1195`（assert）、`python/sglang/srt/arg_groups/overrides.py:2027`（预 disable）、`python/sglang/srt/models/glm4_moe.py:1183-1212`（GLM 层条件，B200 下不命中）。
 
-### 3. QK RoPE + KV cache write（4.6%）—— 能实现，但量化逻辑不等价会损精度
+### 3. QK RoPE + KV cache write（4.6%）—— 写新 kernel 无损实现
 
-fuse 表说"已有 `attention/utils.py` 融合路径"。底层 triton kernel 有 fp8 路径，中间层 arg 构造的 CUDA 分支没接上（gate 也只放行 bf16）。改 3 处源码后能跑通：
-
-1. gate `enable_fused_set_kv_buffer` 放行 fp8 dtype
-2. arg 构造 `create_fused_set_kv_buffer_arg` CUDA 分支处理 fp8 scale（返回 dict，参考 ROCm 分支）
-3. fallback 路径 `base.py:386` 去掉 `_is_hip` 限制（让 CUDA fallback 也走 `fused_qk_rope_reshape_and_cache`）
-
-实测结果（同 bench 参数）：
-
-| 指标 | 改前 | 改后 | 差异 |
-|---|---:|---:|---:|
-| 输出吞吐 (tok/s) | 793.20 | 802.78 | +1.2% |
-| TPOT 均值 (ms) | 17.00 | 16.92 | -0.5% |
-| TTFT 均值 (ms) | 3254.78 | 3090.67 | -5.0% |
-
-**但会损失精度**——融合 kernel 的 fp8 量化和 DSA 专用路径不等价：
-
-| | 非融合（DSA `quantize_k_cache`） | 融合（triton `fused_qk_rope_reshape_and_cache`） |
-|---|---|---|
-| nope 量化粒度 | per-block（128 一组，每组一个 scale） | 单个 `k_scale`（整个 token 一个 scale） |
-| rope 部分 | **不量化**，保留 bf16 | **也量化**成 fp8 |
-| 输出 layout | `[nope_fp8 \| scales \| rope_bf16]` | 统一 fp8（layout 不同） |
-
-最关键的损失在 rope 部分：非融合路径保留 rope 为 bf16（位置编码精度敏感），融合路径把 rope 也量化成 fp8，会损失位置信息。简单输入下看不出（"1+1=2"正确），但复杂输入下 DSA 的 sparse attention 依赖精确 KV 做 topk 选择，rope 精度损失可能导致 topk 选错。
-
-**无损实现不可行**（在现有融合 kernel 上改）。下面逐层展开三重不兼容，并补充需要的背景知识。
+fuse 表说"已有 `attention/utils.py` 融合路径"。底层 triton kernel 有 fp8 路径，但中间层 arg 构造的 CUDA 分支没接上（gate 也只放行 bf16）。改 3 处源码后能跑通，但融合 kernel 的量化逻辑和 DSA 专用路径不等价——会损精度。
 
 #### 背景知识：MLA 的 K 和 fp8 KV cache
 
@@ -178,42 +158,35 @@ fp8 KV cache 是把 bf16 的 K 压缩成 fp8 存（省一半显存）。但 fp8 
 
 fp8 和 bf16 在同一个 buffer 里混排，这就是"混合 dtype buffer"。
 
-#### 背景知识：paged KV buffer
+#### 有损版本（改 gate，+1.2%）
 
-sglang 的 KV cache 用 paged layout：把显存分成固定大小的 page（page_size=64 token），每个 page 存一批 token 的 KV。buffer 的 dtype 是统一的——一个 `torch.Tensor` 只能有一种 dtype。DSA 的混合 dtype 是通过把 fp8 和 bf16 **以字节形式拼在一起、用 uint8 view 存储**实现的（`output.view(self.store_dtype)`，store_dtype 是 fp8，但 rope 部分的字节其实是 bf16 的 raw bytes）。
+改 3 处源码（gate 放行 fp8 + arg 构造处理 scale + fallback 路径去掉 `_is_hip`）后能跑通，但融合 kernel 把整个 key（含 rope）统一量化成 fp8，而 DSA 专用路径保留 rope 为 bf16。实测 803 tok/s（+1.2%），但 rope 精度损失会影响复杂输入。
 
-#### 不兼容 1：buffer 结构——混合 dtype vs 统一 dtype
+#### 无损版本（写新 kernel，+8%）
 
-现有融合 kernel（`fused_qk_rope_reshape_and_cache`）写的是**统一 dtype 的 paged buffer**：整个 key（nope+rope）用同一个 dtype（fp8）写入，一个 `tl.store` 搞定。
+写了一个 DSA 专用的融合 triton kernel（`fused_dsa_quant_store`），在一个 kernel 里同时完成：
 
-DSA 要的是**混合 dtype**：nope 写 fp8 + scale，rope 写 bf16，三者拼在一个 buffer 里。融合 kernel 的 `tl.store(k_out_ptrs, k_pe.to(key_cache_ptr.dtype.element_ty))` 把整个 key 转成 buffer 的 dtype（fp8）写入——**它不知道 rope 部分应该保留 bf16**，也不知道 scale 该写在哪。
+1. 对 k_nope（512 维）按 128 group 做 per-block fp8 量化（每个 block 独立 scale）
+2. 对 k_rope（64 维）保留 bf16 不量化
+3. 三个 dtype 的数据（fp8 + fp32 scale + bf16）按混合 layout 直接写入 paged KV buffer
 
-这不是加个 if 能解决的——混合 dtype 的字节布局（fp8 | scale | bf16 拼排）和统一 dtype 的 paged 布局（全是 fp8）是两种完全不同的内存结构。
+**混合 dtype 写入的解法**：传 3 个 dtype 不同的指针（fp8/fp32/bf16），各指向同一 paged buffer 的不同字节偏移——nope 指针写 fp8 量化值（offset 0-511）、scale 指针写 fp32（offset 512-527）、rope 指针写 bf16（offset 528-655），绕过"一个 tensor 只能一种 dtype"的限制。
 
-#### 不兼容 2：量化 block 结构——per-block vs single scale
+替代原来的 `quantize_k_cache_separate()` + `set_mla_kv_buffer_triton()` 两步，消除中间 tensor 分配 + 额外 kernel launch。
 
-DSA 的 nope 量化是 **per-block**：把 512 维切成 4 个 128 维的 block，每个 block 独立算 scale（`y_s = tl.max(tl.abs(y)) / FP8_MAX`）。这样每个 block 的动态范围独立，精度更高。
+**正确性验证**：standalone test 对比融合 kernel 和非融合路径的输出，128 token、字节级对比 nope（fp8）/ scale（fp32）/ rope（bf16）三部分全部一致——**完全无损**。
 
-现有融合 kernel 用 **single scale**：整个 token 的 key 用一个外部传入的 `k_scale`（`k_pe = k_pe * (1 / k_scale)`）。一个 scale 覆盖 576 维，精度低。
+**端到端数据**：
 
-更重要的是 **block 的划分维度不同**：
+| 指标 | 改前（793） | 无损新 kernel | 差异 |
+|---|---:|---:|---:|
+| 输出吞吐 (tok/s) | 793.20 | **856.64** | **+8.0%** |
+| TPOT 均值 (ms) | 17.00 | 15.61 | -8.2% |
+| TTFT 均值 (ms) | 3254.78 | 3150.11 | -3.2% |
 
-- DSA 量化 kernel 的 block 是按 **128 维的 K 维** 切的（`GROUP_SIZE=128`，program_id 按 token × block 切）
-- 融合 kernel 的 block 是按 **head × dim** 切的（`pid_t × pid_hk`，做 RoPE 的基本单元）
+无损版本比有损版本还快 6.7%（856 vs 803），因为新 kernel 省了 `quantize_k_cache_separate` 的中间 tensor 分配 + `set_mla_kv_buffer_triton` 的额外 launch。
 
-融合 kernel 在一个 block 里处理一个 head 的 RoPE，而 DSA 量化在一个 block 里处理 128 维的 scale 计算——两者的 block 含义不同，**没法在同一个 block 里同时做 RoPE 和 per-block 量化**。要改 block 结构让它同时满足两种切法，等于重写 kernel 的并行策略。
-
-#### 不兼容 3：要无损 = 写全新 kernel
-
-三重不兼容叠加后，唯一出路是**从头写一个 DSA 专用的融合 triton kernel**，在一个 kernel 里同时完成三件事：
-
-1. 对 k_rope（64 维）做 RoPE，结果保留 bf16
-2. 对 k_nope（512 维）按 128 group 做 per-block fp8 量化，算 scale
-3. 把 fp8 量化值 + scale + bf16 rope 按混合 layout 写入 paged buffer
-
-这不是改现有 kernel 的几行代码，是设计一个新的并行策略（block 怎么切才能同时覆盖 RoPE 的 head 维和量化的 128 维 group），写新的 triton kernel，然后验证正确性。中大型工程。
-
-> 📐 **数据来源**：非融合路径 `python/sglang/kernels/ops/attention/dsa/quant_k_cache.py:133-175`（`_quantize_k_cache_fast`，rope 保留 bf16）+ `:267-330`（kernel 实现，per-block scale，`y_s = tl.max(tl.abs(y)) / FP8_MAX`）；融合路径 `python/sglang/kernels/ops/kvcache/rope_cache.py:340-372`（`HAVE_K_SCALE`，rope 也量化）；`python/sglang/srt/mem_cache/memory_pool.py:4213`（`rope_storage_dtype = torch.bfloat16`）+ `:4166-4172`（`quantize_k_cache` 调用，混合 layout）；实测 .8 2026-08-25。
+> 📐 **数据来源**：standalone test（`fused_dsa_quant_store.py` test_correctness，128 token，字节级对比）；端到端 `bench_serving`（8192 input + 1024 output, 64 prompts, concurrency 16），.8 容器 2026-08-25。新 kernel 代码 `python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py`，接入点 `python/sglang/srt/mem_cache/memory_pool.py:3951`（`_write_mla_kv_buffer` 的 `dsa_kv_cache_store_fp8` 分支）。
 
 ### 4. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue
 
@@ -225,18 +198,20 @@ DSA 的 nope 量化是 **per-block**：把 512 维切成 4 个 128 维的 block�
 
 ## 总结
 
-| 融合点 | 占比 | 能不能动 | 原因 |
+| 融合点 | 占比 | 状态 | 原因 |
 |---|---|---|---|
-| embedding allreduce | 27.8% | ❌ | 不是融合对象（无 layernorm 吸收） |
-| shared-expert append | 3.2% | ❌ | GLM + flashinfer_trtllm 双重 disable，换 triton 慢 24% |
-| QK RoPE + KV cache write | 4.6% | ❌ | 要求 bf16 KV cache，GLM 用 fp8_e4m3 |
-| FP8 quant + activation | 3.7% | ❌ | trtllm 闭源不开放 epilogue，换 triton 慢 24% |
+| embedding allreduce | 27.8% | ❌ 不能 | 不是融合对象（无 layernorm 吸收） |
+| shared-expert append | 3.2% | ❌ 不能 | flashinfer_trtllm 闭源 kernel 没实现 |
+| **QK RoPE + KV cache write** | **4.6%** | **✅ 已实现** | **写新 triton kernel 无损突破，+8%** |
+| FP8 quant + activation | 3.7% | ❌ 不能 | trtllm 闭源不开放 epilogue |
 
-四个剩余融合点全部被硬性条件挡住，且都与"换回 triton backend"或"换 KV dtype"绑定，代价都大于收益。**这套配置的算子融合已到顶。**
+四个融合点里，三个被硬性条件挡住（闭源 kernel / 不是融合对象），但 QK RoPE + KV cache write 通过写一个 DSA 专用的融合 triton kernel 突破了——无损实现 per-block fp8 量化 + bf16 rope 保留 + 混合 layout paged 写入，端到端从 793 提升到 **856 tok/s（+8%）**，总收益从 baseline 的 **+63%**。
 
-要继续提升性能，方向不再是"算子融合"：
-1. 减少 embedding allreduce（`--enable-attn-tp-input-scattered`，需实测 MLA/DSA 兼容性）
-2. 换更大 batch 摊薄通信开销（27.8% 的 allreduce 在大 batch 下占比会降）
+完整性能链条：baseline 524 → allreduce fusion + flashinfer_trtllm 793（+51%）→ 新 kernel 无损 QK RoPE 融合 **856（+63%）**。
+
+要继续提升，方向不再是"算子融合"：
+1. 减少 embedding allreduce（27.8%，`--enable-attn-tp-input-scattered`，需实测 MLA/DSA 兼容性）
+2. 换更大 batch 摊薄通信开销
 3. 等 flashinfer_trtllm 后续版本开放 shared-expert fusion / epilogue 定制
 
 ## 完整环境

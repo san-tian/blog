@@ -104,8 +104,8 @@
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
   <a class="post" href="sglang-fusion-ceiling-a-config.html">
-    <div class="title">sglang 算子融合到顶了吗：剩余四个融合点为什么做不了</div>
-    <div class="desc">这套配置（flashinfer_trtllm + allreduce fusion，+51%）沿下去还能不能继续做融合？用 profile 把 decode 66 个 kernel 逐一排除，只剩 4 个“可融合且未生效”的点，但全部被硬性条件挡住：embedding allreduce 无 layernorm 吸收、shared-expert 被 GLM+trtllm 双重 disable、QK RoPE+KV write 要求 bf16 KV cache（GLM 用 fp8）、FP8 quant 遇 trtllm 闭源不开放 epilogue。含完整启动命令、排除法表格与每个挡路条件的源码证据。</div>
+    <div class="title">sglang 算子融合：从天花板到突破，写新 kernel 无损实现 +63%</div>
+    <div class="desc">这套配置（flashinfer_trtllm + allreduce fusion，793 tok/s）还能不能继续做融合？profile 排除法发现 4 个融合点，3 个被闭源/不支持挡住，但 QK RoPE 通过写 DSA 专用融合 triton kernel 无损突破：856 tok/s（+63%）。含排除法、MLA 背景、混合 dtype 写入解法、正确性验证与端到端数据：embedding allreduce 无 layernorm 吸收、shared-expert 被 GLM+trtllm 双重 disable、QK RoPE+KV write 要求 bf16 KV cache（GLM 用 fp8）、FP8 quant 遇 trtllm 闭源不开放 epilogue。含完整启动命令、排除法表格与每个挡路条件的源码证据。</div>
     <div class="meta">
       <span class="tag agent">🤖 AI-assisted</span>
       <span class="tag">sglang</span>
