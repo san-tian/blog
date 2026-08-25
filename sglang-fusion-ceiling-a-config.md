@@ -128,29 +128,33 @@ assert (
 
 > 📐 **数据来源**：`python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py:1194-1195`（assert）、`python/sglang/srt/arg_groups/overrides.py:2027`（预 disable）、`python/sglang/srt/models/glm4_moe.py:1183-1212`（GLM 层条件，B200 下不命中）。
 
-### 3. QK RoPE + KV cache write（4.6%）—— kernel 有 fp8 路径，中间层没接上
+### 3. QK RoPE + KV cache write（4.6%）—— 能实现，但量化逻辑不等价会损精度
 
-fuse 表说"已有 `attention/utils.py` 融合路径"。从底层到上层分三层，fp8 在中间层断了：
+fuse 表说"已有 `attention/utils.py` 融合路径"。底层 triton kernel 有 fp8 路径，中间层 arg 构造的 CUDA 分支没接上（gate 也只放行 bf16）。改 3 处源码后能跑通：
 
-**底层 kernel（实现了 fp8）**：`fused_qk_rope_reshape_and_cache` 有 `HAVE_K_SCALE` 分支做 fp8 量化写入（`rope_cache.py:340-372`：`k_scale = tl.load(k_scale_ptr)`、`k_scale_rcprl = 1 / k_scale`、`k_pe = k_pe * k_scale_rcprl`）。
+1. gate `enable_fused_set_kv_buffer` 放行 fp8 dtype
+2. arg 构造 `create_fused_set_kv_buffer_arg` CUDA 分支处理 fp8 scale（返回 dict，参考 ROCm 分支）
+3. fallback 路径 `base.py:386` 去掉 `_is_hip` 限制（让 CUDA fallback 也走 `fused_qk_rope_reshape_and_cache`）
 
-**中间层 arg 构造（CUDA 分支没实现 fp8）**：`create_fused_set_kv_buffer_arg` 的 CUDA 分支有一个硬 assert 拒绝 scale：
+实测结果（同 bench 参数）：
 
-```python
-# models/utils.py:316（CUDA 分支）
-if not _is_hip:
-    assert layer.k_scale is None and layer.v_scale is None, "scale not supported"
-    return FusedSetKVBufferArg(...)   # 只构造无 scale 的简单 arg
-# ROCm 分支才处理 k_scale/v_scale
-```
+| 指标 | 改前 | 改后 | 差异 |
+|---|---:|---:|---:|
+| 输出吞吐 (tok/s) | 793.20 | 802.78 | +1.2% |
+| TPOT 均值 (ms) | 17.00 | 16.92 | -0.5% |
+| TTFT 均值 (ms) | 3254.78 | 3090.67 | -5.0% |
 
-fp8 KV cache 下 `layer.k_scale` 非 None（有 `k_scale_buffer`），这个 assert 会崩。
+**但会损失精度**——融合 kernel 的 fp8 量化和 DSA 专用路径不等价：
 
-**上层 gate（也没放行 fp8）**：`enable_fused_set_kv_buffer`（`utils.py:290`）CUDA 分支只放行 `pool.dtype == torch.bfloat16`。
+| | 非融合（DSA `quantize_k_cache`） | 融合（triton `fused_qk_rope_reshape_and_cache`） |
+|---|---|---|
+| nope 量化粒度 | per-block（128 一组，每组一个 scale） | 单个 `k_scale`（整个 token 一个 scale） |
+| rope 部分 | **不量化**，保留 bf16 | **也量化**成 fp8 |
+| 输出 layout | `[nope_fp8 \| scales \| rope_bf16]` | 统一 fp8（layout 不同） |
 
-**为什么现在不能融合**：不是只差一个 gate——中间层 arg 构造的 CUDA 分支也没实现 fp8 scale 处理（只有 ROCm 分支实现了）。要实现需要改 arg 构造让 CUDA 分支也处理 k_scale/v_scale（参考 ROCm 分支写法）+ 放行 gate + 验证 fp8 量化正确性。工程量中等，有正确性风险。
+最关键的损失在 rope 部分：非融合路径保留 rope 为 bf16（位置编码精度敏感），融合路径把 rope 也量化成 fp8，会损失位置信息。简单输入下看不出（"1+1=2"正确），但复杂输入下 DSA 的 sparse attention 依赖精确 KV 做 topk 选择，rope 精度损失可能导致 topk 选错。
 
-> 📐 **数据来源**：`python/sglang/kernels/ops/kvcache/rope_cache.py:340-372`（kernel fp8 路径）、`python/sglang/srt/models/utils.py:316-322`（CUDA arg 构造的 assert）、`python/sglang/srt/models/utils.py:281-300`（gate）、`python/sglang/srt/mem_cache/memory_pool.py:1891-1892`（fp8 的 k_scale_buffer）。
+> 📐 **数据来源**：非融合路径 `python/sglang/kernels/ops/attention/dsa/quant_k_cache.py:133-175`（`_quantize_k_cache_fast`，rope 保留 bf16）；融合路径 `python/sglang/kernels/ops/kvcache/rope_cache.py:340-372`（`HAVE_K_SCALE`，rope 也量化）；实测 .8 2026-08-25。
 
 ### 4. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue
 

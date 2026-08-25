@@ -152,20 +152,30 @@ assert (
 <p>📐 <strong>数据来源</strong>：<code>python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py:1194-1195</code>（assert）、<code>python/sglang/srt/arg_groups/overrides.py:2027</code>（预 disable）、<code>python/sglang/srt/models/glm4_moe.py:1183-1212</code>（GLM 层条件，B200 下不命中）。</p>
 </blockquote>
 
-<h3>3. QK RoPE + KV cache write（4.6%）—— kernel 有 fp8 路径，中间层没接上</h3>
-<p>fuse 表说"已有 <code>attention/utils.py</code> 融合路径"。从底层到上层分三层，fp8 在中间层断了：</p>
-<p><strong>底层 kernel（实现了 fp8）</strong>：<code>fused_qk_rope_reshape_and_cache</code> 有 <code>HAVE_K_SCALE</code> 分支做 fp8 量化写入（<code>rope_cache.py:340-372</code>：<code>k_scale = tl.load(k_scale_ptr)</code>、<code>k_scale_rcprl = 1 / k_scale</code>、<code>k_pe = k_pe * k_scale_rcprl</code>）。</p>
-<p><strong>中间层 arg 构造（CUDA 分支没实现 fp8）</strong>：<code>create_fused_set_kv_buffer_arg</code> 的 CUDA 分支有一个硬 assert 拒绝 scale：</p>
-<pre><code># models/utils.py:316（CUDA 分支）
-if not _is_hip:
-    assert layer.k_scale is None and layer.v_scale is None, "scale not supported"
-    return FusedSetKVBufferArg(...)   # 只构造无 scale 的简单 arg
-# ROCm 分支才处理 k_scale/v_scale</code></pre>
-<p>fp8 KV cache 下 <code>layer.k_scale</code> 非 None（有 <code>k_scale_buffer</code>），这个 assert 会崩。</p>
-<p><strong>上层 gate（也没放行 fp8）</strong>：<code>enable_fused_set_kv_buffer</code>（<code>utils.py:290</code>）CUDA 分支只放行 <code>pool.dtype == torch.bfloat16</code>。</p>
-<p><strong>为什么现在不能融合</strong>：不是只差一个 gate——中间层 arg 构造的 CUDA 分支也没实现 fp8 scale 处理（只有 ROCm 分支实现了）。要实现需要改 arg 构造让 CUDA 分支也处理 k_scale/v_scale（参考 ROCm 分支写法）+ 放行 gate + 验证 fp8 量化正确性。工程量中等，有正确性风险。</p>
+<h3>3. QK RoPE + KV cache write（4.6%）—— 能实现，但量化逻辑不等价会损精度</h3>
+<p>fuse 表说"已有 <code>attention/utils.py</code> 融合路径"。底层 triton kernel 有 fp8 路径，中间层 arg 构造的 CUDA 分支没接上（gate 也只放行 bf16）。改 3 处源码后能跑通：</p>
+<ol>
+<li>gate <code>enable_fused_set_kv_buffer</code> 放行 fp8 dtype</li>
+<li>arg 构造 <code>create_fused_set_kv_buffer_arg</code> CUDA 分支处理 fp8 scale（返回 dict，参考 ROCm 分支）</li>
+<li>fallback 路径 <code>base.py:386</code> 去掉 <code>_is_hip</code> 限制（让 CUDA fallback 也走 <code>fused_qk_rope_reshape_and_cache</code>）</li>
+</ol>
+<p>实测结果（同 bench 参数）：</p>
+<table>
+<tr><th>指标</th><th>改前</th><th>改后</th><th>差异</th></tr>
+<tr><td>输出吞吐 (tok/s)</td><td>793.20</td><td>802.78</td><td>+1.2%</td></tr>
+<tr><td>TPOT 均值 (ms)</td><td>17.00</td><td>16.92</td><td>-0.5%</td></tr>
+<tr><td>TTFT 均值 (ms)</td><td>3254.78</td><td>3090.67</td><td>-5.0%</td></tr>
+</table>
+<p><strong>但会损失精度</strong>——融合 kernel 的 fp8 量化和 DSA 专用路径不等价：</p>
+<table>
+<tr><th></th><th>非融合（DSA <code>quantize_k_cache</code>）</th><th>融合（triton <code>fused_qk_rope_reshape_and_cache</code>）</th></tr>
+<tr><td>nope 量化粒度</td><td>per-block（128 一组，每组一个 scale）</td><td>单个 <code>k_scale</code>（整个 token 一个 scale）</td></tr>
+<tr><td>rope 部分</td><td><strong>不量化</strong>，保留 bf16</td><td><strong>也量化</strong>成 fp8</td></tr>
+<tr><td>输出 layout</td><td><code>[nope_fp8 | scales | rope_bf16]</code></td><td>统一 fp8（layout 不同）</td></tr>
+</table>
+<p>最关键的损失在 rope 部分：非融合路径保留 rope 为 bf16（位置编码精度敏感），融合路径把 rope 也量化成 fp8，会损失位置信息。简单输入下看不出（"1+1=2"正确），但复杂输入下 DSA 的 sparse attention 依赖精确 KV 做 topk 选择，rope 精度损失可能导致 topk 选错。</p>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：<code>python/sglang/kernels/ops/kvcache/rope_cache.py:340-372</code>（kernel fp8 路径）、<code>python/sglang/srt/models/utils.py:316-322</code>（CUDA arg 构造的 assert）、<code>python/sglang/srt/models/utils.py:281-300</code>（gate）、<code>python/sglang/srt/mem_cache/memory_pool.py:1891-1892</code>（fp8 的 k_scale_buffer）。</p>
+<p>📐 <strong>数据来源</strong>：非融合路径 <code>python/sglang/kernels/ops/attention/dsa/quant_k_cache.py:133-175</code>（<code>_quantize_k_cache_fast</code>，rope 保留 bf16）；融合路径 <code>python/sglang/kernels/ops/kvcache/rope_cache.py:340-372</code>（<code>HAVE_K_SCALE</code>，rope 也量化）；实测 .8 2026-08-25。</p>
 </blockquote>
 
 <h3>4. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue</h3>
