@@ -154,7 +154,13 @@ fuse 表说"已有 `attention/utils.py` 融合路径"。底层 triton kernel 有
 
 最关键的损失在 rope 部分：非融合路径保留 rope 为 bf16（位置编码精度敏感），融合路径把 rope 也量化成 fp8，会损失位置信息。简单输入下看不出（"1+1=2"正确），但复杂输入下 DSA 的 sparse attention 依赖精确 KV 做 topk 选择，rope 精度损失可能导致 topk 选错。
 
-> 📐 **数据来源**：非融合路径 `python/sglang/kernels/ops/attention/dsa/quant_k_cache.py:133-175`（`_quantize_k_cache_fast`，rope 保留 bf16）；融合路径 `python/sglang/kernels/ops/kvcache/rope_cache.py:340-372`（`HAVE_K_SCALE`，rope 也量化）；实测 .8 2026-08-25。
+**无损实现不可行**（在现有融合 kernel 上改）。三重不兼容：
+
+1. **buffer 结构不兼容**：DSA 的 KV buffer 是混合 dtype（`DSATokenToKVPool` 明确 `rope_storage_dtype = torch.bfloat16`，nope 是 fp8+scale），融合 kernel 写统一 dtype 的 paged buffer，不支持混合 dtype 写入。
+2. **量化 block 结构不兼容**：DSA nope 用 per-block（128 group）scale，融合 kernel 用单个 `k_scale`；融合 kernel 的 block 按 head/dim 做 RoPE，不是按 128 group 做量化，改 block 结构等于重写 kernel。
+3. **要无损 = 写新 kernel**：需要从头写一个 DSA 专用的融合 triton kernel，同时做 RoPE + DSA 量化（per-block nope fp8 + rope 保留 bf16 + 混合 layout buffer）。中大型工程，不是 patch 能搞定。
+
+> 📐 **数据来源**：非融合路径 `python/sglang/kernels/ops/attention/dsa/quant_k_cache.py:133-175`（`_quantize_k_cache_fast`，rope 保留 bf16）+ `:267-330`（kernel 实现，per-block scale）；融合路径 `python/sglang/kernels/ops/kvcache/rope_cache.py:340-372`（`HAVE_K_SCALE`，rope 也量化）；`python/sglang/srt/mem_cache/memory_pool.py:4213`（`rope_storage_dtype = torch.bfloat16`）；实测 .8 2026-08-25。
 
 ### 4. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue
 
