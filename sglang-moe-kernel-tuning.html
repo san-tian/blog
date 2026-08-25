@@ -216,8 +216,19 @@ docker run -d --name moe-tune --gpus all --shm-size=8g \
 </tr>
 </tbody>
 </table>
+<blockquote>
+<p><strong>📐 数据来源</strong>：官方 <code>tuning_fused_moe_triton_sep.py --configs &lt;M N K G w s&gt;</code> 各跑一次（<code>num_iters=100</code>，合成 <code>torch.randn(16,6144)</code> 输入 + 随机 gating，需预生成 topk_ids）：</p>
+<ul>
+<li>3.5.1 fallback：<code>--configs 16 64 128 1 4 3</code></li>
+<li>tuned：<code>--configs 16 128 128 1 4 4</code></li>
+</ul>
+<p>⚠️ 测的是「<strong>分离 kernel + 合成张量</strong>」，不是 serving 的融合 kernel；<code>合计 t0+t1</code> 是 up/down 分开测的时间<strong>算术求和</strong>，非单次测量。topk_ids 生成脚本见 §4.2。</p>
+</blockquote>
 <h3>2.5 全 batch 调优结果（✅ 完成）</h3>
 <p>full tune（18 batch）跑完，生成 <code>/root/tune_out/E=257,N=256,...json</code>（18 个 batch 全量）。<strong>与 3.5.1 fallback 相比，13/14 个 batch 的 config 不同</strong>（仅 bs=24 相同），主要差异：bs≤16 时 N64→N128、bs≥512 时 M16/M32→M64 等。</p>
+<blockquote>
+<p><strong>📐 数据来源</strong>：<code>diff_cfg.py</code> 逐 batch 对比 tuned 3.6.0 与镜像内 3.5.1 两份 config 的 6 个 tiling 参数，统计不同的 batch 数。</p>
+</blockquote>
 <hr />
 <h2>3. 调优项 ②：DeepGEMM 预编译</h2>
 <h3>3.1 背景</h3>
@@ -273,6 +284,9 @@ Try DeepGEMM JIT Compiling for &lt;GEMM_NT_F8F8BF16&gt; N=3072, K=6144 ...
 DeepGEMM Kernels compilation finished successfully.
 </code></pre>
 <p>耗时约 <strong>4.3 分钟</strong>（15:25:23 → 15:29:38）。注：<code>.8</code> 的 <code>/root/.cache/deep_gemm</code> 此前已由官方 FP8 prefill 预热过，本次是复验+补齐；<strong>真正的收益场景是“冷机器首次 serve”</strong>——预编译后首次启动不再现场 JIT（省 10-20 分钟）。</p>
+<blockquote>
+<p><strong>📐 数据来源</strong>：<code>python -m sglang.compile_deep_gemm</code> 日志时间戳差（启动 → <code>compilation finished</code>）。</p>
+</blockquote>
 <hr />
 <h2>4. 调优项 ③：MoE down 投影 config（TMA）</h2>
 <h3>4.1 背景</h3>
@@ -329,6 +343,9 @@ docker run -d --name moe-sep-tune --gpus all --shm-size=8g \
 </tr>
 </tbody>
 </table>
+<blockquote>
+<p><strong>📐 数据来源</strong>：同 §2.4，<code>tuning_fused_moe_triton_sep.py --configs 16 128 128 1 4 4</code> 的 <code>t0/t0_tma/t1/t1_tma</code> 对比（合成张量 + 分离 kernel）。</p>
+</blockquote>
 <p><strong>down 投影开 TMA 收益最大（~16%）</strong>，正好对应日志里"reusing up without TMA"的次优点。注：sep 脚本的 <code>--tune</code> 模式不落盘（代码里无 <code>save_configs</code>），要用 <code>--configs</code> 手动对比，或自己把 <code>_down</code> config 写进 <code>configs/triton_3_6_0/</code>。</p>
 <hr />
 <h2>5. 复现清单（从零到跑完）</h2>
@@ -389,6 +406,9 @@ docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
 </tr>
 </tbody>
 </table>
+<blockquote>
+<p>📐 上表是 §2.4 的汇总，数据来源同 §2.4（sep 脚本 <code>--configs</code>，合成张量 + 分离 kernel）。</p>
+</blockquote>
 <h3>端到端（真实 serving 吞吐，tokens/sec）❌ 不成立</h3>
 <table>
 <thead>
@@ -426,6 +446,30 @@ docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
 </tr>
 </tbody>
 </table>
+<blockquote>
+<p><strong>📐 数据来源</strong>：自定义 <code>bench_e2e.py</code> 并发打 <code>/generate</code>；吞吐 = 总 output tokens / 总墙钟时间；固定 prompt + <code>max_new_tokens=128</code> + <code>temperature=0</code>；每并发档 32 请求（另有 8 预热）。测了两遍：挂 tuned config（after） vs 去掉挂载回退 fallback（before）。完整脚本：</p>
+<p><code>python
+import urllib.request, json, time, concurrent.futures
+URL = "http://127.0.0.1:10100/generate"
+PROMPT = "请详细解释一下什么是张量并行和专家并行，以及它们的区别。"
+MAX_NEW_TOKENS = 128
+def run(concurrency, num_req):
+    def one(_):
+        body = json.dumps({"text": PROMPT, "sampling_params": {"max_new_tokens": MAX_NEW_TOKENS, "temperature": 0}}).encode()
+        req = urllib.request.Request(URL, data=body, headers={"Content-Type": "application/json"})
+        t0 = time.time()
+        d = json.loads(urllib.request.urlopen(req, timeout=300).read())
+        return d["meta_info"]["completion_tokens"], time.time() - t0
+    start = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
+        rs = list(ex.map(one, range(num_req)))
+    el = time.time() - start
+    tot = sum(r[0] for r in rs)
+    print(f"conc={concurrency} throughput={tot/el:.1f} tok/s avg_lat={sum(r[1] for r in rs)/num_req*1000:.0f} ms")
+run(4, 8)   # 预热
+for c in [4, 8, 16, 32]:
+    run(c, 32)</code></p>
+</blockquote>
 <p><strong>结论</strong>：kernel 级 ~12% 是 micro-benchmark 假象（合成张量 + 分开的 up/down kernel，非真实 fused kernel + 真实路由）。端到端实测 tuned config <strong>无收益甚至略慢</strong>。</p>
 <h3>最终决策</h3>
 <p><strong>保留官方 3.5.1 fallback，不使用重新 tune 的 config。</strong>（<code>.13</code> 的 tuned config 挂载已移除，serving 已回退 fallback）</p>
@@ -440,64 +484,6 @@ docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
 <li><strong>脚本用错（次要）</strong>：down 投影用了 sep 脚本（给“分离 kernel”调），但 serving 跑的是“融合 kernel”，上下文不匹配。</li>
 </ol>
 <p><strong>为什么 tune 完反而慢</strong>：不是调优动作错，而是「微基准 proxy ≠ 端到端目标」+「没做端到端验证」两条叠加——把 kernel 级 proxy 当成了端到端结果。</p>
-<hr />
-<h2>8. 附录：每个性能数值怎么测的（可复现）</h2>
-<blockquote>
-<p>所有数值的来源脚本 + 精确命令 + 测量条件都列在这里。每个数字对应报告里的哪张表也标了。</p>
-</blockquote>
-<h3>A.1 端到端吞吐（§7 的 before/after 表）</h3>
-<p><strong>来源</strong>：自定义脚本 <code>bench_e2e.py</code>，直接打在真实 serving 的 <code>/generate</code> 上。</p>
-<pre><code class="language-python">import urllib.request, json, time, concurrent.futures
-URL = &quot;http://127.0.0.1:10100/generate&quot;
-PROMPT = &quot;请详细解释一下什么是张量并行和专家并行，以及它们的区别。&quot;
-MAX_NEW_TOKENS = 128
-def run(concurrency, num_req):
-    def one(_):
-        body = json.dumps({&quot;text&quot;: PROMPT,
-            &quot;sampling_params&quot;: {&quot;max_new_tokens&quot;: MAX_NEW_TOKENS, &quot;temperature&quot;: 0}}).encode()
-        req = urllib.request.Request(URL, data=body, headers={&quot;Content-Type&quot;: &quot;application/json&quot;})
-        t0 = time.time()
-        d = json.loads(urllib.request.urlopen(req, timeout=300).read())
-        return d[&quot;meta_info&quot;][&quot;completion_tokens&quot;], time.time() - t0
-    start = time.time()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
-        rs = list(ex.map(one, range(num_req)))
-    el = time.time() - start
-    tot = sum(r[0] for r in rs)
-    print(f&quot;conc={concurrency} throughput={tot/el:.1f} tok/s avg_lat={sum(r[1] for r in rs)/num_req*1000:.0f} ms&quot;)
-run(4, 8)          # 预热
-for c in [4, 8, 16, 32]:
-    run(c, 32)
-</code></pre>
-<p>运行：<code>docker run --rm --network host -v /root/bench_e2e.py:/bench.py --entrypoint python3 &lt;镜像&gt; /bench.py</code></p>
-<p><strong>条件</strong>：固定 prompt（~30 token）+ <code>max_new_tokens=128</code>（decode 为主）+ <code>temperature=0</code>；4 个并发档各 32 请求（另有 8 个预热）。吞吐 = 总 output tokens / 总墙钟时间。测了两遍：一遍 serving 挂 tuned config（after），一遍去掉挂载回退 fallback（before）。</p>
-<h3>A.2 kernel 级 up/down 时间（§2.4 表）</h3>
-<p><strong>来源</strong>：官方 <code>tuning_fused_moe_triton_sep.py</code> 的 <code>--configs</code> 模式（测单个 config 的 up/down 时间）。</p>
-<p>前置——生成 topk_ids（sep 脚本必需）：</p>
-<pre><code class="language-python">import torch, os
-os.makedirs(&quot;/root/topk_ids&quot;, exist_ok=True)
-num_layers, dense_layers = 61, 3
-moe_layers = num_layers - dense_layers
-for i in range(100):
-    torch.save(torch.randint(0, 257, (16, 9), dtype=torch.int32),
-               f&quot;/root/topk_ids/topk_ids_layer{i % moe_layers + dense_layers}_idx{i // moe_layers}.pt&quot;)
-</code></pre>
-<p>命令（两个 config 各跑一次）：</p>
-<pre><code class="language-bash"># 3.5.1 fallback 的 bs=16 参数 (M16 N64 K128 G1 w4 s3)
-python benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton_sep.py \
-  --model /data0/models/glm52-step111-fp8 --tp-size 8 --dtype fp8_w8a8 \
-  --batch-size 16 --topk-ids-dir /root/topk_ids --configs 16 64 128 1 4 3
-# tuned 的 bs=16 参数 (M16 N128 K128 G1 w4 s4)
-  ... --configs 16 128 128 1 4 4
-</code></pre>
-<p>输出 <code>t0=.. t0_tma=.. t1=.. t1_tma=..</code>（单位 us；t0=up 非TMA、t0_tma=up TMA、t1=down 非TMA、t1_tma=down TMA）。</p>
-<p><strong>条件</strong>：<code>num_iters=100</code>（每 config 跑 100 次取均值）；<code>torch.randn(16, 6144)</code> 合成输入 + 随机 gating。⚠️ <strong>测的是「分离 kernel + 合成张量」，不是 serving 的融合 kernel</strong>——这正是 kernel 级数字端到端不成立的根源。</p>
-<h3>A.3 "13/14 个 batch 不同"（§2.5）</h3>
-<p><strong>来源</strong>：<code>diff_cfg.py</code> 逐 batch 对比 tuned 3.6.0 config 与镜像内 3.5.1 config 的 6 个 tiling 参数，统计不同的 batch 数。</p>
-<h3>A.4 DeepGEMM 预编译耗时 "~4.3 分钟"（§3.4）</h3>
-<p><strong>来源</strong>：<code>python -m sglang.compile_deep_gemm --model-path ... --tp-size 8 --moe-runner-backend triton --enforce-disable-flashinfer-allreduce-fusion --disable-custom-all-reduce</code> 的日志时间戳差（<code>fired up and ready</code> 到 <code>compilation finished</code> 之间的墙钟时间）。</p>
-<h3>A.5 "~12% MoE kernel 合计"（§2.4 表最末行）</h3>
-<p><strong>来源</strong>：A.2 的 <code>t0 + t1</code> <strong>算术求和</strong>（非单次测量）：122.52 = 71.63 + 50.89，107.68 = 65.98 + 41.70。注意这是"把 up/down 分开测的时间相加"，不代表真实融合 kernel 的一次端到端时间。</p>
 <footer>
   <p>由 san-tian 的部署 agent 自动生成 · 2026-08-24/25 · 报告源文件 sglang-tune-report.md</p>
 </footer>

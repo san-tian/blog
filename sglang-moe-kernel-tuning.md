@@ -128,9 +128,18 @@ docker run -d --name moe-tune --gpus all --shm-size=8g \
 | down t1 TMA | 46.72 | **41.70** | **-18.1%** |
 | **合计 t0+t1** | 122.52 | 107.68（TMA） | **-12.1%** |
 
+> **📐 数据来源**：官方 `tuning_fused_moe_triton_sep.py --configs <M N K G w s>` 各跑一次（`num_iters=100`，合成 `torch.randn(16,6144)` 输入 + 随机 gating，需预生成 topk_ids）：
+>
+> - 3.5.1 fallback：`--configs 16 64 128 1 4 3`
+> - tuned：`--configs 16 128 128 1 4 4`
+>
+> ⚠️ 测的是「**分离 kernel + 合成张量**」，不是 serving 的融合 kernel；`合计 t0+t1` 是 up/down 分开测的时间**算术求和**，非单次测量。topk_ids 生成脚本见 §4.2。
+
 ### 2.5 全 batch 调优结果（✅ 完成）
 
 full tune（18 batch）跑完，生成 `/root/tune_out/E=257,N=256,...json`（18 个 batch 全量）。**与 3.5.1 fallback 相比，13/14 个 batch 的 config 不同**（仅 bs=24 相同），主要差异：bs≤16 时 N64→N128、bs≥512 时 M16/M32→M64 等。
+
+> **📐 数据来源**：`diff_cfg.py` 逐 batch 对比 tuned 3.6.0 与镜像内 3.5.1 两份 config 的 6 个 tiling 参数，统计不同的 batch 数。
 
 ---
 
@@ -181,6 +190,8 @@ DeepGEMM Kernels compilation finished successfully.
 
 耗时约 **4.3 分钟**（15:25:23 → 15:29:38）。注：`.8` 的 `/root/.cache/deep_gemm` 此前已由官方 FP8 prefill 预热过，本次是复验+补齐；**真正的收益场景是“冷机器首次 serve”**——预编译后首次启动不再现场 JIT（省 10-20 分钟）。
 
+> **📐 数据来源**：`python -m sglang.compile_deep_gemm` 日志时间戳差（启动 → `compilation finished`）。
+
 ---
 
 ## 4. 调优项 ③：MoE down 投影 config（TMA）
@@ -227,6 +238,8 @@ docker run -d --name moe-sep-tune --gpus all --shm-size=8g \
 |---|---|---|---|
 | down 投影 t1（3.6.0 tuned）| 49.51 us | 41.70 us | **-15.8%** |
 | up 投影 t0（3.6.0 tuned）| 68.78 us | 65.98 us | -4.1% |
+
+> **📐 数据来源**：同 §2.4，`tuning_fused_moe_triton_sep.py --configs 16 128 128 1 4 4` 的 `t0/t0_tma/t1/t1_tma` 对比（合成张量 + 分离 kernel）。
 
 **down 投影开 TMA 收益最大（~16%）**，正好对应日志里"reusing up without TMA"的次优点。注：sep 脚本的 `--tune` 模式不落盘（代码里无 `save_configs`），要用 `--configs` 手动对比，或自己把 `_down` config 写进 `configs/triton_3_6_0/`。
 
@@ -277,6 +290,8 @@ docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
 | MoE down 投影（开 TMA）| +8~16% | 同上 |
 | MoE kernel 合计 | ~12% | t0+t1 = 122.5→107.7 us |
 
+> 📐 上表是 §2.4 的汇总，数据来源同 §2.4（sep 脚本 `--configs`，合成张量 + 分离 kernel）。
+
 ### 端到端（真实 serving 吞吐，tokens/sec）❌ 不成立
 
 | 并发 | fallback 3.5.1 | tuned 3.6.0+TMA | 差异 |
@@ -285,6 +300,31 @@ docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
 | 8 | 326.3 | 323.0 | -1.0% |
 | 16 | 565.4 | 559.7 | -1.0% |
 | 32 | 1011.6 | 904.1 | **-10.6%** |
+
+> **📐 数据来源**：自定义 `bench_e2e.py` 并发打 `/generate`；吞吐 = 总 output tokens / 总墙钟时间；固定 prompt + `max_new_tokens=128` + `temperature=0`；每并发档 32 请求（另有 8 预热）。测了两遍：挂 tuned config（after） vs 去掉挂载回退 fallback（before）。完整脚本：
+>
+> ```python
+> import urllib.request, json, time, concurrent.futures
+> URL = "http://127.0.0.1:10100/generate"
+> PROMPT = "请详细解释一下什么是张量并行和专家并行，以及它们的区别。"
+> MAX_NEW_TOKENS = 128
+> def run(concurrency, num_req):
+>     def one(_):
+>         body = json.dumps({"text": PROMPT, "sampling_params": {"max_new_tokens": MAX_NEW_TOKENS, "temperature": 0}}).encode()
+>         req = urllib.request.Request(URL, data=body, headers={"Content-Type": "application/json"})
+>         t0 = time.time()
+>         d = json.loads(urllib.request.urlopen(req, timeout=300).read())
+>         return d["meta_info"]["completion_tokens"], time.time() - t0
+>     start = time.time()
+>     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
+>         rs = list(ex.map(one, range(num_req)))
+>     el = time.time() - start
+>     tot = sum(r[0] for r in rs)
+>     print(f"conc={concurrency} throughput={tot/el:.1f} tok/s avg_lat={sum(r[1] for r in rs)/num_req*1000:.0f} ms")
+> run(4, 8)   # 预热
+> for c in [4, 8, 16, 32]:
+>     run(c, 32)
+> ```
 
 **结论**：kernel 级 ~12% 是 micro-benchmark 假象（合成张量 + 分开的 up/down kernel，非真实 fused kernel + 真实路由）。端到端实测 tuned config **无收益甚至略慢**。
 
@@ -307,81 +347,3 @@ docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
 3. **脚本用错（次要）**：down 投影用了 sep 脚本（给“分离 kernel”调），但 serving 跑的是“融合 kernel”，上下文不匹配。
 
 **为什么 tune 完反而慢**：不是调优动作错，而是「微基准 proxy ≠ 端到端目标」+「没做端到端验证」两条叠加——把 kernel 级 proxy 当成了端到端结果。
-
----
-
-## 8. 附录：每个性能数值怎么测的（可复现）
-
-> 所有数值的来源脚本 + 精确命令 + 测量条件都列在这里。每个数字对应报告里的哪张表也标了。
-
-### A.1 端到端吞吐（§7 的 before/after 表）
-
-**来源**：自定义脚本 `bench_e2e.py`，直接打在真实 serving 的 `/generate` 上。
-
-```python
-import urllib.request, json, time, concurrent.futures
-URL = "http://127.0.0.1:10100/generate"
-PROMPT = "请详细解释一下什么是张量并行和专家并行，以及它们的区别。"
-MAX_NEW_TOKENS = 128
-def run(concurrency, num_req):
-    def one(_):
-        body = json.dumps({"text": PROMPT,
-            "sampling_params": {"max_new_tokens": MAX_NEW_TOKENS, "temperature": 0}}).encode()
-        req = urllib.request.Request(URL, data=body, headers={"Content-Type": "application/json"})
-        t0 = time.time()
-        d = json.loads(urllib.request.urlopen(req, timeout=300).read())
-        return d["meta_info"]["completion_tokens"], time.time() - t0
-    start = time.time()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
-        rs = list(ex.map(one, range(num_req)))
-    el = time.time() - start
-    tot = sum(r[0] for r in rs)
-    print(f"conc={concurrency} throughput={tot/el:.1f} tok/s avg_lat={sum(r[1] for r in rs)/num_req*1000:.0f} ms")
-run(4, 8)          # 预热
-for c in [4, 8, 16, 32]:
-    run(c, 32)
-```
-
-运行：`docker run --rm --network host -v /root/bench_e2e.py:/bench.py --entrypoint python3 <镜像> /bench.py`
-
-**条件**：固定 prompt（~30 token）+ `max_new_tokens=128`（decode 为主）+ `temperature=0`；4 个并发档各 32 请求（另有 8 个预热）。吞吐 = 总 output tokens / 总墙钟时间。测了两遍：一遍 serving 挂 tuned config（after），一遍去掉挂载回退 fallback（before）。
-
-### A.2 kernel 级 up/down 时间（§2.4 表）
-
-**来源**：官方 `tuning_fused_moe_triton_sep.py` 的 `--configs` 模式（测单个 config 的 up/down 时间）。
-
-前置——生成 topk_ids（sep 脚本必需）：
-```python
-import torch, os
-os.makedirs("/root/topk_ids", exist_ok=True)
-num_layers, dense_layers = 61, 3
-moe_layers = num_layers - dense_layers
-for i in range(100):
-    torch.save(torch.randint(0, 257, (16, 9), dtype=torch.int32),
-               f"/root/topk_ids/topk_ids_layer{i % moe_layers + dense_layers}_idx{i // moe_layers}.pt")
-```
-
-命令（两个 config 各跑一次）：
-```bash
-# 3.5.1 fallback 的 bs=16 参数 (M16 N64 K128 G1 w4 s3)
-python benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton_sep.py \
-  --model /data0/models/glm52-step111-fp8 --tp-size 8 --dtype fp8_w8a8 \
-  --batch-size 16 --topk-ids-dir /root/topk_ids --configs 16 64 128 1 4 3
-# tuned 的 bs=16 参数 (M16 N128 K128 G1 w4 s4)
-  ... --configs 16 128 128 1 4 4
-```
-输出 `t0=.. t0_tma=.. t1=.. t1_tma=..`（单位 us；t0=up 非TMA、t0_tma=up TMA、t1=down 非TMA、t1_tma=down TMA）。
-
-**条件**：`num_iters=100`（每 config 跑 100 次取均值）；`torch.randn(16, 6144)` 合成输入 + 随机 gating。⚠️ **测的是「分离 kernel + 合成张量」，不是 serving 的融合 kernel**——这正是 kernel 级数字端到端不成立的根源。
-
-### A.3 "13/14 个 batch 不同"（§2.5）
-
-**来源**：`diff_cfg.py` 逐 batch 对比 tuned 3.6.0 config 与镜像内 3.5.1 config 的 6 个 tiling 参数，统计不同的 batch 数。
-
-### A.4 DeepGEMM 预编译耗时 "~4.3 分钟"（§3.4）
-
-**来源**：`python -m sglang.compile_deep_gemm --model-path ... --tp-size 8 --moe-runner-backend triton --enforce-disable-flashinfer-allreduce-fusion --disable-custom-all-reduce` 的日志时间戳差（`fired up and ready` 到 `compilation finished` 之间的墙钟时间）。
-
-### A.5 "~12% MoE kernel 合计"（§2.4 表最末行）
-
-**来源**：A.2 的 `t0 + t1` **算术求和**（非单次测量）：122.52 = 71.63 + 50.89，107.68 = 65.98 + 41.70。注意这是"把 up/down 分开测的时间相加"，不代表真实融合 kernel 的一次端到端时间。
