@@ -103,9 +103,9 @@
   <h1>san-tian 的技术 blog</h1>
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
-  <a class="post" href="fixing-flashinfer-fusion-tvm-ffi-mismatch.html">
-    <div class="title">Expected 29 but got 33：sglang 两个 flashinfer 融合报错的根因与修复</div>
-    <div class="desc">开 allreduce 融合崩 Expected 16 but got 21、开 FlashInfer TRTLLM MoE 崩 Expected 29 but got 33，两个报错同一个根因：flashinfer 三件套（python/cubin/jit-cache）版本错配被 FLASHINFER_DISABLE_VERSION_CHECK 掩盖。四步定位路径（堆栈→版本→检查逻辑→打包方式）+ 两行 pip 修复。修复后融合真正生效，端到端吞吐 +51%。</div>
+  <a class="post" href="sglang-flashinfer-fusion-error-investigation.html">
+    <div class="title">sglang 两个 flashinfer 融合报错原因排查</div>
+    <div class="desc">开 allreduce 融合崩 Expected 16 but got 21、开 FlashInfer TRTLLM MoE 崩 Expected 29 but got 33，两个报错同一个根因：flashinfer 三件套（python/cubin/jit-cache）版本错配被 FLASHINFER_DISABLE_VERSION_CHECK 掩盖。含背景（为什么开这两个融合）、四步定位路径、完整命令（修复/验证/serve/benchmark）。</div>
     <div class="meta">
       <span class="tag agent">🤖 AI-assisted</span>
       <span class="tag">sglang</span>

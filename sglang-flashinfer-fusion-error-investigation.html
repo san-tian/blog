@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Expected 29 but got 33：sglang 两个 flashinfer 融合报错的根因与修复</title>
+<title>sglang 两个 flashinfer 融合报错原因排查</title>
 <style>
   :root { --bg:#fafaf9; --card:#ffffff; --card-2:#f8f8f7; --border:#e7e5e4; --text:#1c1917; --text-dim:#78716c; --accent:#1d4ed8; --code-bg:#f8fafc; --inline-code-bg:#f1f5f9; }
   * { box-sizing:border-box; }
@@ -36,29 +36,42 @@
 <body>
 <div class="container">
 <header class="hero">
-  <h1>Expected 29 but got 33</h1>
-  <div class="subtitle">sglang 两个 flashinfer 融合报错的根因与修复 · flashinfer 版本错配 · FLASHINFER_DISABLE_VERSION_CHECK · 两行 pip</div>
+  <h1>sglang 两个 flashinfer 融合报错原因排查</h1>
+  <div class="subtitle">tvm_ffi 签名错位 · flashinfer 三件套版本错配 · FLASHINFER_DISABLE_VERSION_CHECK · B200</div>
 </header>
 
 <blockquote>
-<p>开 <code>--flashinfer-allreduce-fusion-backend auto</code> 崩 <code>Expected 16 but got 21</code>，开 <code>--moe-runner-backend flashinfer_trtllm</code> 崩 <code>Expected 29 but got 33</code>。两个报错同一个根因：flashinfer 三件套版本错配被一个环境变量掩盖。这篇讲怎么从报错一步步定位到根因、怎么修。</p>
+<p>在 B200 上部署 GLM-5.2，想打开算子融合优化，结果一开就崩两个 tvm_ffi 报错。这篇记录这两个报错的原因排查全过程：现象、根因、定位路径、修复命令、验证。</p>
 </blockquote>
 
 <h2>TL;DR</h2>
 <table>
 <tr><th>结论</th><th>数据</th></tr>
-<tr><td>两个报错同根因</td><td>flashinfer 三个独立包版本不一致</td></tr>
+<tr><td>两个报错同一个根因</td><td>flashinfer 三个独立包版本不一致</td></tr>
 <tr><td>错配</td><td><code>flashinfer-python</code> 0.6.14 vs <code>flashinfer-cubin</code> 0.6.12 vs <code>flashinfer-jit-cache</code> 0.6.12+cu130</td></tr>
 <tr><td>掩盖机制</td><td><code>FLASHINFER_DISABLE_VERSION_CHECK=1</code> 关掉了 flashinfer 自己的两次版本检查</td></tr>
 <tr><td>修复</td><td>两行 pip 把 cubin / jit-cache 对齐到 0.6.14</td></tr>
-<tr><td>修复后收益</td><td>融合真正生效，端到端输出吞吐 524 → 793 tok/s（+51%）</td></tr>
 </table>
 
-<h2>现象：两个 tvm_ffi 签名报错</h2>
-<p>开融合开关后，模型能 load、能起服务，但一到融合 kernel 的 forward 就崩，报错都指向 <code>tvm_ffi</code> 的 <code>Function.__call__</code>：</p>
+<h2>背景：为什么要开这两个融合</h2>
+<p>GLM-5.2 step111（E=257 的 MoE，TP8）部署在 B200 上。之前一直跑在 <code>--moe-runner-backend triton</code> + 关闭 allreduce 融合的配置下，因为开融合就会崩。这次想打开两个融合开关做优化：</p>
+<table>
+<tr><th>融合开关</th><th>作用</th><th>为什么开它</th></tr>
+<tr><td><code>--moe-runner-backend flashinfer_trtllm</code></td><td>MoE 专家层 GEMM 改用 FlashInfer 的 TRTLLM 后端</td><td><code>triton</code> 是 fallback，<code>flashinfer_trtllm</code> 才是 Blackwell 上官方推荐的低延迟后端</td></tr>
+<tr><td><code>--flashinfer-allreduce-fusion-backend auto</code></td><td>TP 通信的 allreduce + residual + RMSNorm 融合成一次</td><td>profile 显示 allreduce 是 decode 头号瓶颈（23.6%），融合掉它能省掉单独的 allreduce kernel</td></tr>
+</table>
+<p>结果两个开关各自崩了一个错：</p>
 <pre><code>TypeError: trtllm_mnnvl_allreduce_fusion(...) Expected 16 but got 21 arguments
 TypeError: trtllm_fp8_block_scale_moe(...) Expected 29 but got 33 arguments</code></pre>
-<p>「Expected N but got M」是 tvm_ffi 的典型签名错位：python 层调用时传了 M 个参数，但 native kernel 只声明了 N 个。两个报错里 <code>M &gt; N</code>，说明<strong>调用方（python）比 native 层新</strong>。</p>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：profile 结论来自 <code>llm-torch-profiler-analysis</code> skill 对 .13 现役 serve 的 trace 分析（decode 阶段 <code>ncclDevKernel_AllReduce</code> 占 23.6%）。</p>
+</blockquote>
+
+<h2>现象：两个 tvm_ffi 签名报错</h2>
+<p>两个报错都发生在 <code>tvm_ffi</code> 的 <code>Function.__call__</code>，即 native kernel 入口。模型能 load、服务能起，但一到融合 kernel 的 forward 就崩：</p>
+<pre><code>TypeError: trtllm_mnnvl_allreduce_fusion(...) Expected 16 but got 21 arguments
+TypeError: trtllm_fp8_block_scale_moe(...) Expected 29 but got 33 arguments</code></pre>
+<p>「Expected N but got M」是 tvm_ffi 的签名错位：python 层传了 M 个参数，native kernel 只声明了 N 个。两个都是 <code>M &gt; N</code>，说明<strong>调用方（python）比 native 层新</strong>。</p>
 <blockquote>
 <p>📐 <strong>数据来源</strong>：.8 容器启动日志（<code>docker logs</code>）。第一个来自 <code>--flashinfer-allreduce-fusion-backend auto</code>，第二个来自 <code>--moe-runner-backend flashinfer_trtllm</code>。</p>
 </blockquote>
@@ -71,7 +84,7 @@ TypeError: trtllm_fp8_block_scale_moe(...) Expected 29 but got 33 arguments</cod
 <tr><td><code>flashinfer-cubin</code></td><td>预编译 kernel 二进制（CUDA 无关）</td><td><strong>0.6.12</strong> ❌</td></tr>
 <tr><td><code>flashinfer-jit-cache</code></td><td>AOT 编译缓存（CUDA 相关）</td><td><strong>0.6.12+cu130</strong> ❌</td></tr>
 </table>
-<p>python 是 0.6.14，native（cubin + jit-cache）是 0.6.12。0.6.12 → 0.6.14 之间 flashinfer 给 MoE/allreduce kernel 加了参数，所以 0.6.14 的 python 去调 0.6.12 的 native，签名就对不上。</p>
+<p>python 是 0.6.14，native（cubin + jit-cache）是 0.6.12。0.6.12 → 0.6.14 之间 flashinfer 给 MoE/allreduce kernel 加了参数，所以 0.6.14 的 python 去调 0.6.12 的 native，签名对不上。</p>
 <blockquote>
 <p>📐 <strong>数据来源</strong>：镜像内 <code>import flashinfer_cubin as c; c.__version__</code> 与 <code>import flashinfer_jit_cache as j; j.__version__</code>。</p>
 </blockquote>
@@ -83,11 +96,11 @@ TypeError: trtllm_fp8_block_scale_moe(...) Expected 29 but got 33 arguments</cod
   result = get_trtllm_moe_sm100_module().trtllm_fp8_block_scale_moe(...)
 File "python/tvm_ffi/cython/function.pxi", line 968, in tvm_ffi.core.Function.__call__
 TypeError: ... Expected 29 but got 33 arguments</code></pre>
-<p>报错发生在 <code>tvm_ffi</code> 的 <code>Function.__call__</code>，即 native kernel 的入口。这一层不归 python 管，是 flashinfer 的 native 库签名。</p>
+<p>报错发生在 <code>tvm_ffi</code> 的 <code>Function.__call__</code>，是 native kernel 入口。这一层不归 python 管，是 flashinfer 的 native 库签名。</p>
 <h3>2. 版本对不上的来源</h3>
 <p>flashinfer 的 MoE kernel 是 JIT 生成的——<code>gen_trtllm_gen_fused_moe_sm100_module()</code> 用 wheel 里的 csrc 模板现场编译出 native module，签名由模板决定。python 调用层（<code>core.py</code>）与这个模板分属两个包，各自带版本号。</p>
 <h3>3. 版本检查被环境变量关掉了</h3>
-<p>flashinfer 自己会检查这三件套版本一致性，位置在 <code>flashinfer/jit/env.py</code>：</p>
+<p>flashinfer 自己会检查三件套版本一致性，位置在 <code>flashinfer/jit/env.py</code>：</p>
 <ul>
 <li><code>_verify_flashinfer_cubin_version()</code>：检查 <code>flashinfer_cubin.__version__ == flashinfer.__version__</code></li>
 <li><code>_get_aot_dir()</code>：检查 <code>flashinfer_jit_cache.__version__.startswith(flashinfer.__version__)</code></li>
@@ -109,29 +122,66 @@ pip install flashinfer-cubin==${FLASHINFER_VERSION}      --index-url https://fla
 pip install flashinfer-jit-cache==${FLASHINFER_VERSION}  --index-url https://flashinfer.ai/whl/cu${CUINDEX}</code></pre>
 <p>python 版由 <code>pyproject.toml</code> 锁定，cubin/jit-cache 版由 build-arg <code>FLASHINFER_VERSION</code> 控制。构建镜像时这个 arg 传成了 0.6.12，而 pyproject 里 python 已经是 0.6.14，于是三件套错配。</p>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：<code>flashinfer/jit/env.py</code>（版本检查逻辑）、<code>docker/Dockerfile:22,381,385</code>（<code>ARG FLASHINFER_VERSION</code> 与三件套安装）、镜像内 <code>pip show</code> 结果。sglang 代码为 <code>sgl-project/sglang</code> release/v0.5.15，HEAD <code>0b3bb0c</code>。</p>
+<p>📐 <strong>数据来源</strong>：<code>flashinfer/jit/env.py</code>（版本检查逻辑）、<code>docker/Dockerfile:22,381,385</code>（<code>ARG FLASHINFER_VERSION</code> 与三件套安装）、镜像内 <code>pip show</code> 结果。</p>
 </blockquote>
 
-<h2>修复：两行 pip</h2>
-<p>把 cubin 和 jit-cache 对齐到 python 的 0.6.14：</p>
+<h2>完整命令</h2>
+<h3>修复命令</h3>
 <pre><code>pip install --force-reinstall "flashinfer-cubin==0.6.14"     --index-url https://flashinfer.ai/whl
 pip install --force-reinstall "flashinfer-jit-cache==0.6.14" --index-url https://flashinfer.ai/whl/cu130</code></pre>
 <p>注意第二个索引是 <code>cu130</code> 不是 <code>cu13</code>（CUDA 13.0.1 → <code>CUINDEX=130</code>，见 Dockerfile 的映射）。</p>
-<p>修完后 <code>import flashinfer</code> 的版本检查自然通过，不再需要 <code>FLASHINFER_DISABLE_VERSION_CHECK=1</code>，也不需要 <code>--enforce-disable-flashinfer-allreduce-fusion</code> / <code>--disable-custom-all-reduce</code>。</p>
+<h3>修复前后版本确认</h3>
+<pre><code>python -c "import flashinfer_cubin as c; print('cubin', c.__version__)"
+python -c "import flashinfer_jit_cache as j; print('jit_cache', j.__version__)"</code></pre>
+<h3>验证（带 GPU，build native module）</h3>
+<pre><code>python -c "
+import os
+os.environ.pop('FLASHINFER_DISABLE_VERSION_CHECK', None)
+os.environ['TVM_FFI_CUDA_ARCH_LIST'] = '10.0a'
+import flashinfer
+from flashinfer.fused_moe import core as moe_core
+moe_op = moe_core.gen_trtllm_gen_fused_moe_sm100_module().build_and_load()
+print('BUILD_OK')
+"</code></pre>
+<h3>serve 完整命令（fusion 变体）</h3>
+<pre><code>python3 -m sglang.launch_server \
+  --model-path /data0/models/glm52-step111-fp8 \
+  --served-model-name glm52-step111-fp8 \
+  --host 0.0.0.0 --port 10100 --tp 8 \
+  --kv-cache-dtype fp8_e4m3 \
+  --enable-cache-report --page-size 64 \
+  --chunked-prefill-size 16384 --max-prefill-tokens 16384 \
+  --watchdog-timeout 3600 --reasoning-parser glm45 --tool-call-parser glm47 \
+  --moe-runner-backend flashinfer_trtllm \
+  --flashinfer-allreduce-fusion-backend auto \
+  --model-impl sglang \
+  --mem-fraction-static 0.90 --max-total-tokens 5000000 \
+  --enable-hierarchical-cache --hicache-ratio 1 \
+  --hicache-write-policy write_back --hicache-mem-layout page_first \
+  --hicache-storage-backend file --file-storage-path /root/hicache \
+  --cuda-graph-max-bs-decode 64 --max-running-requests 64 --enable-metrics</code></pre>
+<p>修复前（报错的）配置，只差三处：</p>
+<table>
+<tr><th>开关</th><th>修复前（崩）</th><th>修复后（正常）</th></tr>
+<tr><td>MoE 后端</td><td><code>--moe-runner-backend triton</code></td><td><code>--moe-runner-backend flashinfer_trtllm</code></td></tr>
+<tr><td>allreduce 融合</td><td><code>--enforce-disable-flashinfer-allreduce-fusion</code></td><td><code>--flashinfer-allreduce-fusion-backend auto</code></td></tr>
+<tr><td>custom allreduce</td><td><code>--disable-custom-all-reduce</code></td><td>（去掉）</td></tr>
+</table>
+<h3>端到端 benchmark</h3>
+<pre><code>python3 -m sglang.bench_serving \
+  --backend sglang --host 127.0.0.1 --port 10100 --model glm52-step111-fp8 \
+  --dataset-name random --random-input-len 8192 --random-output-len 1024 \
+  --random-range-ratio 1.0 --num-prompts 64 --max-concurrency 16 \
+  --warmup-requests 64 --flush-cache</code></pre>
 
-<h2>验证</h2>
+<h2>验证结果</h2>
 <p>三层验证，从轻到重：</p>
 <ol>
 <li><strong>版本一致</strong>：<code>flashinfer-python</code> / <code>flashinfer-cubin</code> / <code>flashinfer-jit-cache</code> 三者均 0.6.14。</li>
-<li><strong>import + build</strong>：<code>import flashinfer</code> 通过版本检查；<code>gen_trtllm_gen_fused_moe_sm100_module().build_and_load()</code> 成功构建 native module，签名对齐。</li>
+<li><strong>import + build</strong>：<code>import flashinfer</code> 通过版本检查；<code>build_and_load()</code> 成功构建 native module，签名对齐。</li>
 <li><strong>端到端</strong>：开融合后正常 serve，不再崩。</li>
 </ol>
-<blockquote>
-<p>📐 <strong>数据来源</strong>：验证脚本在 .8 容器内跑（<code>--gpus all</code>，<code>TVM_FFI_CUDA_ARCH_LIST=10.0a</code>），输出 <code>import flashinfer: OK</code> + <code>BUILD_OK</code>。</p>
-</blockquote>
-
-<h2>修复后的端到端收益</h2>
-<p>修复前融合被错配卡死，只能 <code>triton</code> + 全 disable；修复后融合真正生效：</p>
+<p>修复后端到端数据：</p>
 <table>
 <tr><th>指标</th><th>修复前（triton + disable）</th><th>修复后（flashinfer_trtllm + allreduce 融合）</th><th>差异</th></tr>
 <tr><td>输出吞吐 (tok/s)</td><td>524.62</td><td>793.20</td><td>+51%</td></tr>
@@ -139,7 +189,7 @@ pip install --force-reinstall "flashinfer-jit-cache==0.6.14" --index-url https:/
 <tr><td>TTFT 均值 (ms)</td><td>3884.02</td><td>3254.78</td><td>-16%</td></tr>
 </table>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：<code>python3 -m sglang.bench_serving --backend sglang --host 127.0.0.1 --port 10100 --model glm52-step111-fp8 --dataset-name random --random-input-len 8192 --random-output-len 1024 --random-range-ratio 1.0 --num-prompts 64 --max-concurrency 16 --warmup-requests 64 --flush-cache</code>。两套 serve 只差融合开关（MoE backend、allreduce fusion、custom allreduce 三处），其余完全一致。</p>
+<p>📐 <strong>数据来源</strong>：<code>bench_serving</code>（命令见上文），baseline 实测于 .13、fusion 实测于 .8，两套 serve 只差融合三开关。</p>
 </blockquote>
 
 <h2>完整环境</h2>
@@ -164,7 +214,7 @@ pip install --force-reinstall "flashinfer-jit-cache==0.6.14" --index-url https:/
 <p>对 flashinfer 来说，就是三件套（python / cubin / jit-cache）+ 一个 <code>FLASHINFER_DISABLE_VERSION_CHECK</code> 环境变量。</p>
 
 <footer>
-  <p>由 san-tian 的部署 agent 自动生成 · 2026-08-25 · 报告源文件 fixing-flashinfer-fusion-tvm-ffi-mismatch.md</p>
+  <p>由 san-tian 的部署 agent 自动生成 · 2026-08-25 · 报告源文件 sglang-flashinfer-fusion-error-investigation.md</p>
 </footer>
 </div>
 </body>
