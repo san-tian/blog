@@ -128,29 +128,29 @@ assert (
 
 > 📐 **数据来源**：`python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py:1194-1195`（assert）、`python/sglang/srt/arg_groups/overrides.py:2027`（预 disable）、`python/sglang/srt/models/glm4_moe.py:1183-1212`（GLM 层条件，B200 下不命中）。
 
-### 3. QK RoPE + KV cache write（4.6%）—— kernel 实现了 fp8，但启用 gate 没放行
+### 3. QK RoPE + KV cache write（4.6%）—— kernel 有 fp8 路径，中间层没接上
 
-fuse 表说"已有 `attention/utils.py` 融合路径"。底层 triton kernel（`fused_qk_rope_reshape_and_cache`）**其实实现了 fp8 路径**——kernel 里有 `HAVE_K_SCALE` 分支做 fp8 量化写入（`rope_cache.py:340-372`：`k_scale = tl.load(k_scale_ptr)`、`k_scale_rcprl = 1 / k_scale`、`k_pe = k_pe * k_scale_rcprl`）。
+fuse 表说"已有 `attention/utils.py` 融合路径"。从底层到上层分三层，fp8 在中间层断了：
 
-但上层的启用 gate `enable_fused_set_kv_buffer`（`utils.py:281`）在 CUDA 上只放行 bf16：
+**底层 kernel（实现了 fp8）**：`fused_qk_rope_reshape_and_cache` 有 `HAVE_K_SCALE` 分支做 fp8 量化写入（`rope_cache.py:340-372`：`k_scale = tl.load(k_scale_ptr)`、`k_scale_rcprl = 1 / k_scale`、`k_pe = k_pe * k_scale_rcprl`）。
+
+**中间层 arg 构造（CUDA 分支没实现 fp8）**：`create_fused_set_kv_buffer_arg` 的 CUDA 分支有一个硬 assert 拒绝 scale：
 
 ```python
-# models/utils.py:290（CUDA 分支）
-return (
-    _is_cuda
-    and pool.dtype == torch.bfloat16      # ← 只放行 bf16，fp8 没开放
-    and not isinstance(pool, SWAKVPool)
-    and not is_prefill_context_parallel_enabled()
-    and getattr(forward_batch, "dcp_kv_mask", None) is None
-)
-# HIP 分支支持 bf16/fp16/fp8，CUDA 分支只写了 bf16
+# models/utils.py:316（CUDA 分支）
+if not _is_hip:
+    assert layer.k_scale is None and layer.v_scale is None, "scale not supported"
+    return FusedSetKVBufferArg(...)   # 只构造无 scale 的简单 arg
+# ROCm 分支才处理 k_scale/v_scale
 ```
 
-GLM-5.2 serve 用 `--kv-cache-dtype fp8_e4m3`，`pool.dtype` 是 fp8，gate 不放行，融合不启用。
+fp8 KV cache 下 `layer.k_scale` 非 None（有 `k_scale_buffer`），这个 assert 会崩。
 
-**为什么不能融合**：这不是 kernel 没实现（kernel 有 fp8 路径），而是**启用 gate 保守没开放 CUDA+fp8**（可能没验证过）。理论上可以改这个 gate 让 fp8 也走融合路径，但属于改 sglang 源码，不是改 flag——且 fp8 KV cache 的融合正确性需要验证，不是简单打开。
+**上层 gate（也没放行 fp8）**：`enable_fused_set_kv_buffer`（`utils.py:290`）CUDA 分支只放行 `pool.dtype == torch.bfloat16`。
 
-> 📐 **数据来源**：`python/sglang/srt/models/utils.py:281-300`（gate）、`python/sglang/kernels/ops/kvcache/rope_cache.py:340-372`（kernel 的 fp8 scaling 逻辑）、serve 参数 `--kv-cache-dtype fp8_e4m3`。
+**为什么现在不能融合**：不是只差一个 gate——中间层 arg 构造的 CUDA 分支也没实现 fp8 scale 处理（只有 ROCm 分支实现了）。要实现需要改 arg 构造让 CUDA 分支也处理 k_scale/v_scale（参考 ROCm 分支写法）+ 放行 gate + 验证 fp8 量化正确性。工程量中等，有正确性风险。
+
+> 📐 **数据来源**：`python/sglang/kernels/ops/kvcache/rope_cache.py:340-372`（kernel fp8 路径）、`python/sglang/srt/models/utils.py:316-322`（CUDA arg 构造的 assert）、`python/sglang/srt/models/utils.py:281-300`（gate）、`python/sglang/srt/mem_cache/memory_pool.py:1891-1892`（fp8 的 k_scale_buffer）。
 
 ### 4. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue
 
