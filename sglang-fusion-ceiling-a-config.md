@@ -1,10 +1,31 @@
-# sglang 算子融合到顶了吗：A 配置剩余四个融合点为什么做不了
+# sglang 算子融合到顶了吗：剩余四个融合点为什么做不了
 
-> A 配置（`flashinfer_trtllm` MoE + allreduce fusion）实测 793 tok/s（+51%）。这篇用 profile 数据 + 代码排除法回答：沿 A 配置继续做算子融合还能不能提升，以及那四个"看起来能融合"的点为什么实际做不了。
+当前使用的启动命令（GLM-5.2 step111 FP8，B200 TP8）：
+
+```bash
+python3 -m sglang.launch_server \
+  --model-path /data0/models/glm52-step111-fp8 \
+  --served-model-name glm52-step111-fp8 \
+  --host 0.0.0.0 --port 10100 --tp 8 \
+  --kv-cache-dtype fp8_e4m3 \
+  --enable-cache-report --page-size 64 \
+  --chunked-prefill-size 16384 --max-prefill-tokens 16384 \
+  --watchdog-timeout 3600 --reasoning-parser glm45 --tool-call-parser glm47 \
+  --moe-runner-backend flashinfer_trtllm \
+  --flashinfer-allreduce-fusion-backend auto \
+  --model-impl sglang \
+  --mem-fraction-static 0.90 --max-total-tokens 5000000 \
+  --enable-hierarchical-cache --hicache-ratio 1 \
+  --hicache-write-policy write_back --hicache-mem-layout page_first \
+  --hicache-storage-backend file --file-storage-path /root/hicache \
+  --cuda-graph-max-bs-decode 64 --max-running-requests 64 --enable-metrics
+```
+
+这套配置实测 793 tok/s（比融合全关的 baseline 524 tok/s 快 +51%）。这篇用 profile 数据 + 代码排除法回答：沿这套配置继续做算子融合还能不能提升，以及那四个"看起来能融合"的点为什么实际做不了。
 
 ## TL;DR
 
-沿 A 配置，算子融合已到顶。decode 阶段 66 个 kernel 逐一排除后，只剩 4 个"可融合且未生效"的点，但全部被硬性条件挡住：
+算子融合已到顶。decode 阶段 66 个 kernel 逐一排除后，只剩 4 个"可融合且未生效"的点，但全部被硬性条件挡住：
 
 | 融合点 | 占比 | 挡路条件 |
 |---|---|---|
@@ -15,7 +36,7 @@
 
 ## 排除法：为什么只剩这四个
 
-A 配置 decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只剩 4 个既是 allreduce/quant/prep 类（有融合对象）、又未生效的。
+decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只剩 4 个既是 allreduce/quant/prep 类（有融合对象）、又未生效的。
 
 ### ① 已是融合 kernel（无需再融合）
 
@@ -68,7 +89,7 @@ A 配置 decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排
 
 66 个 kernel 排完五类，只剩 4 个"可融合且未生效"——就是开头表里的那四个。
 
-> 📐 **数据来源**：`analyze_llm_torch_profile.py --input glm_prof_fusion`（A 配置 TP-0 DECODE trace，2026-08-25 于 .8）。66 个 kernel 全量统计，占比 ≥1% 的 23 个，总 GPU 时间 110.7ms。
+> 📐 **数据来源**：`analyze_llm_torch_profile.py --input glm_prof_fusion`（TP-0 DECODE trace，2026-08-25 于 .8）。66 个 kernel 全量统计，占比 ≥1% 的 23 个，总 GPU 时间 110.7ms。
 
 ## 四个融合点为什么做不了
 
@@ -86,7 +107,7 @@ A 配置 decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排
 
 **为什么不能融合**：allreduce fusion 的原理是"allreduce + 下一层的 residual + rmsnorm 融合成一个 kernel"。但 embedding 后面直接是第一层 attention，**没有 layernorm 来吸收这个 allreduce**——它不是 residual+rmsnorm 的融合对象，是 TP vocab parallel embedding 的固有开销。
 
-> 📐 **数据来源**：A 配置 TP-0 DECODE trace 的 kernel 时序分析，`all_reduce_kernel` 事件的前驱 kernel 均为 `_vocab_parallel_embedding_kernel`。
+> 📐 **数据来源**：TP-0 DECODE trace 的 kernel 时序分析，`all_reduce_kernel` 事件的前驱 kernel 均为 `_vocab_parallel_embedding_kernel`。
 
 ### 2. shared-expert append（3.2%）—— GLM + flashinfer_trtllm 双重 disable
 
@@ -107,9 +128,9 @@ if disable_reason is not None:
 
 flashinfer_trtllm backend 启动时还会额外自动设 disable（启动日志：`FlashInfer TRTLLM MoE is enabled. --disable-shared-experts-fusion is automatically set.`）。
 
-**为什么不能融合**：两层 disable 叠加。要开它只能换回 triton backend（B 配置），但 B 实测只有 603 tok/s（比 A 慢 24%）——得不偿失。
+**为什么不能融合**：两层 disable 叠加。要开它只能把 `--moe-runner-backend` 换回 `triton`，但 triton + allreduce fusion + `--enable-fused-moe-sum-all-reduce` 实测只有 603 tok/s（比当前 793 慢 24%）——得不偿失。
 
-> 📐 **数据来源**：`python/sglang/srt/models/glm4_moe.py:1195-1212`、A 配置启动日志。
+> 📐 **数据来源**：`python/sglang/srt/models/glm4_moe.py:1195-1212`、启动日志。
 
 ### 3. QK RoPE + KV cache write（4.6%）—— KV dtype 不满足
 
@@ -136,9 +157,9 @@ GLM-5.2 serve 用 `--kv-cache-dtype fp8_e4m3`（fp8 KV cache），**`pool.dtype`
 
 `per_token_group_quant_8bit_v2_kernel`（3.7%）是 MoE 专家 GEMM 前的 FP8 per-token 量化。catalog 里 vLLM 有 `fuse_act_quant` pass（SiLU+mul + FP8 quant 融合），sglang 的 triton fused_moe 里有类似 epilogue，但 **flashinfer_trtllm backend 的 MoE kernel 是闭源预编译 kernel，不开放 epilogue 定制**——没法把量化融进去。
 
-**为什么不能融合**：要开它只能换回 triton backend（B 配置），同样得不偿失。
+**为什么不能融合**：要开它只能把 `--moe-runner-backend` 换回 `triton`（triton 的 `fused_moe` 有融合 epilogue），但 triton 实测只有 603 tok/s（比当前 793 慢 24%），同样得不偿失。
 
-> 📐 **数据来源**：`vllm-torch-compile-fusions.md` 的 `fuse_act_quant` pass、A 配置 profile 里 `per_token_group_quant` 的 python location（`fused_moe.py:232`，走 triton path 才有融合 epilogue）。
+> 📐 **数据来源**：profile 里 `per_token_group_quant` 的 python location（`fused_moe.py:232`，走 triton path 才有融合 epilogue）。
 
 ## 总结
 
@@ -149,7 +170,7 @@ GLM-5.2 serve 用 `--kv-cache-dtype fp8_e4m3`（fp8 KV cache），**`pool.dtype`
 | QK RoPE + KV cache write | 4.6% | ❌ | 要求 bf16 KV cache，GLM 用 fp8_e4m3 |
 | FP8 quant + activation | 3.7% | ❌ | trtllm 闭源不开放 epilogue，换 triton 慢 24% |
 
-四个剩余融合点全部被硬性条件挡住，且都与"换回 triton backend"或"换 KV dtype"绑定，代价都大于收益。**A 配置的算子融合已到顶。**
+四个剩余融合点全部被硬性条件挡住，且都与"换回 triton backend"或"换 KV dtype"绑定，代价都大于收益。**这套配置的算子融合已到顶。**
 
 要继续提升性能，方向不再是"算子融合"：
 1. 减少 embedding allreduce（`--enable-attn-tp-input-scattered`，需实测 MLA/DSA 兼容性）
@@ -169,4 +190,4 @@ GLM-5.2 serve 用 `--kv-cache-dtype fp8_e4m3`（fp8 KV cache），**`pool.dtype`
 | serve 关键参数 | `--moe-runner-backend flashinfer_trtllm --flashinfer-allreduce-fusion-backend auto --kv-cache-dtype fp8_e4m3 --tp 8` |
 | benchmark | `bench_serving --random-input-len 8192 --random-output-len 1024 --num-prompts 64 --max-concurrency 16`，793 tok/s |
 
-> 📐 **数据来源**：本报告所有代码引用均来自 `sgl-project/sglang` release/v0.5.15（HEAD `0b3bb0c`），profile 数据来自 A 配置 .8 实测（2026-08-25）。
+> 📐 **数据来源**：本报告所有代码引用均来自 `sgl-project/sglang` release/v0.5.15（HEAD `0b3bb0c`），profile 数据来自 .8 实测（2026-08-25）。
