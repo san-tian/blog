@@ -292,41 +292,27 @@ docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
 
 > 📐 上表是 §2.4 的汇总，数据来源同 §2.4（sep 脚本 `--configs`，合成张量 + 分离 kernel）。
 
-### 端到端（真实 serving 吞吐，tokens/sec）❌ 不成立
+### 端到端（官方 bench_serving，8192 输入 + 1024 输出）❌ 无收益
 
-| 并发 | fallback 3.5.1 | tuned 3.6.0+TMA | 差异 |
+| 指标 | fallback 3.5.1 | tuned 3.6.0+TMA | 差异 |
 |---|---|---|---|
-| 4 | 193.8 | 187.7 | -3.1% |
-| 8 | 326.3 | 323.0 | -1.0% |
-| 16 | 565.4 | 559.7 | -1.0% |
-| 32 | 1011.6 | 904.1 | **-10.6%** |
+| 输出吞吐 (tok/s) | 532.70 | 532.47 | -0.04%（持平）|
+| 峰值输出吞吐 (tok/s) | 656 | 672 | +2.4% |
+| **TTFT 均值 (ms)** | **3491.5** | **3790.7** | **+8.6%（tuned 慢）** |
+| TPOT 均值 (ms) | 26.64 | 26.36 | -1.1%（持平）|
+| E2E 均值 (ms) | 30743.8 | 30758.0 | +0.05%（持平）|
 
-> **📐 数据来源**：自定义 `bench_e2e.py` 并发打 `/generate`；吞吐 = 总 output tokens / 总墙钟时间；固定 prompt + `max_new_tokens=128` + `temperature=0`；每并发档 32 请求（另有 8 预热）。测了两遍：挂 tuned config（after） vs 去掉挂载回退 fallback（before）。完整脚本：
+> **📐 数据来源**：官方 `sglang.bench_serving`（命令如下）。测两遍：挂 tuned config（after） vs 去掉挂载回退 fallback（before）。
 >
-> ```python
-> import urllib.request, json, time, concurrent.futures
-> URL = "http://127.0.0.1:10100/generate"
-> PROMPT = "请详细解释一下什么是张量并行和专家并行，以及它们的区别。"
-> MAX_NEW_TOKENS = 128
-> def run(concurrency, num_req):
->     def one(_):
->         body = json.dumps({"text": PROMPT, "sampling_params": {"max_new_tokens": MAX_NEW_TOKENS, "temperature": 0}}).encode()
->         req = urllib.request.Request(URL, data=body, headers={"Content-Type": "application/json"})
->         t0 = time.time()
->         d = json.loads(urllib.request.urlopen(req, timeout=300).read())
->         return d["meta_info"]["completion_tokens"], time.time() - t0
->     start = time.time()
->     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
->         rs = list(ex.map(one, range(num_req)))
->     el = time.time() - start
->     tot = sum(r[0] for r in rs)
->     print(f"conc={concurrency} throughput={tot/el:.1f} tok/s avg_lat={sum(r[1] for r in rs)/num_req*1000:.0f} ms")
-> run(4, 8)   # 预热
-> for c in [4, 8, 16, 32]:
->     run(c, 32)
+> ```bash
+> python3 -m sglang.bench_serving \
+>   --backend sglang --host 127.0.0.1 --port 10100 --model glm52-step111-fp8 \
+>   --dataset-name random --random-input-len 8192 --random-output-len 1024 \
+>   --random-range-ratio 1.0 --num-prompts 64 --max-concurrency 16 \
+>   --warmup-requests 64 --flush-cache
 > ```
 
-**结论**：kernel 级 ~12% 是 micro-benchmark 假象（合成张量 + 分开的 up/down kernel，非真实 fused kernel + 真实路由）。端到端实测 tuned config **无收益甚至略慢**。
+**结论**：官方基准实测——tuned config **输出吞吐完全持平、TPOT 持平，但 TTFT（prefill 首 token 延迟）反而慢 8.6%**。这正好印证「大 tile（N=128）伤 occupancy，prefill 大 batch 下最明显」。tuned config 无端到端收益。
 
 ### 最终决策
 
