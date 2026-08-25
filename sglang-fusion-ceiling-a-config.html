@@ -174,14 +174,52 @@ assert (
 <tr><td>输出 layout</td><td><code>[nope_fp8 | scales | rope_bf16]</code></td><td>统一 fp8（layout 不同）</td></tr>
 </table>
 <p>最关键的损失在 rope 部分：非融合路径保留 rope 为 bf16（位置编码精度敏感），融合路径把 rope 也量化成 fp8，会损失位置信息。简单输入下看不出（"1+1=2"正确），但复杂输入下 DSA 的 sparse attention 依赖精确 KV 做 topk 选择，rope 精度损失可能导致 topk 选错。</p>
-<p><strong>无损实现不可行</strong>（在现有融合 kernel 上改）。三重不兼容：</p>
+<p><strong>无损实现不可行</strong>（在现有融合 kernel 上改）。下面逐层展开三重不兼容，并补充需要的背景知识。</p>
+
+<h4>背景知识：MLA 的 K 和 fp8 KV cache</h4>
+<p>GLM-5.2 用 MLA（Multi-head Latent Attention），每个 token 的 K 分成两部分：</p>
+<ul>
+<li><strong>k_nope（512 维）</strong>：不带位置编码的部分，是"内容"</li>
+<li><strong>k_rope（64 维）</strong>：带 RoPE 位置编码的部分，是"位置"</li>
+</ul>
+<p>RoPE 只作用于 k_rope 的 64 维，k_nope 的 512 维不动。</p>
+<p>fp8 KV cache 是把 bf16 的 K 压缩成 fp8 存（省一半显存）。但 fp8 精度低（只有 8 位），直接全压会丢信息。DSA 的做法是<strong>分区处理</strong>：</p>
+<ul>
+<li>k_nope（512 维）：按 128 维一组切 4 块，每块单独算一个 scale，量化成 fp8（per-block 量化，精度更高）</li>
+<li>k_rope（64 维）：<strong>不量化</strong>，保留 bf16（位置编码精度敏感，不能压）</li>
+</ul>
+<p>所以 DSA 的 KV buffer 里每个 token 存的是<strong>混合 dtype</strong>：</p>
+<pre><code>[ k_nope 的 fp8 量化值（512 字节） | 4 个 fp32 scale（16 字节） | k_rope 的 bf16 原值（128 字节） ]</code></pre>
+<p>fp8 和 bf16 在同一个 buffer 里混排，这就是"混合 dtype buffer"。</p>
+
+<h4>背景知识：paged KV buffer</h4>
+<p>sglang 的 KV cache 用 paged layout：把显存分成固定大小的 page（page_size=64 token），每个 page 存一批 token 的 KV。buffer 的 dtype 是统一的——一个 <code>torch.Tensor</code> 只能有一种 dtype。DSA 的混合 dtype 是通过把 fp8 和 bf16 <strong>以字节形式拼在一起、用 uint8 view 存储</strong>实现的（<code>output.view(self.store_dtype)</code>，store_dtype 是 fp8，但 rope 部分的字节其实是 bf16 的 raw bytes）。</p>
+
+<h4>不兼容 1：buffer 结构——混合 dtype vs 统一 dtype</h4>
+<p>现有融合 kernel（<code>fused_qk_rope_reshape_and_cache</code>）写的是<strong>统一 dtype 的 paged buffer</strong>：整个 key（nope+rope）用同一个 dtype（fp8）写入，一个 <code>tl.store</code> 搞定。</p>
+<p>DSA 要的是<strong>混合 dtype</strong>：nope 写 fp8 + scale，rope 写 bf16，三者拼在一个 buffer 里。融合 kernel 的 <code>tl.store(k_out_ptrs, k_pe.to(key_cache_ptr.dtype.element_ty))</code> 把整个 key 转成 buffer 的 dtype（fp8）写入——<strong>它不知道 rope 部分应该保留 bf16</strong>，也不知道 scale 该写在哪。</p>
+<p>这不是加个 if 能解决的——混合 dtype 的字节布局（fp8 | scale | bf16 拼排）和统一 dtype 的 paged 布局（全是 fp8）是两种完全不同的内存结构。</p>
+
+<h4>不兼容 2：量化 block 结构——per-block vs single scale</h4>
+<p>DSA 的 nope 量化是 <strong>per-block</strong>：把 512 维切成 4 个 128 维的 block，每个 block 独立算 scale（<code>y_s = tl.max(tl.abs(y)) / FP8_MAX</code>）。这样每个 block 的动态范围独立，精度更高。</p>
+<p>现有融合 kernel 用 <strong>single scale</strong>：整个 token 的 key 用一个外部传入的 <code>k_scale</code>（<code>k_pe = k_pe * (1 / k_scale)</code>）。一个 scale 覆盖 576 维，精度低。</p>
+<p>更重要的是 <strong>block 的划分维度不同</strong>：</p>
+<ul>
+<li>DSA 量化 kernel 的 block 是按 <strong>128 维的 K 维</strong> 切的（<code>GROUP_SIZE=128</code>，program_id 按 token × block 切）</li>
+<li>融合 kernel 的 block 是按 <strong>head × dim</strong> 切的（<code>pid_t × pid_hk</code>，做 RoPE 的基本单元）</li>
+</ul>
+<p>融合 kernel 在一个 block 里处理一个 head 的 RoPE，而 DSA 量化在一个 block 里处理 128 维的 scale 计算——两者的 block 含义不同，<strong>没法在同一个 block 里同时做 RoPE 和 per-block 量化</strong>。要改 block 结构让它同时满足两种切法，等于重写 kernel 的并行策略。</p>
+
+<h4>不兼容 3：要无损 = 写全新 kernel</h4>
+<p>三重不兼容叠加后，唯一出路是<strong>从头写一个 DSA 专用的融合 triton kernel</strong>，在一个 kernel 里同时完成三件事：</p>
 <ol>
-<li><strong>buffer 结构不兼容</strong>：DSA 的 KV buffer 是混合 dtype（<code>DSATokenToKVPool</code> 明确 <code>rope_storage_dtype = torch.bfloat16</code>，nope 是 fp8+scale），融合 kernel 写统一 dtype 的 paged buffer，不支持混合 dtype 写入。</li>
-<li><strong>量化 block 结构不兼容</strong>：DSA nope 用 per-block（128 group）scale，融合 kernel 用单个 <code>k_scale</code>；融合 kernel 的 block 按 head/dim 做 RoPE，不是按 128 group 做量化，改 block 结构等于重写 kernel。</li>
-<li><strong>要无损 = 写新 kernel</strong>：需要从头写一个 DSA 专用的融合 triton kernel，同时做 RoPE + DSA 量化（per-block nope fp8 + rope 保留 bf16 + 混合 layout buffer）。中大型工程，不是 patch 能搞定。</li>
+<li>对 k_rope（64 维）做 RoPE，结果保留 bf16</li>
+<li>对 k_nope（512 维）按 128 group 做 per-block fp8 量化，算 scale</li>
+<li>把 fp8 量化值 + scale + bf16 rope 按混合 layout 写入 paged buffer</li>
 </ol>
+<p>这不是改现有 kernel 的几行代码，是设计一个新的并行策略（block 怎么切才能同时覆盖 RoPE 的 head 维和量化的 128 维 group），写新的 triton kernel，然后验证正确性。中大型工程。</p>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：非融合路径 <code>python/sglang/kernels/ops/attention/dsa/quant_k_cache.py:133-175</code>（<code>_quantize_k_cache_fast</code>，rope 保留 bf16）+ <code>:267-330</code>（kernel 实现，per-block scale）；融合路径 <code>python/sglang/kernels/ops/kvcache/rope_cache.py:340-372</code>（<code>HAVE_K_SCALE</code>，rope 也量化）；<code>python/sglang/srt/mem_cache/memory_pool.py:4213</code>（<code>rope_storage_dtype = torch.bfloat16</code>）；实测 .8 2026-08-25。</p>
+<p>📐 <strong>数据来源</strong>：非融合路径 <code>python/sglang/kernels/ops/attention/dsa/quant_k_cache.py:133-175</code>（<code>_quantize_k_cache_fast</code>，rope 保留 bf16）+ <code>:267-330</code>（kernel 实现，per-block scale，<code>y_s = tl.max(tl.abs(y)) / FP8_MAX</code>）；融合路径 <code>python/sglang/kernels/ops/kvcache/rope_cache.py:340-372</code>（<code>HAVE_K_SCALE</code>，rope 也量化）；<code>python/sglang/srt/mem_cache/memory_pool.py:4213</code>（<code>rope_storage_dtype = torch.bfloat16</code>）+ <code>:4166-4172</code>（<code>quantize_k_cache</code> 调用，混合 layout）；实测 .8 2026-08-25。</p>
 </blockquote>
 
 <h3>4. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue</h3>
