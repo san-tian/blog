@@ -109,49 +109,48 @@ decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只
 
 > 📐 **数据来源**：TP-0 DECODE trace 的 kernel 时序分析，`all_reduce_kernel` 事件的前驱 kernel 均为 `_vocab_parallel_embedding_kernel`。
 
-### 2. shared-expert append（3.2%）—— GLM + flashinfer_trtllm 双重 disable
+### 2. shared-expert append（3.2%）—— flashinfer_trtllm kernel 没实现
 
-fuse 表说"已有 `fused_moe_triton_kernels.py` 融合路径"，但 GLM-5.2 的模型代码（`glm4_moe.py:1195-1212`）对 shared-expert fusion 有硬性 disable 条件：
+fuse 表说"已有 `fused_moe_triton_kernels.py` 融合路径"，但那条路径只对 triton backend 有效。flashinfer_trtllm backend 的 MoE kernel **本身不支持 shared expert 融合**，代码里有一个硬 assert：
 
 ```python
-# glm4_moe.py:1195-1212
-if disable_reason is None and (
-    get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mori()
-):
-    disable_reason = "GLM-4.5 cannot use shared experts fusion under deepep expert parallelism."
-elif self.quant_config and self.quant_config.get_name() == "w4afp8":
-    disable_reason = "GLM-4.5 W4AFP8 uses different quant method for routed/shared experts."
-
-if disable_reason is not None:
-    declare_load_time_override(..., {"disable_shared_experts_fusion": True})
+# moe_runner/flashinfer_trtllm.py:1194
+assert (
+    runner_config.num_fused_shared_experts == 0
+), "Fused shared experts are not supported for flashinfer trtllm moe"
 ```
 
-flashinfer_trtllm backend 启动时还会额外自动设 disable（启动日志：`FlashInfer TRTLLM MoE is enabled. --disable-shared-experts-fusion is automatically set.`）。
+所以 sglang 在启用 flashinfer_trtllm 时会**预先**把 `disable_shared_experts_fusion=True`（`arg_groups/overrides.py:2027`，日志 `FlashInfer TRTLLM MoE is enabled. --disable-shared-experts-fusion is automatically set.`），避免走到那个 assert 崩溃。
 
-**为什么不能融合**：两层 disable 叠加。要开它只能把 `--moe-runner-backend` 换回 `triton`，但 triton + allreduce fusion + `--enable-fused-moe-sum-all-reduce` 实测只有 603 tok/s（比当前 793 慢 24%）——得不偿失。
+> 注：GLM 模型层（`glm4_moe.py:1183-1212`）也有一套 shared-expert disable 条件，但在 B200（sm100）+ TP8（无 EP）+ fp8_w8a8（非 w4afp8）下，这些条件**都不命中**——真正挡路的是 flashinfer_trtllm 那个 assert，不是 GLM 模型层。
 
-> 📐 **数据来源**：`python/sglang/srt/models/glm4_moe.py:1195-1212`、启动日志。
+**为什么不能融合**：这是 flashinfer 预编译闭源 kernel 的能力缺失（没实现），不是配置冲突。要开它只能把 `--moe-runner-backend` 换回 `triton`（triton 的 fused_moe 支持共享专家融合），但 triton + allreduce fusion + `--enable-fused-moe-sum-all-reduce` 实测只有 603 tok/s（比当前 793 慢 24%）——得不偿失。
 
-### 3. QK RoPE + KV cache write（4.6%）—— KV dtype 不满足
+> 📐 **数据来源**：`python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py:1194-1195`（assert）、`python/sglang/srt/arg_groups/overrides.py:2027`（预 disable）、`python/sglang/srt/models/glm4_moe.py:1183-1212`（GLM 层条件，B200 下不命中）。
 
-fuse 表说"已有 `attention/utils.py` 融合路径"，但它的启用函数 `enable_fused_set_kv_buffer`（`utils.py:281`）有硬性条件：
+### 3. QK RoPE + KV cache write（4.6%）—— kernel 实现了 fp8，但启用 gate 没放行
+
+fuse 表说"已有 `attention/utils.py` 融合路径"。底层 triton kernel（`fused_qk_rope_reshape_and_cache`）**其实实现了 fp8 路径**——kernel 里有 `HAVE_K_SCALE` 分支做 fp8 量化写入（`rope_cache.py:340-372`：`k_scale = tl.load(k_scale_ptr)`、`k_scale_rcprl = 1 / k_scale`、`k_pe = k_pe * k_scale_rcprl`）。
+
+但上层的启用 gate `enable_fused_set_kv_buffer`（`utils.py:281`）在 CUDA 上只放行 bf16：
 
 ```python
-# models/utils.py:290
+# models/utils.py:290（CUDA 分支）
 return (
     _is_cuda
-    and pool.dtype == torch.bfloat16      # ← 要求 bf16 KV cache
+    and pool.dtype == torch.bfloat16      # ← 只放行 bf16，fp8 没开放
     and not isinstance(pool, SWAKVPool)
     and not is_prefill_context_parallel_enabled()
     and getattr(forward_batch, "dcp_kv_mask", None) is None
 )
+# HIP 分支支持 bf16/fp16/fp8，CUDA 分支只写了 bf16
 ```
 
-GLM-5.2 serve 用 `--kv-cache-dtype fp8_e4m3`（fp8 KV cache），**`pool.dtype` 是 fp8 不是 bf16，条件不满足，融合不启用**。
+GLM-5.2 serve 用 `--kv-cache-dtype fp8_e4m3`，`pool.dtype` 是 fp8，gate 不放行，融合不启用。
 
-**为什么不能融合**：要开它只能把 KV cache 换回 bf16——但 fp8 KV cache 是 GLM-5.2 在 B200 上省显存的关键（让 max-total-tokens 能到 5000000），换回 bf16 会 OOM 或大幅降容量。
+**为什么不能融合**：这不是 kernel 没实现（kernel 有 fp8 路径），而是**启用 gate 保守没开放 CUDA+fp8**（可能没验证过）。理论上可以改这个 gate 让 fp8 也走融合路径，但属于改 sglang 源码，不是改 flag——且 fp8 KV cache 的融合正确性需要验证，不是简单打开。
 
-> 📐 **数据来源**：`python/sglang/srt/models/utils.py:281-300`、serve 参数 `--kv-cache-dtype fp8_e4m3`。
+> 📐 **数据来源**：`python/sglang/srt/models/utils.py:281-300`（gate）、`python/sglang/kernels/ops/kvcache/rope_cache.py:340-372`（kernel 的 fp8 scaling 逻辑）、serve 参数 `--kv-cache-dtype fp8_e4m3`。
 
 ### 4. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue
 
