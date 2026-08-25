@@ -15,7 +15,7 @@
 | ② DeepGEMM 预编译 | ✅ 完成 | 冷机器首 serve 省 10-20min JIT |
 | ③ MoE down 投影 TMA | ✅ 量化 | **down 投影开 TMA 快 ~8-16%**（bs=16）|
 
-**核心发现（修正了中途的误判）**：`Config file not found` 回退到的是**旧版 triton 3.5.1 的 tuned config**，它不是最优的——对当前 triton 3.6.0，重新 tune 出的 config **比 3.5.1 快 3-8%**；且 down 投影原本"reusing up without TMA"，开 TMA 后**再快 8-16%**。合计 MoE kernel 约 **12% 提升**。
+**核心发现（含端到端实测修正）**：`Config file not found` 回退到的是**旧版 triton 3.5.1 的 tuned config**。kernel 级 micro-benchmark 显示重新 tune 的 config 快 3-8%、down 开 TMA 快 8-16%（MoE kernel 合计 ~12%）；**但端到端实测（tokens/sec）证明这 12% 不成立**——tuned config 端到端吞吐 0~-10%（略慢或无差别）。**最终结论：保留官方 3.5.1 fallback，不要用重新 tune 的 config。**（详见 §7）
 
 ---
 
@@ -33,6 +33,39 @@ sglang 的 `fused_moe_triton` 内核，对不同 shape（`E`=expert 数、`N`=�
 - 这些 config 放在镜像内：`/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/`
 - 若某个 shape 缺 config，启动日志会打 `Config file not found ... Fallback to triton 3.5.1 ... Performance might be sub-optimal`。
 - "补充 tune" = 跑官方 benchmark 脚本，把缺的 shape 的最优 config 找出来写进 config 目录。
+
+---
+
+## 1b. 调优里的「batch」和「调什么」
+
+### 「batch」（config 里的 M）指什么
+
+不是「并发请求数」，而是**当前一次 MoE 前向里处理的 token 数**：
+
+```
+[num_tokens, hidden] × [hidden, intermediate] → [num_tokens, intermediate]
+        ↑ M（token 维）
+```
+
+- **decode**：每个正在生成的请求每步吐 1 个 token → M ≈ 当前并发请求数
+- **prefill**：整段 prompt 一起算 → M ≈ chunked prefill 大小
+
+`--max-running-requests` / `--cuda-graph-max-bs-decode` 只是「M 允许到多大」的上限；config 里的 M 才是 kernel 实际看到的 token 数，两者相关但不是一回事。
+
+### tune 调的是什么：6 个 tiling 参数
+
+| 参数 | 控制什么 |
+|---|---|
+| `BLOCK_SIZE_M` | 一个 thread-block 处理多少 token（M 维块大小）|
+| `BLOCK_SIZE_N` | 输出特征维（intermediate/hidden）块大小 |
+| `BLOCK_SIZE_K` | 输入特征维（K）块大小 |
+| `GROUP_SIZE_M` | 多少个 M 块共用一份权重 tile（L2 缓存复用）|
+| `num_warps` | 每 block 用多少 warp（并行度）|
+| `num_stages` | 软件流水线深度（预取下一块、掩盖访存延迟）|
+
+triton 是 JIT 的：**不同 tile 参数 → 编译出不同 CUDA kernel → 不同共享内存/寄存器压力/访存模式 → 不同性能**。tune 就是把 1280 种组合都编译+跑一遍，选每个 M 下最快的那组。
+
+**为什么 M 不同最优参数就不同**：M 小（token 少）块切小（M=16）避免 padding 浪费；M 大块切大（M=64）更好合并访存；N/K 切法、流水线深度都要跟着 M 在「共享内存够不够」和「并行够不够」之间重新平衡。
 
 ---
 
@@ -232,21 +265,33 @@ docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
 
 ---
 
-## 7. 收益总结
+## 7. 收益总结（端到端实测版）
 
-| 项 | 收益 | 说明 |
+### kernel 级（micro-benchmark，仅供参考）
+
+| 项 | kernel 级 | 说明 |
 |---|---|---|
-| MoE up 投影（tuned 3.6.0 vs 3.5.1）| **+3~8%** | 13/14 batch 的 config 不同 |
-| MoE down 投影（开 TMA）| **+8~16%** | 日志"reusing without TMA"处 |
-| **MoE kernel 合计（bs=16）**| **~+12%** | 122.5→107.7 us |
-| DeepGEMM 预编译 | ✅ 跑通 | 冷机器省 10-20min JIT |
+| MoE up 投影（tuned vs 3.5.1）| +3~8% | 合成随机张量测的，不反映真实负载 |
+| MoE down 投影（开 TMA）| +8~16% | 同上 |
+| MoE kernel 合计 | ~12% | t0+t1 = 122.5→107.7 us |
 
-**落地方法**：把 `/root/tune_out/E=257,N=256,...json`（tuned up）和生成的 `_down` config 拷回镜像 `configs/triton_3_6_0/`（或挂载），重启 serve 即生效。
+### 端到端（真实 serving 吞吐，tokens/sec）❌ 不成立
 
-### ✅ 已落地（2026-08-25 收尾）
+| 并发 | fallback 3.5.1 | tuned 3.6.0+TMA | 差异 |
+|---|---|---|---|
+| 4 | 193.8 | 187.7 | -3.1% |
+| 8 | 326.3 | 323.0 | -1.0% |
+| 16 | 565.4 | 559.7 | -1.0% |
+| 32 | 1011.6 | 904.1 | **-10.6%** |
 
-- up 投影 tuned config + down 投影 `USE_TMA:true` config 已生成到 `.13:/root/tuned_moe_configs/`
-- serving 脚本加挂载 `-v /root/tuned_moe_configs:/sgl-workspace/.../configs/triton_3_6_0`，已重启
-- 重启后 `Config file not found` 行数 = **0**，冒烟 `1+1=` → `2` 正常
+**结论**：kernel 级 ~12% 是 micro-benchmark 假象（合成张量 + 分开的 up/down kernel，非真实 fused kernel + 真实路由）。端到端实测 tuned config **无收益甚至略慢**。
 
-**修正说明**：本报告中途曾误判"bs≤16 = 0 收益"——根因是主脚本 benchmark 回退到工具内置默认值而非 3.5.1 fallback。最终用 sep 脚本 `--configs` 直接对比两个 config 得出上面的真实收益。
+### 最终决策
+
+**保留官方 3.5.1 fallback，不使用重新 tune 的 config。**（`.13` 的 tuned config 挂载已移除，serving 已回退 fallback）
+
+唯一保留价值的：**DeepGEMM 预编译**（冷机器省 10-20min JIT，与 config 无关）。
+
+---
+
+**教训**：micro-benchmark 的 kernel 加速 ≠ 端到端加速，必须端到端实测才算数。本次调优的最大产出是这个方法论结论，而非性能收益。
