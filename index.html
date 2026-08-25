@@ -103,6 +103,19 @@
   <h1>san-tian 的技术 blog</h1>
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
+  <a class="post" href="sglang-moe-kernel-tuning.html">
+    <div class="title">sglang MoE 内核调优：triton config 收益量化（~12%）</div>
+    <div class="desc">对 GLM-5.2 step111 FP8 在 B200 上做 fused_moe_triton 内核调优的完整实录：定位缺失 config、跑 autotune、量化收益。结论：重新 tune 出的 config 比 fallback 3.5.1 快 3-8%，down 投影开 TMA 再快 ~16%，合计 MoE kernel 约 12% 提升。含复现命令、学习要点与踩坑。</div>
+    <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
+      <span class="tag">sglang</span>
+      <span class="tag">MoE</span>
+      <span class="tag">triton</span>
+      <span class="tag">autotune</span>
+      <span class="tag">B200</span>
+    </div>
+  </a>
+
   <a class="post" href="why-prefill-cp-breaks-standalone-decode.html">
     <div class="title">为什么 prefill 的 CP 优化，不能带到单机 decode？</div>
     <div class="desc">sglang 里 <code>--enable-prefill-cp</code> 与 <code>--enable-dsa-prefill-cp-layersplit</code> 是两个 prefill 专属的并行优化。在单机一体（prefill+decode 同进程）部署下它们会把 decode 搞坏——前者让输出退化重复、后者让输出变成随机 token。讲清两类不同问题：一个“decode 端没接上”，一个“语义上容不下 decode”。</div>

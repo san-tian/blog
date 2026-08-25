@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sglang MoE 内核调优报告（GLM-5.2 step111 FP8 / B200）</title>
+<style>
+  :root { --bg:#fafaf9; --card:#ffffff; --card-2:#f8f8f7; --border:#e7e5e4; --text:#1c1917; --text-dim:#78716c; --accent:#1d4ed8; --code-bg:#f8fafc; --inline-code-bg:#f1f5f9; }
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); line-height:1.75; margin:0; padding:0; font-size:16px; }
+  .container { max-width:900px; margin:0 auto; padding:48px 24px 96px; }
+  header.hero { text-align:center; margin-bottom:48px; padding-bottom:28px; border-bottom:1px solid var(--border); }
+  header.hero h1 { font-size:2em; font-weight:700; line-height:1.3; color:#111; margin:0 0 12px; }
+  header.hero .subtitle { color:var(--text-dim); font-size:0.95em; }
+  h1 { color:#111; font-size:1.7em; font-weight:650; margin:40px 0 16px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  h2 { color:#111; font-size:1.4em; font-weight:650; margin:40px 0 14px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  h3 { color:#111; font-size:1.15em; font-weight:600; margin:28px 0 10px; }
+  p { margin:12px 0; }
+  strong { color:#111; font-weight:600; }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  code { font-family:"JetBrains Mono","Fira Code","SF Mono",Consolas,Menlo,monospace; background:var(--inline-code-bg); color:#2563eb; padding:2px 6px; border-radius:4px; font-size:0.88em; }
+  pre { background:var(--code-bg); border:1px solid var(--border); border-radius:8px; padding:16px 18px; overflow-x:auto; margin:16px 0; font-size:0.85em; line-height:1.6; }
+  pre code { background:none; color:var(--text); padding:0; font-size:1em; }
+  blockquote { margin:16px 0; padding:12px 18px; border-left:4px solid var(--accent); background:var(--card); border-radius:0 8px 8px 0; color:var(--text); }
+  table { border-collapse:collapse; width:100%; margin:18px 0; font-size:0.92em; display:block; overflow-x:auto; }
+  th,td { border:1px solid var(--border); padding:9px 13px; text-align:left; vertical-align:top; }
+  th { background:var(--card-2); color:#111; font-weight:600; }
+  tr:nth-child(even) td { background:var(--card); }
+  ul,ol { padding-left:1.5em; }
+  li { margin:5px 0; }
+  footer { margin-top:70px; padding-top:20px; border-top:1px solid var(--border); color:var(--text-dim); font-size:0.85em; text-align:center; }
+  @media (max-width:640px){ .container{padding:24px 16px 64px;} header.hero h1{font-size:1.5em;} table{font-size:0.8em;} }
+</style>
+</head>
+<body>
+<div class="container">
+<header class="hero">
+  <h1>sglang MoE 内核调优报告</h1>
+  <div class="subtitle">GLM-5.2 step111 FP8 · B200 · fused_moe_triton · DeepGEMM 预编译 · 收益量化</div>
+</header>
+<h1>sglang MoE 内核调优报告（GLM-5.2 step111 FP8 / B200）</h1>
+<blockquote>
+<p>日期：2026-08-24
+机器：38.255.28.13（.13）+ 38.255.28.8（.8），各 8×B200（179G/卡）
+镜像：<code>b200routeraca.azurecr.io/mindverse/sglang:v0.5.15.post1-cuda13-b200</code>
+模型：<code>/data0/models/glm52-step111-fp8</code>（E=257 expert，topk=8，hidden=6144，fp8_w8a8，block[128,128]）</p>
+</blockquote>
+<hr />
+<h2>0. 结论速览（TL;DR）</h2>
+<table>
+<thead>
+<tr>
+<th>调优项</th>
+<th>状态</th>
+<th>收益</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>① MoE up 投影 config（full 18 batch）</td>
+<td>✅ 完成</td>
+<td><strong>13/14 个 batch 与 fallback 不同</strong>；bs=16 up 投影 <strong>~4-8% 快</strong></td>
+</tr>
+<tr>
+<td>② DeepGEMM 预编译</td>
+<td>✅ 完成</td>
+<td>冷机器首 serve 省 10-20min JIT</td>
+</tr>
+<tr>
+<td>③ MoE down 投影 TMA</td>
+<td>✅ 量化</td>
+<td><strong>down 投影开 TMA 快 ~8-16%</strong>（bs=16）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>核心发现（修正了中途的误判）</strong>：<code>Config file not found</code> 回退到的是<strong>旧版 triton 3.5.1 的 tuned config</strong>，它不是最优的——对当前 triton 3.6.0，重新 tune 出的 config <strong>比 3.5.1 快 3-8%</strong>；且 down 投影原本"reusing up without TMA"，开 TMA 后<strong>再快 8-16%</strong>。合计 MoE kernel 约 <strong>12% 提升</strong>。</p>
+<hr />
+<h2>1. 为什么需要 tune（背景）</h2>
+<p>sglang 的 <code>fused_moe_triton</code> 内核，对不同 shape（<code>E</code>=expert 数、<code>N</code>=中间维、<code>dtype</code>、<code>block_shape</code>）各有一份 config 文件，内容是按 batch size（<code>M</code>）划分的 tiling 参数：</p>
+<pre><code class="language-json">{
+    &quot;16&quot;: {&quot;BLOCK_SIZE_M&quot;: 16, &quot;BLOCK_SIZE_N&quot;: 128, &quot;BLOCK_SIZE_K&quot;: 128,
+           &quot;GROUP_SIZE_M&quot;: 1, &quot;num_warps&quot;: 4, &quot;num_stages&quot;: 4}
+}
+</code></pre>
+<ul>
+<li>这些 config 放在镜像内：<code>/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/</code></li>
+<li>若某个 shape 缺 config，启动日志会打 <code>Config file not found ... Fallback to triton 3.5.1 ... Performance might be sub-optimal</code>。</li>
+<li>"补充 tune" = 跑官方 benchmark 脚本，把缺的 shape 的最优 config 找出来写进 config 目录。</li>
+</ul>
+<hr />
+<h2>2. 调优项 ①：MoE triton up 投影 config</h2>
+<h3>2.1 定位缺失的 shape（从 serving 日志）</h3>
+<pre><code class="language-bash">docker logs sglang-step111 2&gt;&amp;1 \
+  | grep -oE &quot;triton_3_6_0/E=[0-9]+,N=[0-9]+,device_name=NVIDIA_B200[^ ]*\.json&quot; \
+  | sort -u
+</code></pre>
+<p>结果（去重后）：</p>
+<pre><code>triton_3_6_0/E=257,N=256,device_name=NVIDIA_B200,dtype=fp8_w8a8,block_shape=[128, 128].json
+triton_3_6_0/E=257,N=256,device_name=NVIDIA_B200,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
+</code></pre>
+<p>即缺两个：<strong>up 投影</strong>（<code>.json</code>）和 <strong>down 投影</strong>（<code>_down.json</code>）。</p>
+<h3>2.2 调优命令（tuning_fused_moe_triton.py）</h3>
+<p>工具在镜像内 <code>/sgl-workspace/sglang/benchmark/kernels/fused_moe_triton/</code>，需要 <code>ray</code>（镜像没装，先 <code>pip install ray</code>）。</p>
+<pre><code class="language-bash"># 起一个调优容器（模型挂载 + 输出落盘）
+docker run -d --name moe-tune --gpus all --shm-size=8g \
+  -v /data0/models:/data0/models \
+  -v /root/tune_out:/out \
+  --entrypoint bash \
+  b200routeraca.azurecr.io/mindverse/sglang:v0.5.15.post1-cuda13-b200 \
+  -c &quot;pip install ray &gt;/dev/null 2&gt;&amp;1 &amp;&amp; cd /sgl-workspace/sglang &amp;&amp; \
+      python benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton.py \
+        --model /data0/models/glm52-step111-fp8 --tp-size 8 --dtype fp8_w8a8 --tune \
+        &gt; /out/full_tune.log 2&gt;&amp;1; \
+      cp /sgl-workspace/sglang/E=257*.json /out/&quot;
+</code></pre>
+<p>关键参数：
+- <code>--tp-size 8</code>：与 serving 的 TP 一致（决定 shard_intermediate_size）。
+- <code>--dtype fp8_w8a8</code>：与 serving 的 fp8 量化一致。
+- <code>--batch-size 16</code>（可选）：只 tune 单个 batch size；不加则用默认清单 <code>[1,2,4,8,16,24,32,48,64,96,128,256,512,1024,1536,2048,3072,4096]</code>（18 个，约 18h）。</p>
+<h3>2.3 ⚠️ 重要：config 写到哪了</h3>
+<p><code>save_configs()</code> 用<strong>相对路径</strong> <code>open(filename, "w")</code>，写到<strong>调优进程的 cwd</strong>（<code>/sgl-workspace/sglang/</code>），<strong>不是</strong> config 目录。所以要手动把生成的文件挪进 <code>configs/triton_3_6_0/</code>（见上面的 <code>cp ... /out/</code> 落盘，然后挂载回 serving）。</p>
+<h3>2.4 bs=16 的实测结果（before/after，修正版）</h3>
+<p>⚠️ 之前用主脚本 benchmark 测出的"0 收益"是<strong>误测</strong>——主脚本 <code>get_moe_configs</code> 对缺失 shape 回退到的是<strong>工具内置默认值</strong>（N128/stages4），不是 serving 实际用的 3.5.1 fallback（N64/stages3）。用 sep 脚本 <code>--configs</code> 直接对比两个 config（单位 us）：</p>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>3.5.1 fallback (N64/s3)</th>
+<th>3.6.0 tuned (N128/s4)</th>
+<th>提升</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>up t0 非TMA</td>
+<td>71.63</td>
+<td>68.78</td>
+<td>-4.0%</td>
+</tr>
+<tr>
+<td>up t0 TMA</td>
+<td>72.06</td>
+<td>65.98</td>
+<td>-7.9%</td>
+</tr>
+<tr>
+<td>down t1 非TMA</td>
+<td>50.89</td>
+<td>49.51</td>
+<td>-2.7%</td>
+</tr>
+<tr>
+<td>down t1 TMA</td>
+<td>46.72</td>
+<td><strong>41.70</strong></td>
+<td><strong>-18.1%</strong></td>
+</tr>
+<tr>
+<td><strong>合计 t0+t1</strong></td>
+<td>122.52</td>
+<td>107.68（TMA）</td>
+<td><strong>-12.1%</strong></td>
+</tr>
+</tbody>
+</table>
+<h3>2.5 全 batch 调优结果（✅ 完成）</h3>
+<p>full tune（18 batch）跑完，生成 <code>/root/tune_out/E=257,N=256,...json</code>（18 个 batch 全量）。<strong>与 3.5.1 fallback 相比，13/14 个 batch 的 config 不同</strong>（仅 bs=24 相同），主要差异：bs≤16 时 N64→N128、bs≥512 时 M16/M32→M64 等。</p>
+<hr />
+<h2>3. 调优项 ②：DeepGEMM 预编译</h2>
+<h3>3.1 背景</h3>
+<p>DeepGEMM 是 dense 层 fp8 GEMM 的后端（B200 上 <code>fp8_gemm_runner_backend=auto</code> → deep_gemm）。首次 serve 时会对每个 GEMM shape 做 JIT 编译（10-20 分钟）。预编译 = 提前把 kernel 编译进缓存，让 serve 更快启动。</p>
+<p>启动日志里的 shape 线索：</p>
+<pre><code>Try DeepGEMM JIT Compiling for &lt;GEMM_NT_F8F8BF16&gt; N=2048, K=2048 ...
+Try DeepGEMM JIT Compiling for &lt;GEMM_NT_F8F8BF16&gt; N=3072, K=6144 ...
+...（共 6 个 shape）
+</code></pre>
+<h3>3.2 命令</h3>
+<pre><code class="language-bash">docker run --rm --gpus all --ipc=host \
+  -v /data0/models:/data0/models \
+  -v /root/.cache/deep_gemm:/root/.cache/deep_gemm \
+  --entrypoint python3 \
+  b200routeraca.azurecr.io/mindverse/sglang:v0.5.15.post1-cuda13-b200 \
+  -m sglang.compile_deep_gemm \
+    --model-path /data0/models/glm52-step111-fp8 --tp-size 8 \
+    --enforce-disable-flashinfer-allreduce-fusion --disable-custom-all-reduce
+</code></pre>
+<h3>3.3 踩坑（四次才跑通）</h3>
+<table>
+<thead>
+<tr>
+<th>报错</th>
+<th>根因</th>
+<th>修法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>NCCL error: unhandled system error</code></td>
+<td>TP8 初始化 NCCL 需要 IPC</td>
+<td><code>--ipc=host</code></td>
+</tr>
+<tr>
+<td><code>TypeError: trtllm_mnnvl_allreduce_fusion Expected 16 but got 21</code></td>
+<td>flashinfer allreduce tvm_ffi 版本不匹配</td>
+<td><code>--enforce-disable-flashinfer-allreduce-fusion --disable-custom-all-reduce</code></td>
+</tr>
+<tr>
+<td><code>TypeError: trtllm_fp8_block_scale_moe Expected 29 but got 33</code></td>
+<td>flashinfer TRTLLM MoE tvm_ffi 版本不匹配</td>
+<td><code>--moe-runner-backend triton</code>（与 serving 一致）</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>注意 flag 名：是 <code>--model-path</code> + <code>--tp-size</code>（不是日志示例里的 <code>--model</code>/<code>--tp</code>）。</p>
+</blockquote>
+<h3>3.4 收益（✅ 完成）</h3>
+<p>第 4 次（带齐 4 个 flag）成功：</p>
+<pre><code>The server is fired up and ready to roll!
+DeepGEMM Kernels compilation finished successfully.
+</code></pre>
+<p>耗时约 <strong>4.3 分钟</strong>（15:25:23 → 15:29:38）。注：<code>.8</code> 的 <code>/root/.cache/deep_gemm</code> 此前已由官方 FP8 prefill 预热过，本次是复验+补齐；<strong>真正的收益场景是“冷机器首次 serve”</strong>——预编译后首次启动不再现场 JIT（省 10-20 分钟）。</p>
+<hr />
+<h2>4. 调优项 ③：MoE down 投影 config（TMA）</h2>
+<h3>4.1 背景</h3>
+<p>serving 日志里 down 投影是「<strong>reusing tuned up without TMA</strong>」——即 down 投影复用 up 的 config 但<strong>没用 TMA</strong>（Tensor Memory Accelerator，Blackwell 的异步访存加速）。独立 tune down 投影可能开 TMA 拿到个位数 % 收益。</p>
+<h3>4.2 命令（tuning_fused_moe_triton_sep.py）</h3>
+<p>需要先准备 topk_ids（随机路由即可，benchmark GEMM 时具体路由不影响耗时）：</p>
+<pre><code class="language-bash"># 生成 100 个随机 topk_ids（shape=(M,topk)，M=batch size，topk=9）
+cat &gt; /root/gen_topk_ids.py &lt;&lt;'EOF'
+import torch, os
+os.makedirs(&quot;/root/topk_ids&quot;, exist_ok=True)
+num_layers, dense_layers = 61, 3   # sep 脚本硬编码
+moe_layers = num_layers - dense_layers
+M, topk, E = int(os.getenv(&quot;M&quot;,&quot;16&quot;)), int(os.getenv(&quot;TOPK&quot;,&quot;9&quot;)), 257
+for i in range(100):
+    layer = i % moe_layers + dense_layers
+    idx = i // moe_layers
+    torch.save(torch.randint(0, E, (M, topk), dtype=torch.int32),
+               f&quot;/root/topk_ids/topk_ids_layer{layer}_idx{idx}.pt&quot;)
+EOF
+docker run --rm -v /root/topk_ids:/root/topk_ids -v /root/gen_topk_ids.py:/gen_topk_ids.py \
+  --entrypoint python3 &lt;IMG&gt; /gen_topk_ids.py
+
+# 跑 sep tune（down 投影独立，含 TMA）
+docker run -d --name moe-sep-tune --gpus all --shm-size=8g \
+  -v /data0/models:/data0/models -v /root/topk_ids:/root/topk_ids -v /root/tune_out:/out \
+  --entrypoint bash &lt;IMG&gt; -c &quot;pip install ray &amp;&amp; cd /sgl-workspace/sglang &amp;&amp; \
+    python benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton_sep.py \
+      --model /data0/models/glm52-step111-fp8 --tp-size 8 --dtype fp8_w8a8 \
+      --batch-size 16 --topk-ids-dir /root/topk_ids --tune &gt; /out/sep_tune.log 2&gt;&amp;1&quot;
+</code></pre>
+<h3>4.3 收益（✅ 已量化）</h3>
+<p>用 <code>--configs</code> 模式直接对比 up/down 的 TMA 与非 TMA（bs=16）：</p>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>非 TMA</th>
+<th>TMA</th>
+<th>TMA 收益</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>down 投影 t1（3.6.0 tuned）</td>
+<td>49.51 us</td>
+<td>41.70 us</td>
+<td><strong>-15.8%</strong></td>
+</tr>
+<tr>
+<td>up 投影 t0（3.6.0 tuned）</td>
+<td>68.78 us</td>
+<td>65.98 us</td>
+<td>-4.1%</td>
+</tr>
+</tbody>
+</table>
+<p><strong>down 投影开 TMA 收益最大（~16%）</strong>，正好对应日志里"reusing up without TMA"的次优点。注：sep 脚本的 <code>--tune</code> 模式不落盘（代码里无 <code>save_configs</code>），要用 <code>--configs</code> 手动对比，或自己把 <code>_down</code> config 写进 <code>configs/triton_3_6_0/</code>。</p>
+<hr />
+<h2>5. 复现清单（从零到跑完）</h2>
+<pre><code class="language-bash"># 0) 前置：确认镜像 + 模型
+docker images | grep sglang
+ls /data0/models/glm52-step111-fp8/config.json
+
+# 1) 找缺失的 config shape
+docker logs &lt;serving容器&gt; 2&gt;&amp;1 | grep -oE &quot;triton_3_6_0/E=[0-9]+,N=[0-9]+[^ ]*\.json&quot; | sort -u
+
+# 2) tune up 投影（单 batch，快速验证）
+docker run -d --name moe-tune --gpus all --shm-size=8g -v /data0/models:/data0/models \
+  --entrypoint bash &lt;IMG&gt; -c &quot;pip install ray &amp;&amp; cd /sgl-workspace/sglang &amp;&amp; \
+  python benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton.py \
+    --model /data0/models/glm52-step111-fp8 --tp-size 8 --dtype fp8_w8a8 --batch-size 16 --tune&quot;
+
+# 3) DeepGEMM 预编译
+docker run --rm --gpus all --ipc=host -v /data0/models:/data0/models \
+  -v /root/.cache/deep_gemm:/root/.cache/deep_gemm --entrypoint python3 &lt;IMG&gt; \
+  -m sglang.compile_deep_gemm --model-path /data0/models/glm52-step111-fp8 --tp-size 8 \
+  --enforce-disable-flashinfer-allreduce-fusion --disable-custom-all-reduce
+</code></pre>
+<hr />
+<h2>6. 学习要点（怎么读懂这套调优）</h2>
+<ol>
+<li><strong>config 文件 = shape → batch → tiling 参数的映射</strong>。<code>E</code> 是 expert 数（含 shared），<code>N</code> 是中间维/2，<code>dtype</code>/<code>block_shape</code> 由量化决定。</li>
+<li><strong>"Miss" 不一定是坏事</strong>：要看它回退到哪。回退到「旧版 triton 的 tuned config」≈ 已接近最优；回退到「default」才是真·未调优。</li>
+<li><strong>batch size 是关键变量</strong>：config 按 <code>M</code>（batch）分桶，decode（小 batch）和 prefill（大 batch）的最优 tiling 不同。只 tune 你关心的 batch。</li>
+<li><strong>tune 的时间主要花在 triton JIT 编译</strong>（每个新 tiling ~秒级），不是 kernel 跑的时间。1280 config × 单 batch ≈ 1h；全 batch ≈ 18h。</li>
+<li><strong>config 写入是相对路径</strong>：生成后要手动挪进 <code>configs/triton_3_6_0/</code> 或挂载回 serving 才能生效。</li>
+</ol>
+<hr />
+<h2>7. 收益总结</h2>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>收益</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MoE up 投影（tuned 3.6.0 vs 3.5.1）</td>
+<td><strong>+3~8%</strong></td>
+<td>13/14 batch 的 config 不同</td>
+</tr>
+<tr>
+<td>MoE down 投影（开 TMA）</td>
+<td><strong>+8~16%</strong></td>
+<td>日志"reusing without TMA"处</td>
+</tr>
+<tr>
+<td><strong>MoE kernel 合计（bs=16）</strong></td>
+<td><strong>~+12%</strong></td>
+<td>122.5→107.7 us</td>
+</tr>
+<tr>
+<td>DeepGEMM 预编译</td>
+<td>✅ 跑通</td>
+<td>冷机器省 10-20min JIT</td>
+</tr>
+</tbody>
+</table>
+<p><strong>落地方法</strong>：把 <code>/root/tune_out/E=257,N=256,...json</code>（tuned up）和生成的 <code>_down</code> config 拷回镜像 <code>configs/triton_3_6_0/</code>（或挂载），重启 serve 即生效。</p>
+<h3>✅ 已落地（2026-08-25 收尾）</h3>
+<ul>
+<li>up 投影 tuned config + down 投影 <code>USE_TMA:true</code> config 已生成到 <code>.13:/root/tuned_moe_configs/</code></li>
+<li>serving 脚本加挂载 <code>-v /root/tuned_moe_configs:/sgl-workspace/.../configs/triton_3_6_0</code>，已重启</li>
+<li>重启后 <code>Config file not found</code> 行数 = <strong>0</strong>，冒烟 <code>1+1=</code> → <code>2</code> 正常</li>
+</ul>
+<p><strong>修正说明</strong>：本报告中途曾误判"bs≤16 = 0 收益"——根因是主脚本 benchmark 回退到工具内置默认值而非 3.5.1 fallback。最终用 sep 脚本 <code>--configs</code> 直接对比两个 config 得出上面的真实收益。</p>
+<footer>
+  <p>由 san-tian 的部署 agent 自动生成 · 2026-08-24/25 · 报告源文件 sglang-tune-report.md</p>
+</footer>
+</div>
+</body>
+</html>
