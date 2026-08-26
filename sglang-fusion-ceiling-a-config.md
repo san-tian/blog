@@ -39,7 +39,7 @@ python3 -m sglang.launch_server \
 
 > ⚠️ **公平对照修正**：上表是 step111（.8 机器）数据。在 .13 用 coding-venti 同机器公平复测（见文末「最终复测」）：无损版相对 A 配置（无 patch）只 +0.9%，step111 的「无损 +8%」未复现。无损版的价值是精度（字节级一致），不是速度。
 
-## 排除法：为什么只剩这四个
+## 排除法：66 个 kernel 排到只剩一个能做
 
 decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只剩 4 个既是 allreduce/quant/prep 类（有融合对象）、又未生效的。
 
@@ -165,15 +165,11 @@ for n, d in c.most_common():
 | `fmhaSm100fKernel`（2 变体） | 3.2% | flashinfer fused MLA attention，已是最优 kernel |
 | `rmsnormRMSNormKernel` | 1.8% | 单独 RMSNorm（非 residual+norm 融合那部分），量级小 |
 
-### 排除后的剩余
+### 排除后的剩余：4 个里 3 个做不了
 
-66 个 kernel 排完五类，只剩 4 个"可融合且未生效"——就是开头表里的那四个。
+66 个 kernel 排完五类，只剩 4 个"可融合且未生效"。这 4 个里，3 个被硬性条件挡住做不了（下面 1/2/3 逐一展开），唯一能做的是 QK RoPE + KV cache write（下一章）。
 
 > 📐 **数据来源**：TP-0 DECODE trace（`glm-glm-fusion-TP-0-DECODE.trace.json.gz`，.8 容器 2026-08-25，采样 5 步）。「66 个 kernel / 110.7ms / 占比≥1% 的 23 个」由上文的「④ 数 kernel」脚本统计得到；`analyze_llm_torch_profile.py`（`.claude/skills/llm-torch-profiler-analysis/scripts/`）输出的是聚合三表，不含 distinct kernel 计数。
-
-## 四个融合点：三个做不了，一个突破了
-
-> 四个里三个做不了（1/2/4 分别被「不是融合对象」「闭源 kernel 没实现」「闭源不开放 epilogue」挡住），唯一能突破的是 **QK RoPE + KV cache write**（第 3 个）——写新 kernel 无损实现，是本文的工作重心。
 
 ### 1. embedding allreduce（27.8%）—— 不是融合对象
 
@@ -229,11 +225,19 @@ assert (
 
 > 📐 **数据来源**：`python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py:1194-1195`（assert）、`python/sglang/srt/arg_groups/overrides.py:2027`（预 disable）、`python/sglang/srt/models/glm4_moe.py:1183-1212`（GLM 层条件，B200 下不命中）。
 
-### 3. QK RoPE + KV cache write（4.6%）—— 写新 kernel 无损实现
+### 3. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue
+
+`per_token_group_quant_8bit_v2_kernel`（3.7%）是 MoE 专家 GEMM 前的 FP8 per-token 量化。catalog 里 vLLM 有 `fuse_act_quant` pass（SiLU+mul + FP8 quant 融合），sglang 的 triton fused_moe 里有类似 epilogue，但 **flashinfer_trtllm backend 的 MoE kernel 是闭源预编译 kernel，不开放 epilogue 定制**——没法把量化融进去。
+
+**为什么不能融合**：要开它只能把 `--moe-runner-backend` 换回 `triton`（triton 的 `fused_moe` 有融合 epilogue），但 triton 实测只有 603 tok/s（比当前 793 慢 24%），同样得不偿失。
+
+> 📐 **数据来源**：profile 里 `per_token_group_quant` 的 python location（`fused_moe.py:232`，走 triton path 才有融合 epilogue）。
+
+## 能融合的：QK RoPE + KV cache write（工作重心）
 
 fuse 表说「已有 `attention/utils.py` 融合路径」，但那条路径（`fused_qk_rope_reshape_and_cache`）用单个 k_scale 把整个 key（含 rope）统一量化成 fp8，而 DSA 要求 nope 做 per-block 量化、rope 保留 bf16——直接用它会把 rope 位置编码量化掉、损精度。所以要自己写一个 DSA 专用的融合 kernel，量化逻辑和 DSA 原路径逐行等价。
 
-#### 背景知识：MLA 的 K 和 fp8 KV cache
+### 背景知识：MLA 的 K 和 fp8 KV cache
 
 GLM-5.2 用 MLA（Multi-head Latent Attention），每个 token 的 K 分成两部分：
 
@@ -255,7 +259,7 @@ fp8 KV cache 是把 bf16 的 K 压缩成 fp8 存（省一半显存）。但 fp8 
 
 fp8 和 bf16 在同一个 buffer 里混排，这就是"混合 dtype buffer"。
 
-#### patch 前：两步（量化 + 写入）
+### patch 前：两步（量化 + 写入）
 
 原版（A 配置，无 patch）在 `_write_mla_kv_buffer` 的 `dsa_kv_cache_store_fp8` 分支里，把「量化」和「写入」拆成两步：
 
@@ -267,7 +271,7 @@ set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)   
 
 两步的代价：两次 kernel launch + 一次中间 tensor 的显存分配与读写往返 + 一次按 loc 的 scatter 拷贝。
 
-#### patch 后：一步（新 kernel 融合）
+### patch 后：一步（新 kernel 融合）
 
 写了一个 DSA 专用的融合 triton kernel（`fused_dsa_quant_store`），在一个 kernel 里同时完成：
 
@@ -292,14 +296,6 @@ set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)   
 patch 后省掉了两步里的「中间 tensor 分配 + 一次 launch + scatter 拷贝」——这是速度增益的来源（公平对照下增益很小，见文末「最终复测」）。
 
 > 📐 **数据来源**：standalone test（`fused_dsa_quant_store.py` test_correctness，128 token，字节级对比）；端到端 `bench_serving`（8192 input + 1024 output, 64 prompts, concurrency 16），.8 容器 2026-08-25。新 kernel 代码 `python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py`，接入点 `python/sglang/srt/mem_cache/memory_pool.py:3951`（`_write_mla_kv_buffer` 的 `dsa_kv_cache_store_fp8` 分支）。
-
-### 4. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue
-
-`per_token_group_quant_8bit_v2_kernel`（3.7%）是 MoE 专家 GEMM 前的 FP8 per-token 量化。catalog 里 vLLM 有 `fuse_act_quant` pass（SiLU+mul + FP8 quant 融合），sglang 的 triton fused_moe 里有类似 epilogue，但 **flashinfer_trtllm backend 的 MoE kernel 是闭源预编译 kernel，不开放 epilogue 定制**——没法把量化融进去。
-
-**为什么不能融合**：要开它只能把 `--moe-runner-backend` 换回 `triton`（triton 的 `fused_moe` 有融合 epilogue），但 triton 实测只有 603 tok/s（比当前 793 慢 24%），同样得不偿失。
-
-> 📐 **数据来源**：profile 里 `per_token_group_quant` 的 python location（`fused_moe.py:232`，走 triton path 才有融合 epilogue）。
 
 ## 总结
 
@@ -496,7 +492,7 @@ kernel 用 2D grid：`(num_tokens, 5)`——第 0 维是 token，第 1 维是 5 
 
 这也是为什么融合收益出现在 decode（小 batch、launch 开销占比高），而不是 prefill（大 batch、计算密集、launch 开销被摊薄）。
 
-四个融合点里，三个被硬性条件挡住（闭源 kernel / 不是融合对象），但 QK RoPE + KV cache write 通过写一个 DSA 专用的融合 triton kernel 突破了——无损实现 per-block fp8 量化 + bf16 rope 保留 + 混合 layout paged 写入，端到端从 793 提升到 **856 tok/s（+8%）**，总收益从 baseline 的 **+63%**。
+排除剩下的 4 个融合点里，3 个被硬性条件挡住（闭源 kernel / 不是融合对象），唯一能做的是 QK RoPE + KV cache write——写一个 DSA 专用的融合 triton kernel 无损突破，端到端从 793 提升到 **856 tok/s（+8%）**，总收益从 baseline 的 **+63%**。
 
 完整性能链条：baseline 524 → allreduce fusion + flashinfer_trtllm 793（+51%）→ 新 kernel 无损 QK RoPE 融合 **856（+63%）**。
 
