@@ -172,7 +172,9 @@ for n, d in c.most_common():
 
 > 📐 **数据来源**：TP-0 DECODE trace（`glm-glm-fusion-TP-0-DECODE.trace.json.gz`，.8 容器 2026-08-25，采样 5 步）。「66 个 kernel / 110.7ms / 占比≥1% 的 23 个」由上文的「④ 数 kernel」脚本统计得到；`analyze_llm_torch_profile.py`（`.claude/skills/llm-torch-profiler-analysis/scripts/`）输出的是聚合三表，不含 distinct kernel 计数。
 
-## 四个融合点为什么做不了
+## 四个融合点：三个做不了，一个突破了
+
+> 四个里三个做不了（1/2/4 分别被「不是融合对象」「闭源 kernel 没实现」「闭源不开放 epilogue」挡住），唯一能突破的是 **QK RoPE + KV cache write**（第 3 个）——写新 kernel 无损实现，是本文的工作重心。
 
 ### 1. embedding allreduce（27.8%）—— 不是融合对象
 

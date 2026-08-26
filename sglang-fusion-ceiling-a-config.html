@@ -183,7 +183,11 @@ for n, d in c.most_common():
 <p>📐 <strong>数据来源</strong>：TP-0 DECODE trace（<code>glm-glm-fusion-TP-0-DECODE.trace.json.gz</code>，.8 容器 2026-08-25，采样 5 步）。「66 个 kernel / 110.7ms / 占比≥1% 的 23 个」由上文的「④ 数 kernel」脚本统计得到；<code>analyze_llm_torch_profile.py</code>（<code>.claude/skills/llm-torch-profiler-analysis/scripts/</code>）输出的是聚合三表，不含 distinct kernel 计数。</p>
 </blockquote>
 
-<h2>四个融合点为什么做不了</h2>
+<h2>四个融合点：三个做不了，一个突破了</h2>
+
+<blockquote>
+<p>四个里三个做不了（1/2/4 分别被「不是融合对象」「闭源 kernel 没实现」「闭源不开放 epilogue」挡住），唯一能突破的是 <strong>QK RoPE + KV cache write</strong>（第 3 个）——写新 kernel 无损实现，是本文的工作重心。</p>
+</blockquote>
 
 <h3>1. embedding allreduce（27.8%）—— 不是融合对象</h3>
 <p>这是 decode 头号瓶颈。通过 trace 时序分析定位，它的前驱 kernel 是 <code>_vocab_parallel_embedding_kernel</code>：</p>
