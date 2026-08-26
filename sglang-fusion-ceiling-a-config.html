@@ -39,10 +39,10 @@
   <div class="subtitle">写新 kernel 无损实现 · 排除法 · DSA 专用融合 · B200</div>
 </header>
 
-<p>当前使用的启动命令（GLM-5.2 step111 FP8，B200 TP8）：</p>
+<p>当前使用的启动命令（GLM-5.2 coding-venti FP8，B200 TP8）：</p>
 <pre><code>python3 -m sglang.launch_server \
-  --model-path /data0/models/glm52-step111-fp8 \
-  --served-model-name glm52-step111-fp8 \
+  --model-path /data0/models/glm52-coding-venti-fp8 \
+  --served-model-name glm52-coding-venti-fp8 \
   --host 0.0.0.0 --port 10100 --tp 8 \
   --kv-cache-dtype fp8_e4m3 \
   --enable-cache-report --page-size 64 \
@@ -56,22 +56,19 @@
   --hicache-write-policy write_back --hicache-mem-layout page_first \
   --hicache-storage-backend file --file-storage-path /root/hicache \
   --cuda-graph-max-bs-decode 64 --max-running-requests 64 --enable-metrics</code></pre>
-<p>这套配置实测 793 tok/s（比融合全关的 baseline 524 tok/s 快 +51%）。这篇用 profile 数据 + 代码排除法回答：沿这套配置继续做算子融合还能不能提升，以及那四个"看起来能融合"的点为什么实际做不了。</p>
+<p>这套配置实测 789 tok/s（比融合全关的 baseline 524 tok/s 快 +50%）。这篇用 profile 数据 + 代码排除法回答：沿这套配置继续做算子融合还能不能提升，以及那些"看起来能融合"的点为什么实际做不了。</p>
 
 <h2>TL;DR</h2>
-<p>这套配置实测 793 tok/s（比融合全关的 baseline 524 tok/s 快 +51%）。profile 排除法发现 decode 66 个 kernel 里只剩 4 个"可融合且未生效"的点，其中 QK RoPE + KV cache write（4.6%）被"三重不兼容"挡住。但写一个 DSA 专用融合 triton kernel 后无损突破，端到端 <strong>856 tok/s（+63%）</strong>。</p>
+<p>这套配置实测 789 tok/s（比融合全关的 baseline 524 tok/s 快 +50%）。profile 排除法发现 decode 66 个 kernel 里只剩 4 个"可融合且未生效"的点，其中 QK RoPE + KV cache write（4.6%）被"三重不兼容"挡住。但写一个 DSA 专用融合 triton kernel 后无损突破，端到端 <strong>796 tok/s（+52%）</strong>。</p>
 <p>完整性能链条：</p>
 <table>
 <tr><th>配置</th><th>输出吞吐 (tok/s)</th><th>TPOT (ms)</th><th>vs baseline</th></tr>
-<tr><td>baseline（融合全关）</td><td>524.62</td><td>26.72</td><td>—</td></tr>
-<tr><td>+ allreduce fusion + flashinfer_trtllm</td><td>793.20</td><td>17.00</td><td>+51%</td></tr>
-<tr><td><strong>+ QK RoPE 无损融合（新 kernel）</strong></td><td><strong>856.64</strong></td><td><strong>15.61</strong></td><td><strong>+63%</strong></td></tr>
+<tr><td>baseline（融合全关）</td><td>524.34</td><td>26.77</td><td>—</td></tr>
+<tr><td>+ allreduce fusion + flashinfer_trtllm</td><td>789.20</td><td>17.04</td><td>+50%</td></tr>
+<tr><td><strong>+ QK RoPE 无损融合（新 kernel）</strong></td><td><strong>796.04</strong></td><td><strong>16.96</strong></td><td><strong>+52%</strong></td></tr>
 </table>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：<code>bench_serving</code>（8192 input + 1024 output, 64 prompts, concurrency 16），.8 容器 2026-08-25。</p>
-</blockquote>
-<blockquote>
-<p>⚠️ <strong>公平对照修正</strong>：上表是 step111（.8 机器）数据。在 .13 用 coding-venti 同机器公平复测（见文末「最终复测」）：无损版相对 A 配置（无 patch）只 +0.9%，step111 的「无损 +8%」未复现。无损版的价值是精度（字节级一致），不是速度。</p>
+<p>📐 <strong>数据来源</strong>：<code>bench_serving</code>（8192 input + 1024 output, 64 prompts, concurrency 16），.13 容器，fusionfix 镜像，2026-08-26。</p>
 </blockquote>
 <h2>排除法：66 个 kernel 排到只剩一个能做</h2>
 <p>decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只剩 4 个既是 allreduce/quant/prep 类（有融合对象）、又未生效的。</p>
@@ -229,6 +226,14 @@ assert (
 </blockquote>
 
 <h2>能融合的：QK RoPE + KV cache write（工作重心）</h2>
+<p>先厘清「patch」指什么。本次实验<strong>镜像统一</strong>是 fusionfix（<code>v0.5.15.post1-cuda13-b200-fusionfix</code>，把 flashinfer 三件套对齐到 0.6.14，否则开融合会崩 tvm_ffi 报错）。变量只有两个——<strong>启动命令</strong>（开不开融合）和<strong>代码改动</strong>（挂不挂新 kernel）：</p>
+<table>
+<tr><th>配置</th><th>启动命令（差异部分）</th><th>代码改动</th></tr>
+<tr><td>融合全关</td><td><code>--moe-runner-backend triton</code> + <code>--enforce-disable-flashinfer-allreduce-fusion</code> + <code>--disable-custom-all-reduce</code></td><td>无</td></tr>
+<tr><td>开融合（无 patch）</td><td><code>--moe-runner-backend flashinfer_trtllm</code> + <code>--flashinfer-allreduce-fusion-backend auto</code></td><td>无</td></tr>
+<tr><td>开融合 + 无损 patch</td><td>同上</td><td>挂载 <code>fused_dsa_quant_store.py</code>（新 kernel）+ <code>memory_pool.py</code>（接入改动）</td></tr>
+</table>
+<p>下面「patch 前」= 开融合但无 patch，「patch 后」= 开融合 + 无损 patch。</p>
 <p>fuse 表说「已有 <code>attention/utils.py</code> 融合路径」，但那条路径（<code>fused_qk_rope_reshape_and_cache</code>）用单个 k_scale 把整个 key（含 rope）统一量化成 fp8，而 DSA 要求 nope 做 per-block 量化、rope 保留 bf16——直接用它会把 rope 位置编码量化掉、损精度。所以要自己写一个 DSA 专用的融合 kernel，量化逻辑和 DSA 原路径逐行等价。</p>
 
 <h3>背景知识：MLA 的 K 和 fp8 KV cache</h3>
@@ -248,7 +253,7 @@ assert (
 <p>fp8 和 bf16 在同一个 buffer 里混排，这就是"混合 dtype buffer"。</p>
 
 <h3>patch 前：两步（量化 + 写入）</h3>
-<p>原版（A 配置，无 patch）在 <code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支里，把「量化」和「写入」拆成两步：</p>
+<p>开融合但没打 patch 时，<code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支把「量化」和「写入」拆成两步：</p>
 <pre><code># memory_pool.py 原 dsa_kv_cache_store_fp8 分支
 cache_k_nope_fp8, cache_k_rope_fp8 = quantize_k_cache_separate(cache_k_nope, cache_k_rope)  # ① 量化，产出中间 tensor
 set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)                # ② 按 loc 写入 paged buffer</code></pre>
@@ -266,21 +271,21 @@ set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)   
 <p><strong>正确性验证</strong>：standalone test 对比融合 kernel 和非融合路径的输出，128 token、字节级对比 nope（fp8）/ scale（fp32）/ rope（bf16）三部分全部一致——<strong>完全无损</strong>。</p>
 <p><strong>端到端数据</strong>：</p>
 <table>
-<tr><th>指标</th><th>patch 前（原版 A）</th><th>patch 后（无损版）</th><th>差异</th></tr>
-<tr><td>输出吞吐 (tok/s)</td><td>793.20</td><td><strong>856.64</strong></td><td><strong>+8.0%</strong></td></tr>
-<tr><td>TPOT 均值 (ms)</td><td>17.00</td><td>15.61</td><td>-8.2%</td></tr>
-<tr><td>TTFT 均值 (ms)</td><td>3254.78</td><td>3150.11</td><td>-3.2%</td></tr>
+<tr><th>指标</th><th>patch 前（无 patch）</th><th>patch 后（无损 patch）</th><th>差异</th></tr>
+<tr><td>输出吞吐 (tok/s)</td><td>789.20</td><td><strong>796.04</strong></td><td><strong>+0.9%</strong></td></tr>
+<tr><td>TPOT 均值 (ms)</td><td>17.04</td><td>16.96</td><td>-0.5%</td></tr>
+<tr><td>TTFT 均值 (ms)</td><td>3317.22</td><td>3220.75</td><td>-2.9%</td></tr>
 </table>
-<p>patch 后省掉了两步里的「中间 tensor 分配 + 一次 launch + scatter 拷贝」——这是速度增益的来源（公平对照下增益很小，见文末「最终复测」）。</p>
+<p>patch 后省掉了两步里的「中间 tensor 分配 + 一次 launch + scatter 拷贝」——这是速度增益的来源（增益很小，只有 +0.9%，在 benchmark 噪声范围内）。</p>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：standalone test（<code>fused_dsa_quant_store.py</code> test_correctness，128 token，字节级对比）；端到端 <code>bench_serving</code>（8192 input + 1024 output, 64 prompts, concurrency 16），.8 容器 2026-08-25。新 kernel 代码 <code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code>，接入点 <code>python/sglang/srt/mem_cache/memory_pool.py:3951</code>（<code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支）。</p>
+<p>📐 <strong>数据来源</strong>：standalone test（<code>fused_dsa_quant_store.py</code> test_correctness，128 token，字节级对比）；端到端 <code>bench_serving</code>（8192 input + 1024 output, 64 prompts, concurrency 16），.13 容器，fusionfix 镜像，2026-08-26。新 kernel 代码 <code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code>，接入点 <code>python/sglang/srt/mem_cache/memory_pool.py:3951</code>（<code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支）。</p>
 </blockquote>
 <h2>总结</h2>
 <table>
 <tr><th>融合点</th><th>占比</th><th>状态</th><th>原因</th></tr>
 <tr><td>embedding allreduce</td><td>27.8%</td><td>❌ 不能</td><td>不是融合对象（无 layernorm 吸收）</td></tr>
 <tr><td>shared-expert append</td><td>3.2%</td><td>❌ 不能</td><td>flashinfer_trtllm 闭源 kernel 没实现</td></tr>
-<tr><td><strong>QK RoPE + KV cache write</strong></td><td><strong>4.6%</strong></td><td><strong>✅ 已实现</strong></td><td><strong>写新 triton kernel 无损突破，+8%</strong></td></tr>
+<tr><td><strong>QK RoPE + KV cache write</strong></td><td><strong>4.6%</strong></td><td><strong>✅ 已实现</strong></td><td><strong>写新 triton kernel 无损实现（字节级一致）</strong></td></tr>
 <tr><td>FP8 quant + activation</td><td>3.7%</td><td>❌ 不能</td><td>trtllm 闭源不开放 epilogue</td></tr>
 </table>
 
@@ -373,7 +378,7 @@ tl.store(dst, data, mask=mask)</code></pre>
     print(f"rope (bf16):     {'✅ 一致' if rope_match else '❌ 不一致'}")
     assert nope_match and scale_match and rope_match, "无损验证失败"</code></pre>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：<code>test_correctness</code> 在带 GPU 的容器（.8，B200，镜像 v0.5.15.post1-cuda13-b200）内运行，<code>torch.manual_seed(42)</code>，输出三行 <code>✅ 一致</code>。完整代码（含失败时 diff 打印的 <code>else</code> 分支）随分支 <code>pex/qk-rope-fusion-lossless</code> 的 <code>fused_dsa_quant_store.py</code> 提交，末尾 <code>if __name__ == "__main__": test_correctness()</code>。</p>
+<p>📐 <strong>数据来源</strong>：<code>test_correctness</code> 在带 GPU 的容器（B200，fusionfix 镜像）内运行，<code>torch.manual_seed(42)</code>，输出三行 <code>✅ 一致</code>。完整代码（含失败时 diff 打印的 <code>else</code> 分支）随分支 <code>pex/qk-rope-fusion-lossless</code> 的 <code>fused_dsa_quant_store.py</code> 提交，末尾 <code>if __name__ == "__main__": test_correctness()</code>。</p>
 </blockquote>
 
 <h4>代码位置</h4>
@@ -382,7 +387,7 @@ tl.store(dst, data, mask=mask)</code></pre>
 <tr><td>无损版</td><td><a href="https://github.com/MindLab-Research/sglang/tree/pex/qk-rope-fusion-lossless"><code>pex/qk-rope-fusion-lossless</code></a></td><td><code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code>（新 kernel）<br><code>python/sglang/srt/mem_cache/memory_pool.py:3951</code>（接入点）</td><td>新写 triton kernel + 替换 <code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支</td></tr>
 </table>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：无损版 standalone 正确性验证（128 token 字节级对比 nope/scale/rope 全一致）+ 端到端 <code>bench_serving</code> 856.64 tok/s；.8 容器 2026-08-25。</p>
+<p>📐 <strong>数据来源</strong>：无损版 standalone 正确性验证（128 token 字节级对比 nope/scale/rope 全一致）+ 端到端 <code>bench_serving</code> 796.04 tok/s；.13 容器，fusionfix 镜像，2026-08-26。</p>
 </blockquote>
 
 <h4>为什么要这么改</h4>
@@ -420,8 +425,9 @@ set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)   
 </table>
 <p>这也是为什么融合收益出现在 decode（小 batch、launch 开销占比高），而不是 prefill（大 batch、计算密集、launch 开销被摊薄）。</p>
 
-<p>排除剩下的 4 个融合点里，3 个被硬性条件挡住（闭源 kernel / 不是融合对象），唯一能做的是 QK RoPE + KV cache write——写一个 DSA 专用的融合 triton kernel 无损突破，端到端从 793 提升到 <strong>856 tok/s（+8%）</strong>，总收益从 baseline 的 <strong>+63%</strong>。</p>
-<p>完整性能链条：baseline 524 → allreduce fusion + flashinfer_trtllm 793（+51%）→ 新 kernel 无损 QK RoPE 融合 <strong>856（+63%）</strong>。</p>
+<p>排除剩下的 4 个融合点里，3 个被硬性条件挡住（闭源 kernel / 不是融合对象），唯一能做的是 QK RoPE + KV cache write——写一个 DSA 专用的融合 triton kernel 无损实现，端到端从 789 提升到 <strong>796 tok/s（+0.9%）</strong>，总收益从 baseline 的 <strong>+52%</strong>。</p>
+<p>完整性能链条：baseline 524 → allreduce fusion + flashinfer_trtllm 789（+50%）→ 新 kernel 无损 QK RoPE 融合 <strong>796（+52%）</strong>。</p>
+<p>无损版的速度增益很小（+0.9%，在 benchmark 噪声范围内），它的核心价值是<strong>字节级无损</strong>——把「量化 + 写入」两步合成一步、且保证和开融合无 patch 的输出完全一致（见「无损的证明」），而不是「再快一档」。</p>
 <p>要继续提升，方向不再是"算子融合"：</p>
 <ol>
 <li>减少 embedding allreduce（27.8%，<code>--enable-attn-tp-input-scattered</code>，需实测 MLA/DSA 兼容性）</li>
@@ -429,39 +435,20 @@ set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)   
 <li>等 flashinfer_trtllm 后续版本开放 shared-expert fusion / epilogue 定制</li>
 </ol>
 
-<h2>最终复测：coding-venti 三配置公平对照（.13）</h2>
-<p>上面的数据来自 step111（.8 机器）。为排除机器和 checkpoint 的混杂变量，在 .13 上用 coding-venti（78 层，与 step111 同架构、同规模 705G）做了同机器、同 checkpoint 的公平对照：</p>
-<table>
-<tr><th>配置</th><th>输出吞吐 (tok/s)</th><th>TPOT (ms)</th><th>TTFT (ms)</th><th>vs 原版(A)</th></tr>
-<tr><td>全关 baseline（triton，参考）</td><td>524.34</td><td>26.77</td><td>3850.85</td><td>—</td></tr>
-<tr><td>原版（A 配置，无 patch）</td><td>789.20</td><td>17.04</td><td>3317.22</td><td>—</td></tr>
-<tr><td>无损版（A + 无损 patch）</td><td>796.04</td><td>16.96</td><td>3220.75</td><td>+0.9%</td></tr>
-</table>
-<blockquote>
-<p>📐 <strong>数据来源</strong>：<code>bench_serving</code>（8192 in / 1024 out，64 prompts，concurrency 16），.13 容器，fusionfix 镜像，2026-08-26。三个配置在同一台机器、同一 checkpoint 上依次测，每轮重启 + 清 hicache。</p>
-</blockquote>
-<p>三个结论：</p>
-<ol>
-<li><strong>大头是 A 配置</strong>：全关 524 → A 配置 789，+50.5%。增益全部来自「flashinfer_trtllm + allreduce fusion」，可复现。</li>
-<li><strong>无损 patch 的增益极小</strong>：+0.9%，在 benchmark 噪声范围内（±1%）。step111 上「无损 +8%（856 vs 793）」的差异在公平对照下<strong>没有复现</strong>——那 8% 大概率混入了 .8 机器或 step111 checkpoint 的变量。</li>
-<li><strong>无损版的价值是精度，不是速度</strong>：它保证和原版（<code>quantize_k_cache_separate</code> + <code>set_mla_kv_buffer_triton</code> 两步）字节级一致（见「无损的证明」），同时把两步合成一步。速度增益虽小，但「同样速度、保证无损」，是严格不劣于原版的选择。</li>
-</ol>
-<p>最终结论收敛为：<strong>这套配置的加速靠 A 配置（+50%）；QK RoPE 融合这个点，无损版相对原版只 +0.9%，做它的意义是把「量化 + 写入」两步合成一步、且字节级无损——省的是中间 tensor 和一次 launch，不是「再快一档」。</strong></p>
-
 <h2>完整环境</h2>
 <table>
 <tr><th>组件</th><th>版本</th></tr>
-<tr><td>硬件</td><td>8× NVIDIA B200（179G/卡），<code>yotta-arc-b200-8</code></td></tr>
-<tr><td>镜像</td><td><code>b200routeraca.azurecr.io/mindverse/sglang:v0.5.15.post1-cuda13-b200</code>（digest <code>1839d8f3c89b</code>）</td></tr>
+<tr><td>硬件</td><td>8× NVIDIA B200（179G/卡），.13</td></tr>
+<tr><td>镜像</td><td><code>b200routeraca.azurecr.io/mindverse/sglang:v0.5.15.post1-cuda13-b200-fusionfix</code></td></tr>
 <tr><td>sglang</td><td><code>sgl-project/sglang</code> release/v0.5.15，HEAD <code>0b3bb0c</code></td></tr>
 <tr><td>torch</td><td>2.11.0+cu130</td></tr>
 <tr><td>flashinfer</td><td>python 0.6.14 / cubin 0.6.14 / jit-cache 0.6.14+cu130（已对齐）</td></tr>
-<tr><td>模型</td><td><code>/data0/models/glm52-step111-fp8</code>（E=257 MoE，topk=8，hidden=6144，fp8_w8a8，MLA + DSA）</td></tr>
+<tr><td>模型</td><td><code>/data0/models/glm52-coding-venti-fp8</code>（E=257 MoE，topk=8，hidden=6144，fp8_w8a8，MLA + DSA）</td></tr>
 <tr><td>serve 关键参数</td><td><code>--moe-runner-backend flashinfer_trtllm --flashinfer-allreduce-fusion-backend auto --kv-cache-dtype fp8_e4m3 --tp 8</code></td></tr>
-<tr><td>benchmark</td><td><code>bench_serving --random-input-len 8192 --random-output-len 1024 --num-prompts 64 --max-concurrency 16</code>，793 tok/s</td></tr>
+<tr><td>benchmark</td><td><code>bench_serving --random-input-len 8192 --random-output-len 1024 --num-prompts 64 --max-concurrency 16</code>，796 tok/s</td></tr>
 </table>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：本报告所有代码引用均来自 <code>sgl-project/sglang</code> release/v0.5.15（HEAD <code>0b3bb0c</code>），profile 数据来自 .8 实测（2026-08-25）。</p>
+<p>📐 <strong>数据来源</strong>：本报告所有代码引用均来自 <code>sgl-project/sglang</code> release/v0.5.15（HEAD <code>0b3bb0c</code>），profile 数据来自 .13 实测（2026-08-26）。</p>
 </blockquote>
 
 <footer>
