@@ -213,6 +213,39 @@ assert (
 <tr><td><strong>QK RoPE + KV cache write</strong></td><td><strong>4.6%</strong></td><td><strong>✅ 已实现</strong></td><td><strong>写新 triton kernel 无损突破，+8%</strong></td></tr>
 <tr><td>FP8 quant + activation</td><td>3.7%</td><td>❌ 不能</td><td>trtllm 闭源不开放 epilogue</td></tr>
 </table>
+
+<h3>QK RoPE 融合怎么实现的</h3>
+<p>有损版本和无损版本都实现了，区别在于量化逻辑是否和 DSA 专用路径等价。</p>
+
+<h4>有损版本（改 3 处 gate，803 tok/s，+1.2%）</h4>
+<p>改 3 处 sglang 源码，让现有融合 kernel（<code>fused_qk_rope_reshape_and_cache</code>）的 fp8 路径走通：</p>
+<table>
+<tr><th>改动</th><th>文件</th><th>内容</th></tr>
+<tr><td>gate 放行 fp8</td><td><code>python/sglang/srt/models/utils.py:294</code></td><td><code>enable_fused_set_kv_buffer</code> 的 CUDA 分支从 <code>pool.dtype == torch.bfloat16</code> 改成 <code>pool.dtype in (torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2)</code></td></tr>
+<tr><td>arg 构造处理 scale</td><td><code>python/sglang/srt/models/utils.py:316</code></td><td><code>create_fused_set_kv_buffer_arg</code> 的 CUDA 分支，当 <code>layer.k_scale is not None</code> 时返回 dict（参考 ROCm 分支），不再 assert scale is None</td></tr>
+<tr><td>fallback 路径去掉 <code>_is_hip</code></td><td><code>python/sglang/srt/layers/rotary_embedding/base.py:386</code></td><td><code>if fused_set_kv_buffer_arg is not None and _is_hip:</code> 改成 <code>if fused_set_kv_buffer_arg is not None:</code></td></tr>
+</table>
+<p><strong>为什么损精度</strong>：现有融合 kernel 用单个 <code>k_scale</code> 把整个 key（含 rope）统一量化成 fp8，而 DSA 专用路径对 nope 做 per-block 量化 + rope 保留 bf16。rope 被量化会损失位置编码精度。</p>
+
+<h4>无损版本（写新 triton kernel，856 tok/s，+8%）</h4>
+<p>写了一个 DSA 专用的融合 triton kernel（<code>fused_dsa_quant_store</code>），在一个 kernel 里同时完成三件事：</p>
+<ol>
+<li><strong>k_nope（512 维）per-block fp8 量化</strong>：按 128 维一组切 4 块，每块独立算 scale（<code>y_s = max(abs(y)) / FP8_MAX</code>），量化成 fp8——和 DSA 原来的 <code>quantize_k_cache_separate</code> 逻辑完全一致，保证无损。</li>
+<li><strong>k_rope（64 维）保留 bf16</strong>：直接拷贝，不量化——位置编码精度敏感，DSA 原来也是这么做的。</li>
+<li><strong>混合 dtype 写入 paged KV buffer</strong>：传 3 个 dtype 不同的指针（fp8 / fp32 / bf16），各指向同一 paged buffer 的不同字节偏移，绕过"一个 tensor 只能一种 dtype"的限制。</li>
+</ol>
+<p>替代原来的 <code>quantize_k_cache_separate()</code> + <code>set_mla_kv_buffer_triton()</code> 两步，消除中间 tensor 分配 + 额外 kernel launch。</p>
+
+<h4>代码位置</h4>
+<table>
+<tr><th>版本</th><th>文件</th><th>说明</th></tr>
+<tr><td>有损版</td><td><code>python/sglang/srt/models/utils.py</code>（gate + arg 构造）<br><code>python/sglang/srt/layers/rotary_embedding/base.py</code>（fallback 路径）</td><td>改 3 处现有代码，让 <code>fused_qk_rope_reshape_and_cache</code> 的 fp8 路径走通</td></tr>
+<tr><td>无损版</td><td><code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code>（新 kernel）<br><code>python/sglang/srt/mem_cache/memory_pool.py:3951</code>（接入点）</td><td>新写 triton kernel + 替换 <code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支</td></tr>
+</table>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：有损版实测 802.78 tok/s（改 3 处 gate）；无损版 standalone 正确性验证（128 token 字节级对比 nope/scale/rope 全一致）+ 端到端 <code>bench_serving</code> 856.64 tok/s；.8 容器 2026-08-25。</p>
+</blockquote>
+
 <p>四个融合点里，三个被硬性条件挡住（闭源 kernel / 不是融合对象），但 QK RoPE + KV cache write 通过写一个 DSA 专用的融合 triton kernel 突破了——无损实现 per-block fp8 量化 + bf16 rope 保留 + 混合 layout paged 写入，端到端从 793 提升到 <strong>856 tok/s（+8%）</strong>，总收益从 baseline 的 <strong>+63%</strong>。</p>
 <p>完整性能链条：baseline 524 → allreduce fusion + flashinfer_trtllm 793（+51%）→ 新 kernel 无损 QK RoPE 融合 <strong>856（+63%）</strong>。</p>
 <p>要继续提升，方向不再是"算子融合"：</p>
