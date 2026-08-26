@@ -39,7 +39,7 @@ python3 -m sglang.launch_server \
 
 ## 排除法：66 个 kernel 排到只剩一个能做
 
-decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只剩 4 个既是 allreduce/quant/prep 类（有融合对象）、又未生效的。
+decode 共 66 个 kernel，占比 ≥1% 的 23 个。按「为什么不能融合」归成 4 类，只剩 QK RoPE + KV cache write 一个能做（下一章）。
 
 ### 怎么 profile 出这张 kernel 表（可复现）
 
@@ -116,60 +116,34 @@ for n, d in c.most_common():
 - **按 `name[:70]` 分组，模板实例算不同 kernel**——`bmm_E4m3_..._t128x8x128u2` 和 `bmm_Bfloat16_...` 是同一 kernel 的不同模板实例，name 字符串不同就各算一个（不同实例 = 不同 CUDA kernel）。
 - **采样不是全量**——`num_steps=5` 只采了 5 步，`66` 是采样窗口内出现的 distinct kernel；采样步数或请求 pattern 变了，数字会变。
 
-### ① 已是融合 kernel（无需再融合）
+### 不能融合的 4 类原因
+
+**① 已是融合 kernel / 已是最优实现**（无需再动）
 
 | kernel | 占比 | 说明 |
 |---|---|---|
-| `oneshotAllreduceFusionKernel` | 3.6% | allreduce fusion 已开，这是融合后的产物 |
-| `rmsNormLamport` | 1.9% | allreduce + rmsnorm 融合的产物 |
-| `twoshotAllreduceKernel` | 1.7% | 同上 |
+| `oneshotAllreduceFusionKernel` / `rmsNormLamport` / `twoshotAllreduceKernel` | 3.6% / 1.9% / 1.7% | allreduce fusion 已开，融合后的产物 |
 | `fused_a_gemm`（2 变体） | 3.1% | MLA A 投影，名字带 fused |
 | `RopeQuantizeKernel` | 1.0% | RoPE + quant 融合 kernel |
-| `fused_*_indexer_*`（3 个） | 0.6% | DSA indexer 融合，已融合 |
+| `fused_*_indexer_*`（3 个） | 0.6% | DSA indexer 融合 |
+| `fmhaSm100fKernel`（2 变体） | 3.2% | flashinfer fused MLA attention，已是最优 |
+| `rmsnormRMSNormKernel` | 1.8% | 单独 RMSNorm，已是最优 |
 
-### ② GEMM 计算密集，不是融合范畴
+**② 不是融合对象**（没有可融合的相邻操作）
 
-融合是"把多个小 kernel 合并成一个"，省的是 launch + 访存往返。GEMM 本身是计算密集的大 kernel，没有"和谁融合"的对象。
+融合是"把多个小 kernel 合并成一个"，省的是 launch + 访存往返。两类没有可融合对象：
+
+GEMM——计算密集大 kernel，无相邻小 kernel 可合并：
 
 | kernel | 占比 | 说明 |
 |---|---|---|
-| `deep_gemm`（dense 层 fp8） | 11.7% | 计算密集，无相邻小 kernel 可合并 |
+| `deep_gemm`（dense 层 fp8） | 11.7% | 计算密集 |
 | `bmm_E4m3`（MoE 专家 GEMM，3 变体） | 16.9% | flashinfer trtllm MoE GEMM，已是单一大 kernel |
-| `nvjet`（lm_head GEMM，3 变体） | 3.1% | lm_head bf16 GEMM，计算密集 |
+| `nvjet`（lm_head GEMM，3 变体） | 3.1% | lm_head bf16 GEMM |
 | `cublasLt::splitKreduce` | 0.8% | GEMM 内部 splitK 归约 |
-| `deep_gemm::sm100_paged_mqa_logits` | 0.5% | DSA paged MQA logits，计算密集 |
+| `deep_gemm::sm100_paged_mqa_logits` | 0.5% | DSA paged MQA logits |
 
-### ③ flashinfer trtllm MoE 内部子 kernel，闭源无法单独动
-
-| kernel | 占比 | 说明 |
-|---|---|---|
-| `moe::finalize::finalizeKernel` | 2.2% | trtllm MoE 内部，闭源预编译 |
-| `moe::routing::routingIndicesDynBlockKernel` | 2.0% | trtllm MoE 内部 routing，闭源 |
-| `moe::activation::activationDeepSeekKernel` | 1.6% | trtllm MoE 内部 activation，闭源 |
-
-### ④ 太小的 elementwise / framework 开销
-
-| kernel | 占比 | 说明 |
-|---|---|---|
-| `vectorized_elementwise`（5 变体） | 5.8% | PyTorch 零碎 elementwise（compare/where/bitwise_and），单个 <2%，无明确融合对象 |
-| `set_mla_kv_buffer_kernel` | 0.5% | MLA KV cache 写入，太小 |
-| `cunn_SoftMaxForward` | 0.2% | 已融在 fmha kernel 里 |
-| `topk_small_batch_kernel` | 0.2% | 太小 |
-
-### ⑤ attention 主体已最优
-
-| kernel | 占比 | 说明 |
-|---|---|---|
-| `fmhaSm100fKernel`（2 变体） | 3.2% | flashinfer fused MLA attention，已是最优 kernel |
-| `rmsnormRMSNormKernel` | 1.8% | 单独 RMSNorm（非 residual+norm 融合那部分），量级小 |
-
-### 排除后的剩余：4 个里 3 个做不了
-
-66 个 kernel 排完五类，只剩 4 个"可融合且未生效"。这 4 个里，3 个被硬性条件挡住做不了（下面 1/2/3 逐一展开），唯一能做的是 QK RoPE + KV cache write（下一章）。
-
-> 📐 **数据来源**：TP-0 DECODE trace（`glm-glm-fusion-TP-0-DECODE.trace.json.gz`，.8 容器 2026-08-25，采样 5 步）。「66 个 kernel / 110.7ms / 占比≥1% 的 23 个」由上文的「④ 数 kernel」脚本统计得到；`analyze_llm_torch_profile.py`（`.claude/skills/llm-torch-profiler-analysis/scripts/`）输出的是聚合三表，不含 distinct kernel 计数。
-
-### 1. embedding allreduce（27.8%）—— 不是融合对象
+**embedding allreduce**（27.8%，decode 头号瓶颈）：
 
 这是 decode 头号瓶颈。通过 trace 时序分析定位，它的前驱 kernel 是 `_vocab_parallel_embedding_kernel`：
 
@@ -204,7 +178,20 @@ output_parallel = tensor_model_parallel_all_reduce(output_parallel)  # ② allre
 
 > 📐 **数据来源**：TP-0 DECODE trace 的 kernel 时序分析，`all_reduce_kernel` 事件的前驱 kernel 均为 `_vocab_parallel_embedding_kernel`。
 
-### 2. shared-expert append（3.2%）—— flashinfer_trtllm kernel 没实现
+
+**③ flashinfer_trtllm 闭源挡住**（换回 triton 慢 24%）
+
+这三个要融合，都得动 flashinfer_trtllm 的闭源预编译 kernel；而换回 `triton` 又慢 24%（603 vs 789），得不偿失。
+
+trtllm MoE 内部子 kernel（本来就在闭源 kernel 里，无法单独动）：
+
+| kernel | 占比 | 说明 |
+|---|---|---|
+| `moe::finalize::finalizeKernel` | 2.2% | trtllm MoE 内部，闭源预编译 |
+| `moe::routing::routingIndicesDynBlockKernel` | 2.0% | trtllm MoE 内部 routing |
+| `moe::activation::activationDeepSeekKernel` | 1.6% | trtllm MoE 内部 activation |
+
+**shared-expert append**（3.2%）：
 
 fuse 表说"已有 `fused_moe_triton_kernels.py` 融合路径"，但那条路径只对 triton backend 有效。flashinfer_trtllm backend 的 MoE kernel **本身不支持 shared expert 融合**，代码里有一个硬 assert：
 
@@ -223,13 +210,26 @@ assert (
 
 > 📐 **数据来源**：`python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py:1194-1195`（assert）、`python/sglang/srt/arg_groups/overrides.py:2027`（预 disable）、`python/sglang/srt/models/glm4_moe.py:1183-1212`（GLM 层条件，B200 下不命中）。
 
-### 3. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue
+
+**FP8 quant + activation**（3.7%）：
 
 `per_token_group_quant_8bit_v2_kernel`（3.7%）是 MoE 专家 GEMM 前的 FP8 per-token 量化。catalog 里 vLLM 有 `fuse_act_quant` pass（SiLU+mul + FP8 quant 融合），sglang 的 triton fused_moe 里有类似 epilogue，但 **flashinfer_trtllm backend 的 MoE kernel 是闭源预编译 kernel，不开放 epilogue 定制**——没法把量化融进去。
 
 **为什么不能融合**：要开它只能把 `--moe-runner-backend` 换回 `triton`（triton 的 `fused_moe` 有融合 epilogue），但 triton 实测只有 603 tok/s（比当前 793 慢 24%），同样得不偿失。
 
 > 📐 **数据来源**：profile 里 `per_token_group_quant` 的 python location（`fused_moe.py:232`，走 triton path 才有融合 epilogue）。
+**④ 占比太小不值得**（单个 <2%，无明确融合对象）
+
+| kernel | 占比 | 说明 |
+|---|---|---|
+| `vectorized_elementwise`（5 变体） | 5.8% | PyTorch 零碎 elementwise（compare/where/bitwise_and），单个 <2% |
+| `set_mla_kv_buffer_kernel` | 0.5% | MLA KV cache 写入，太小 |
+| `cunn_SoftMaxForward` | 0.2% | 已融在 fmha kernel 里 |
+| `topk_small_batch_kernel` | 0.2% | 太小 |
+
+> 📐 **数据来源**：TP-0 DECODE trace（`glm-glm-fusion-TP-0-DECODE.trace.json.gz`，.8 容器 2026-08-25，采样 5 步）。「66 个 kernel / 110.7ms / 占比≥1% 的 23 个」由上文的「④ 数 kernel」脚本统计得到；`analyze_llm_torch_profile.py`（`.claude/skills/llm-torch-profiler-analysis/scripts/`）输出的是聚合三表，不含 distinct kernel 计数。
+
+66 个 kernel 按这 4 类排除完，只剩 QK RoPE + KV cache write（4.6%）一个能做。
 
 ## 能融合的：QK RoPE + KV cache write（工作重心）
 

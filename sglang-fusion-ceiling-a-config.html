@@ -71,7 +71,7 @@
 <p>📐 <strong>数据来源</strong>：<code>bench_serving</code>（8192 input + 1024 output, 64 prompts, concurrency 16），.13 容器，fusionfix 镜像，2026-08-26。</p>
 </blockquote>
 <h2>排除法：66 个 kernel 排到只剩一个能做</h2>
-<p>decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只剩 4 个既是 allreduce/quant/prep 类（有融合对象）、又未生效的。</p>
+<p>decode 共 66 个 kernel，占比 ≥1% 的 23 个。按「为什么不能融合」归成 4 类，只剩 QK RoPE + KV cache write 一个能做（下一章）。</p>
 
 <h3>怎么 profile 出这张 kernel 表（可复现）</h3>
 <p>「66 个 kernel」来自 torch profiler 采样 + 一段内联统计。完整流程四步：</p>
@@ -127,59 +127,29 @@ for n, d in c.most_common():
 <li><strong>采样不是全量</strong>——<code>num_steps=5</code> 只采了 5 步，<code>66</code> 是采样窗口内出现的 distinct kernel；采样步数或请求 pattern 变了，数字会变。</li>
 </ul>
 
-<h3>① 已是融合 kernel（无需再融合）</h3>
+<h3>不能融合的 4 类原因</h3>
+<p><strong>① 已是融合 kernel / 已是最优实现</strong>（无需再动）</p>
 <table>
 <tr><th>kernel</th><th>占比</th><th>说明</th></tr>
-<tr><td><code>oneshotAllreduceFusionKernel</code></td><td>3.6%</td><td>allreduce fusion 已开，这是融合后的产物</td></tr>
-<tr><td><code>rmsNormLamport</code></td><td>1.9%</td><td>allreduce + rmsnorm 融合的产物</td></tr>
-<tr><td><code>twoshotAllreduceKernel</code></td><td>1.7%</td><td>同上</td></tr>
+<tr><td><code>oneshotAllreduceFusionKernel</code> / <code>rmsNormLamport</code> / <code>twoshotAllreduceKernel</code></td><td>3.6% / 1.9% / 1.7%</td><td>allreduce fusion 已开，融合后的产物</td></tr>
 <tr><td><code>fused_a_gemm</code>（2 变体）</td><td>3.1%</td><td>MLA A 投影，名字带 fused</td></tr>
 <tr><td><code>RopeQuantizeKernel</code></td><td>1.0%</td><td>RoPE + quant 融合 kernel</td></tr>
-<tr><td><code>fused_*_indexer_*</code>（3 个）</td><td>0.6%</td><td>DSA indexer 融合，已融合</td></tr>
+<tr><td><code>fused_*_indexer_*</code>（3 个）</td><td>0.6%</td><td>DSA indexer 融合</td></tr>
+<tr><td><code>fmhaSm100fKernel</code>（2 变体）</td><td>3.2%</td><td>flashinfer fused MLA attention，已是最优</td></tr>
+<tr><td><code>rmsnormRMSNormKernel</code></td><td>1.8%</td><td>单独 RMSNorm，已是最优</td></tr>
 </table>
-
-<h3>② GEMM 计算密集，不是融合范畴</h3>
-<p>融合是"把多个小 kernel 合并成一个"，省的是 launch + 访存往返。GEMM 本身是计算密集的大 kernel，没有"和谁融合"的对象。</p>
+<p><strong>② 不是融合对象</strong>（没有可融合的相邻操作）</p>
+<p>融合是"把多个小 kernel 合并成一个"，省的是 launch + 访存往返。两类没有可融合对象：</p>
+<p>GEMM——计算密集大 kernel，无相邻小 kernel 可合并：</p>
 <table>
 <tr><th>kernel</th><th>占比</th><th>说明</th></tr>
-<tr><td><code>deep_gemm</code>（dense 层 fp8）</td><td>11.7%</td><td>计算密集，无相邻小 kernel 可合并</td></tr>
+<tr><td><code>deep_gemm</code>（dense 层 fp8）</td><td>11.7%</td><td>计算密集</td></tr>
 <tr><td><code>bmm_E4m3</code>（MoE 专家 GEMM，3 变体）</td><td>16.9%</td><td>flashinfer trtllm MoE GEMM，已是单一大 kernel</td></tr>
-<tr><td><code>nvjet</code>（lm_head GEMM，3 变体）</td><td>3.1%</td><td>lm_head bf16 GEMM，计算密集</td></tr>
+<tr><td><code>nvjet</code>（lm_head GEMM，3 变体）</td><td>3.1%</td><td>lm_head bf16 GEMM</td></tr>
 <tr><td><code>cublasLt::splitKreduce</code></td><td>0.8%</td><td>GEMM 内部 splitK 归约</td></tr>
-<tr><td><code>deep_gemm::sm100_paged_mqa_logits</code></td><td>0.5%</td><td>DSA paged MQA logits，计算密集</td></tr>
+<tr><td><code>deep_gemm::sm100_paged_mqa_logits</code></td><td>0.5%</td><td>DSA paged MQA logits</td></tr>
 </table>
-
-<h3>③ flashinfer trtllm MoE 内部子 kernel，闭源无法单独动</h3>
-<table>
-<tr><th>kernel</th><th>占比</th><th>说明</th></tr>
-<tr><td><code>moe::finalize::finalizeKernel</code></td><td>2.2%</td><td>trtllm MoE 内部，闭源预编译</td></tr>
-<tr><td><code>moe::routing::routingIndicesDynBlockKernel</code></td><td>2.0%</td><td>trtllm MoE 内部 routing，闭源</td></tr>
-<tr><td><code>moe::activation::activationDeepSeekKernel</code></td><td>1.6%</td><td>trtllm MoE 内部 activation，闭源</td></tr>
-</table>
-
-<h3>④ 太小的 elementwise / framework 开销</h3>
-<table>
-<tr><th>kernel</th><th>占比</th><th>说明</th></tr>
-<tr><td><code>vectorized_elementwise</code>（5 变体）</td><td>5.8%</td><td>PyTorch 零碎 elementwise（compare/where/bitwise_and），单个 &lt;2%，无明确融合对象</td></tr>
-<tr><td><code>set_mla_kv_buffer_kernel</code></td><td>0.5%</td><td>MLA KV cache 写入，太小</td></tr>
-<tr><td><code>cunn_SoftMaxForward</code></td><td>0.2%</td><td>已融在 fmha kernel 里</td></tr>
-<tr><td><code>topk_small_batch_kernel</code></td><td>0.2%</td><td>太小</td></tr>
-</table>
-
-<h3>⑤ attention 主体已最优</h3>
-<table>
-<tr><th>kernel</th><th>占比</th><th>说明</th></tr>
-<tr><td><code>fmhaSm100fKernel</code>（2 变体）</td><td>3.2%</td><td>flashinfer fused MLA attention，已是最优 kernel</td></tr>
-<tr><td><code>rmsnormRMSNormKernel</code></td><td>1.8%</td><td>单独 RMSNorm（非 residual+norm 融合那部分），量级小</td></tr>
-</table>
-
-<h3>排除后的剩余：4 个里 3 个做不了</h3>
-<p>66 个 kernel 排完五类，只剩 4 个"可融合且未生效"。这 4 个里，3 个被硬性条件挡住做不了（下面 1/2/3 逐一展开），唯一能做的是 QK RoPE + KV cache write（下一章）。</p>
-<blockquote>
-<p>📐 <strong>数据来源</strong>：TP-0 DECODE trace（<code>glm-glm-fusion-TP-0-DECODE.trace.json.gz</code>，.8 容器 2026-08-25，采样 5 步）。「66 个 kernel / 110.7ms / 占比≥1% 的 23 个」由上文的「④ 数 kernel」脚本统计得到；<code>analyze_llm_torch_profile.py</code>（<code>.claude/skills/llm-torch-profiler-analysis/scripts/</code>）输出的是聚合三表，不含 distinct kernel 计数。</p>
-</blockquote>
-
-<h3>1. embedding allreduce（27.8%）—— 不是融合对象</h3>
+<p><strong>embedding allreduce</strong>（27.8%，decode 头号瓶颈）：</p>
 <p>这是 decode 头号瓶颈。通过 trace 时序分析定位，它的前驱 kernel 是 <code>_vocab_parallel_embedding_kernel</code>：</p>
 <table>
 <tr><th>次数</th><th>dur</th><th>前驱 kernel</th></tr>
@@ -205,7 +175,17 @@ output_parallel = tensor_model_parallel_all_reduce(output_parallel)  # ② allre
 <p>📐 <strong>数据来源</strong>：TP-0 DECODE trace 的 kernel 时序分析，<code>all_reduce_kernel</code> 事件的前驱 kernel 均为 <code>_vocab_parallel_embedding_kernel</code>。</p>
 </blockquote>
 
-<h3>2. shared-expert append（3.2%）—— flashinfer_trtllm kernel 没实现</h3>
+
+<p><strong>③ flashinfer_trtllm 闭源挡住</strong>（换回 triton 慢 24%）</p>
+<p>这三个要融合，都得动 flashinfer_trtllm 的闭源预编译 kernel；而换回 <code>triton</code> 又慢 24%（603 vs 789），得不偿失。</p>
+<p>trtllm MoE 内部子 kernel（本来就在闭源 kernel 里，无法单独动）：</p>
+<table>
+<tr><th>kernel</th><th>占比</th><th>说明</th></tr>
+<tr><td><code>moe::finalize::finalizeKernel</code></td><td>2.2%</td><td>trtllm MoE 内部，闭源预编译</td></tr>
+<tr><td><code>moe::routing::routingIndicesDynBlockKernel</code></td><td>2.0%</td><td>trtllm MoE 内部 routing</td></tr>
+<tr><td><code>moe::activation::activationDeepSeekKernel</code></td><td>1.6%</td><td>trtllm MoE 内部 activation</td></tr>
+</table>
+<p><strong>shared-expert append</strong>（3.2%）：</p>
 <p>fuse 表说"已有 <code>fused_moe_triton_kernels.py</code> 融合路径"，但那条路径只对 triton backend 有效。flashinfer_trtllm backend 的 MoE kernel <strong>本身不支持 shared expert 融合</strong>，代码里有一个硬 assert：</p>
 <pre><code># moe_runner/flashinfer_trtllm.py:1194
 assert (
@@ -218,12 +198,25 @@ assert (
 <p>📐 <strong>数据来源</strong>：<code>python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py:1194-1195</code>（assert）、<code>python/sglang/srt/arg_groups/overrides.py:2027</code>（预 disable）、<code>python/sglang/srt/models/glm4_moe.py:1183-1212</code>（GLM 层条件，B200 下不命中）。</p>
 </blockquote>
 
-<h3>3. FP8 quant + activation（3.7%）—— trtllm 闭源不开放 epilogue</h3>
+
+<p><strong>FP8 quant + activation</strong>（3.7%）：</p>
 <p><code>per_token_group_quant_8bit_v2_kernel</code>（3.7%）是 MoE 专家 GEMM 前的 FP8 per-token 量化。catalog 里 vLLM 有 <code>fuse_act_quant</code> pass（SiLU+mul + FP8 quant 融合），sglang 的 triton fused_moe 里有类似 epilogue，但 <strong>flashinfer_trtllm backend 的 MoE kernel 是闭源预编译 kernel，不开放 epilogue 定制</strong>——没法把量化融进去。</p>
 <p><strong>为什么不能融合</strong>：要开它只能把 <code>--moe-runner-backend</code> 换回 <code>triton</code>（triton 的 <code>fused_moe</code> 有融合 epilogue），但 triton 实测只有 603 tok/s（比当前 793 慢 24%），同样得不偿失。</p>
 <blockquote>
 <p>📐 <strong>数据来源</strong>：profile 里 <code>per_token_group_quant</code> 的 python location（<code>fused_moe.py:232</code>，走 triton path 才有融合 epilogue）。</p>
 </blockquote>
+<p><strong>④ 占比太小不值得</strong>（单个 &lt;2%，无明确融合对象）</p>
+<table>
+<tr><th>kernel</th><th>占比</th><th>说明</th></tr>
+<tr><td><code>vectorized_elementwise</code>（5 变体）</td><td>5.8%</td><td>PyTorch 零碎 elementwise（compare/where/bitwise_and），单个 &lt;2%</td></tr>
+<tr><td><code>set_mla_kv_buffer_kernel</code></td><td>0.5%</td><td>MLA KV cache 写入，太小</td></tr>
+<tr><td><code>cunn_SoftMaxForward</code></td><td>0.2%</td><td>已融在 fmha kernel 里</td></tr>
+<tr><td><code>topk_small_batch_kernel</code></td><td>0.2%</td><td>太小</td></tr>
+</table>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：TP-0 DECODE trace（<code>glm-glm-fusion-TP-0-DECODE.trace.json.gz</code>，.8 容器 2026-08-25，采样 5 步）。「66 个 kernel / 110.7ms / 占比≥1% 的 23 个」由上文的「④ 数 kernel」脚本统计得到；<code>analyze_llm_torch_profile.py</code>（<code>.claude/skills/llm-torch-profiler-analysis/scripts/</code>）输出的是聚合三表，不含 distinct kernel 计数。</p>
+</blockquote>
+<p>66 个 kernel 按这 4 类排除完，只剩 QK RoPE + KV cache write（4.6%）一个能做。</p>
 
 <h2>能融合的：QK RoPE + KV cache write（工作重心）</h2>
 <p>先厘清「patch」指什么。本次实验<strong>镜像统一</strong>是 fusionfix（<code>v0.5.15.post1-cuda13-b200-fusionfix</code>，把 flashinfer 三件套对齐到 0.6.14，否则开融合会崩 tvm_ffi 报错）。变量只有两个——<strong>启动命令</strong>（开不开融合）和<strong>代码改动</strong>（挂不挂新 kernel）：</p>
