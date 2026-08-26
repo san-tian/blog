@@ -42,6 +42,66 @@ python3 -m sglang.launch_server \
 
 decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只剩 4 个既是 allreduce/quant/prep 类（有融合对象）、又未生效的。
 
+### 怎么 profile 出这张 kernel 表（可复现）
+
+「66 个 kernel」来自 torch profiler 采样 + 一段内联统计。完整流程四步：
+
+**① 触发采样**（sglang serve 的 torch profiler 端点，采 5 步、按 stage 分）：
+
+```bash
+curl -s -X POST http://127.0.0.1:10100/start_profile \
+  -H "Content-Type: application/json" \
+  -d '{"output_dir":"/tmp/glm_prof_fusion","num_steps":5,"activities":["GPU","CPU"],"profile_by_stage":true,"with_stack":true,"record_shapes":false,"profile_id":"glm-fusion","profile_prefix":"glm"}'
+```
+
+**② 打 decode 流量**（短输入 + 长输出，让 decode 阶段跑满采样窗口）：
+
+```bash
+for i in $(seq 1 6); do
+  curl -s -m 180 http://127.0.0.1:10100/generate -H "Content-Type: application/json" \
+    -d '{"text":"Explain quantum computing in depth.","sampling_params":{"max_new_tokens":180,"temperature":0.6}}' >/dev/null 2>&1 &
+done
+```
+
+**③ 拉回 TP-0 的 DECODE trace**：
+
+```bash
+ssh root@38.255.28.8 'docker cp sglang-fusion-b8:/tmp/glm_prof_fusion /tmp/glm_prof_fusion_out'
+scp root@38.255.28.8:/tmp/glm_prof_fusion_out/glm-glm-fusion-TP-0-DECODE.trace.json.gz \
+    /home/dev/Deployment/analysis/glm_prof_fusion/
+```
+
+**④ 数 kernel**（`66` = 去重后的 GPU kernel 名数量）：
+
+```python
+import gzip, json
+from collections import Counter
+with gzip.open('/home/dev/Deployment/analysis/glm_prof_fusion/glm-glm-fusion-TP-0-DECODE.trace.json.gz') as f:
+    tr = json.load(f)
+evs = tr.get('traceEvents', tr if isinstance(tr, list) else [])
+total = 0; c = Counter()
+for e in evs:
+    d = e.get('dur',0)
+    if d > 0 and e.get('cat') in ('kernel','gpu'):
+        total += d; c[e.get('name','')[:70]] += d
+print(f'decode 总 GPU 时间: {total/1000:.1f}ms, 共 {len(c)} 个不同 kernel')
+print('=== 全部 kernel（按占比降序）===')
+cum = 0
+for n, d in c.most_common():
+    pct = d/total*100
+    cum += pct
+    print(f'{pct:5.1f}%  {d/1000:7.2f}ms  {n}{"  <<< 占比>=1%" if pct>=1 else ""}')
+    if cum > 99: break
+```
+
+输出第一行 `decode 总 GPU 时间: 110.7ms, 共 66 个不同 kernel`，接着是全部 kernel 按占比降序、`>=1%` 的加标记。
+
+**统计口径三个关键点**：
+
+- **`66` 是去重后的 kernel 名数量，不是 launch 次数**——同一个 `bmm_E4m3_...` launch 了 225 次也只算 1 个（launch 总数要上千）。
+- **按 `name[:70]` 分组，模板实例算不同 kernel**——`bmm_E4m3_..._t128x8x128u2` 和 `bmm_Bfloat16_...` 是同一 kernel 的不同模板实例，name 字符串不同就各算一个（不同实例 = 不同 CUDA kernel）。
+- **采样不是全量**——`num_steps=5` 只采了 5 步，`66` 是采样窗口内出现的 distinct kernel；采样步数或请求 pattern 变了，数字会变。
+
 ### ① 已是融合 kernel（无需再融合）
 
 | kernel | 占比 | 说明 |
@@ -93,7 +153,7 @@ decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只
 
 66 个 kernel 排完五类，只剩 4 个"可融合且未生效"——就是开头表里的那四个。
 
-> 📐 **数据来源**：`analyze_llm_torch_profile.py --input glm_prof_fusion`（TP-0 DECODE trace，2026-08-25 于 .8）。66 个 kernel 全量统计，占比 ≥1% 的 23 个，总 GPU 时间 110.7ms。
+> 📐 **数据来源**：TP-0 DECODE trace（`glm-glm-fusion-TP-0-DECODE.trace.json.gz`，.8 容器 2026-08-25，采样 5 步）。「66 个 kernel / 110.7ms / 占比≥1% 的 23 个」由上文的「④ 数 kernel」脚本统计得到；`analyze_llm_torch_profile.py`（`.claude/skills/llm-torch-profiler-analysis/scripts/`）输出的是聚合三表，不含 distinct kernel 计数。
 
 ## 四个融合点为什么做不了
 
