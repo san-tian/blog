@@ -65,14 +65,13 @@
 <tr><th>配置</th><th>输出吞吐 (tok/s)</th><th>TPOT (ms)</th><th>vs baseline</th></tr>
 <tr><td>baseline（融合全关）</td><td>524.62</td><td>26.72</td><td>—</td></tr>
 <tr><td>+ allreduce fusion + flashinfer_trtllm</td><td>793.20</td><td>17.00</td><td>+51%</td></tr>
-<tr><td>+ QK RoPE 有损融合（改 gate）</td><td>802.78</td><td>16.92</td><td>+53%</td></tr>
 <tr><td><strong>+ QK RoPE 无损融合（新 kernel）</strong></td><td><strong>856.64</strong></td><td><strong>15.61</strong></td><td><strong>+63%</strong></td></tr>
 </table>
 <blockquote>
 <p>📐 <strong>数据来源</strong>：<code>bench_serving</code>（8192 input + 1024 output, 64 prompts, concurrency 16），.8 容器 2026-08-25。</p>
 </blockquote>
 <blockquote>
-<p>⚠️ <strong>公平对照修正</strong>：上表是 step111（.8 机器）数据。在 .13 用 coding-venti 同机器公平复测（见文末「最终复测」）：无损版 ≈ 有损版（796 vs 795），相对 A 配置（无 patch）只 +0.9% / +0.8%，step111 的「无损 +8%」未复现。无损版的价值是精度（字节级一致），不是速度。</p>
+<p>⚠️ <strong>公平对照修正</strong>：上表是 step111（.8 机器）数据。在 .13 用 coding-venti 同机器公平复测（见文末「最终复测」）：无损版相对 A 配置（无 patch）只 +0.9%，step111 的「无损 +8%」未复现。无损版的价值是精度（字节级一致），不是速度。</p>
 </blockquote>
 <h2>排除法：为什么只剩这四个</h2>
 <p>decode 共 66 个 kernel，占比 ≥1% 的 23 个。逐一过五类排除，只剩 4 个既是 allreduce/quant/prep 类（有融合对象）、又未生效的。</p>
@@ -229,7 +228,7 @@ assert (
 </blockquote>
 
 <h3>3. QK RoPE + KV cache write（4.6%）—— 写新 kernel 无损实现</h3>
-<p>fuse 表说"已有 <code>attention/utils.py</code> 融合路径"。底层 triton kernel 有 fp8 路径，但中间层 arg 构造的 CUDA 分支没接上（gate 也只放行 bf16）。改 3 处源码后能跑通，但融合 kernel 的量化逻辑和 DSA 专用路径不等价——会损精度。</p>
+<p>fuse 表说「已有 <code>attention/utils.py</code> 融合路径」，但那条路径（<code>fused_qk_rope_reshape_and_cache</code>）用单个 k_scale 把整个 key（含 rope）统一量化成 fp8，而 DSA 要求 nope 做 per-block 量化、rope 保留 bf16——直接用它会把 rope 位置编码量化掉、损精度。所以要自己写一个 DSA 专用的融合 kernel，量化逻辑和 DSA 原路径逐行等价。</p>
 
 <h4>背景知识：MLA 的 K 和 fp8 KV cache</h4>
 <p>GLM-5.2 用 MLA（Multi-head Latent Attention），每个 token 的 K 分成两部分：</p>
@@ -247,10 +246,14 @@ assert (
 <pre><code>[ k_nope 的 fp8 量化值（512 字节） | 4 个 fp32 scale（16 字节） | k_rope 的 bf16 原值（128 字节） ]</code></pre>
 <p>fp8 和 bf16 在同一个 buffer 里混排，这就是"混合 dtype buffer"。</p>
 
-<h4>有损版本（改 gate，+1.2%）</h4>
-<p>改 3 处源码（gate 放行 fp8 + arg 构造处理 scale + fallback 路径去掉 <code>_is_hip</code>）后能跑通，但融合 kernel 把整个 key（含 rope）统一量化成 fp8，而 DSA 专用路径保留 rope 为 bf16。实测 803 tok/s（+1.2%），但 rope 精度损失会影响复杂输入。</p>
+<h4>patch 前：两步（量化 + 写入）</h4>
+<p>原版（A 配置，无 patch）在 <code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支里，把「量化」和「写入」拆成两步：</p>
+<pre><code># memory_pool.py 原 dsa_kv_cache_store_fp8 分支
+cache_k_nope_fp8, cache_k_rope_fp8 = quantize_k_cache_separate(cache_k_nope, cache_k_rope)  # ① 量化，产出中间 tensor
+set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)                # ② 按 loc 写入 paged buffer</code></pre>
+<p>两步的代价：两次 kernel launch + 一次中间 tensor 的显存分配与读写往返 + 一次按 loc 的 scatter 拷贝。</p>
 
-<h4>无损版本（写新 kernel，+8%）</h4>
+<h4>patch 后：一步（新 kernel 融合）</h4>
 <p>写了一个 DSA 专用的融合 triton kernel（<code>fused_dsa_quant_store</code>），在一个 kernel 里同时完成：</p>
 <ol>
 <li>对 k_nope（512 维）按 128 group 做 per-block fp8 量化（每个 block 独立 scale）</li>
@@ -262,12 +265,12 @@ assert (
 <p><strong>正确性验证</strong>：standalone test 对比融合 kernel 和非融合路径的输出，128 token、字节级对比 nope（fp8）/ scale（fp32）/ rope（bf16）三部分全部一致——<strong>完全无损</strong>。</p>
 <p><strong>端到端数据</strong>：</p>
 <table>
-<tr><th>指标</th><th>改前（793）</th><th>无损新 kernel</th><th>差异</th></tr>
+<tr><th>指标</th><th>patch 前（原版 A）</th><th>patch 后（无损版）</th><th>差异</th></tr>
 <tr><td>输出吞吐 (tok/s)</td><td>793.20</td><td><strong>856.64</strong></td><td><strong>+8.0%</strong></td></tr>
 <tr><td>TPOT 均值 (ms)</td><td>17.00</td><td>15.61</td><td>-8.2%</td></tr>
 <tr><td>TTFT 均值 (ms)</td><td>3254.78</td><td>3150.11</td><td>-3.2%</td></tr>
 </table>
-<p>无损版本比有损版本还快 6.7%（856 vs 803），因为新 kernel 省了 <code>quantize_k_cache_separate</code> 的中间 tensor 分配 + <code>set_mla_kv_buffer_triton</code> 的额外 launch。</p>
+<p>patch 后省掉了两步里的「中间 tensor 分配 + 一次 launch + scatter 拷贝」——这是速度增益的来源（公平对照下增益很小，见文末「最终复测」）。</p>
 <blockquote>
 <p>📐 <strong>数据来源</strong>：standalone test（<code>fused_dsa_quant_store.py</code> test_correctness，128 token，字节级对比）；端到端 <code>bench_serving</code>（8192 input + 1024 output, 64 prompts, concurrency 16），.8 容器 2026-08-25。新 kernel 代码 <code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code>，接入点 <code>python/sglang/srt/mem_cache/memory_pool.py:3951</code>（<code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支）。</p>
 </blockquote>
@@ -288,19 +291,9 @@ assert (
 </table>
 
 <h3>QK RoPE 融合怎么实现的</h3>
-<p>有损版本和无损版本都实现了，区别在于量化逻辑是否和 DSA 专用路径等价。</p>
+<p>现成的融合 kernel（<code>fused_qk_rope_reshape_and_cache</code>）用单个 <code>k_scale</code> 统一量化整个 key（含 rope），会把 rope 位置编码量化掉、损精度。所以自己写了一个 DSA 专用的融合 kernel，量化逻辑和 DSA 原路径逐行等价（无损）。</p>
 
-<h4>有损版本（改 3 处 gate，803 tok/s，+1.2%）</h4>
-<p>改 3 处 sglang 源码，让现有融合 kernel（<code>fused_qk_rope_reshape_and_cache</code>）的 fp8 路径走通：</p>
-<table>
-<tr><th>改动</th><th>文件</th><th>内容</th></tr>
-<tr><td>gate 放行 fp8</td><td><code>python/sglang/srt/models/utils.py:294</code></td><td><code>enable_fused_set_kv_buffer</code> 的 CUDA 分支从 <code>pool.dtype == torch.bfloat16</code> 改成 <code>pool.dtype in (torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2)</code></td></tr>
-<tr><td>arg 构造处理 scale</td><td><code>python/sglang/srt/models/utils.py:316</code></td><td><code>create_fused_set_kv_buffer_arg</code> 的 CUDA 分支，当 <code>layer.k_scale is not None</code> 时返回 dict（参考 ROCm 分支），不再 assert scale is None</td></tr>
-<tr><td>fallback 路径去掉 <code>_is_hip</code></td><td><code>python/sglang/srt/layers/rotary_embedding/base.py:386</code></td><td><code>if fused_set_kv_buffer_arg is not None and _is_hip:</code> 改成 <code>if fused_set_kv_buffer_arg is not None:</code></td></tr>
-</table>
-<p><strong>为什么损精度</strong>：现有融合 kernel 用单个 <code>k_scale</code> 把整个 key（含 rope）统一量化成 fp8，而 DSA 专用路径对 nope 做 per-block 量化 + rope 保留 bf16。rope 被量化会损失位置编码精度。</p>
-
-<h4>无损版本（写新 triton kernel，856 tok/s，+8%）</h4>
+<h4>无损版本（写新 triton kernel）</h4>
 <p>写了一个 DSA 专用的融合 triton kernel（<code>fused_dsa_quant_store</code>），在一个 kernel 里同时完成三件事：</p>
 <ol>
 <li><strong>k_nope（512 维）per-block fp8 量化</strong>：按 128 维一组切 4 块，每块独立算 scale（<code>y_s = max(abs(y)) / FP8_MAX</code>），量化成 fp8——和 DSA 原来的 <code>quantize_k_cache_separate</code> 逻辑完全一致，保证无损。</li>
@@ -392,11 +385,10 @@ tl.store(dst, data, mask=mask)</code></pre>
 <h4>代码位置</h4>
 <table>
 <tr><th>版本</th><th>分支</th><th>文件</th><th>说明</th></tr>
-<tr><td>有损版</td><td><a href="https://github.com/MindLab-Research/sglang/tree/pex/qk-rope-fusion-lossy"><code>pex/qk-rope-fusion-lossy</code></a></td><td><code>python/sglang/srt/models/utils.py</code>（gate + arg 构造）<br><code>python/sglang/srt/layers/rotary_embedding/base.py</code>（fallback 路径）</td><td>改 3 处现有代码，让 <code>fused_qk_rope_reshape_and_cache</code> 的 fp8 路径走通</td></tr>
 <tr><td>无损版</td><td><a href="https://github.com/MindLab-Research/sglang/tree/pex/qk-rope-fusion-lossless"><code>pex/qk-rope-fusion-lossless</code></a></td><td><code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code>（新 kernel）<br><code>python/sglang/srt/mem_cache/memory_pool.py:3951</code>（接入点）</td><td>新写 triton kernel + 替换 <code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支</td></tr>
 </table>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：有损版实测 802.78 tok/s（改 3 处 gate）；无损版 standalone 正确性验证（128 token 字节级对比 nope/scale/rope 全一致）+ 端到端 <code>bench_serving</code> 856.64 tok/s；.8 容器 2026-08-25。</p>
+<p>📐 <strong>数据来源</strong>：无损版 standalone 正确性验证（128 token 字节级对比 nope/scale/rope 全一致）+ 端到端 <code>bench_serving</code> 856.64 tok/s；.8 容器 2026-08-25。</p>
 </blockquote>
 
 <h4>为什么要这么改</h4>
@@ -405,7 +397,7 @@ tl.store(dst, data, mask=mask)</code></pre>
 cache_k_nope_fp8, cache_k_rope_fp8 = quantize_k_cache_separate(cache_k_nope, cache_k_rope)  # ① 量化，产出中间 tensor
 set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)                # ② 按 loc 写入 paged buffer</code></pre>
 <p>两步的代价是三类调度开销：<strong>两次 kernel launch</strong>（GPU 每次 launch 有固定开销）、<strong>一次中间 tensor 的显存分配 + 读写往返</strong>、<strong>一次按 loc 的 scatter 拷贝</strong>。decode 阶段每步 token 数很小（M ≈ 当前并发请求数），单次 kernel 的计算量本来就小，这三类开销反而占大头——所以省掉它们能带来可见收益。</p>
-<p>现成的融合 kernel（<code>fused_qk_rope_reshape_and_cache</code>）之所以不能直接用，是因为它的量化逻辑和 DSA 不等价：它用<strong>单个 <code>k_scale</code> 把整个 key（含 rope）统一量化成 fp8</strong>，而 DSA 的 KV cache 要求 <strong>k_nope 做 per-block 量化、k_rope 保留 bf16</strong>。硬套上去，rope 位置编码被量化、精度受损——这正是有损版 803 tok/s 的代价。</p>
+<p>现成的融合 kernel（<code>fused_qk_rope_reshape_and_cache</code>）之所以不能直接用，是因为它的量化逻辑和 DSA 不等价：它用<strong>单个 <code>k_scale</code> 把整个 key（含 rope）统一量化成 fp8</strong>，而 DSA 的 KV cache 要求 <strong>k_nope 做 per-block 量化、k_rope 保留 bf16</strong>。硬套上去，rope 位置编码被量化、精度受损——这正是要自己写 kernel 的原因。</p>
 <p>所以最终选择自己写一个 DSA 专用的融合 triton kernel（<code>fused_dsa_quant_store</code>），把「per-block 量化 + bf16 rope 保留 + paged 直接写入」压缩进一个 kernel，且量化公式与 DSA 原 <code>quantize_k_cache_separate</code> 完全一致——既拿到融合收益（省 launch + 省中间 tensor + 省 scatter），又不损精度（856 tok/s）。</p>
 
 <h4>涉及哪些基础知识</h4>
@@ -443,25 +435,24 @@ set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)   
 <li>等 flashinfer_trtllm 后续版本开放 shared-expert fusion / epilogue 定制</li>
 </ol>
 
-<h2>最终复测：coding-venti 四配置公平对照（.13）</h2>
+<h2>最终复测：coding-venti 三配置公平对照（.13）</h2>
 <p>上面的数据来自 step111（.8 机器）。为排除机器和 checkpoint 的混杂变量，在 .13 上用 coding-venti（78 层，与 step111 同架构、同规模 705G）做了同机器、同 checkpoint 的公平对照：</p>
 <table>
 <tr><th>配置</th><th>输出吞吐 (tok/s)</th><th>TPOT (ms)</th><th>TTFT (ms)</th><th>vs 原版(A)</th></tr>
 <tr><td>全关 baseline（triton，参考）</td><td>524.34</td><td>26.77</td><td>3850.85</td><td>—</td></tr>
 <tr><td>原版（A 配置，无 patch）</td><td>789.20</td><td>17.04</td><td>3317.22</td><td>—</td></tr>
-<tr><td>有损版（A + 有损 patch）</td><td>795.27</td><td>16.96</td><td>3243.80</td><td>+0.8%</td></tr>
 <tr><td>无损版（A + 无损 patch）</td><td>796.04</td><td>16.96</td><td>3220.75</td><td>+0.9%</td></tr>
 </table>
 <blockquote>
-<p>📐 <strong>数据来源</strong>：<code>bench_serving</code>（8192 in / 1024 out，64 prompts，concurrency 16），.13 容器，fusionfix 镜像，2026-08-26。四个配置在同一台机器、同一 checkpoint 上依次测，每轮重启 + 清 hicache。</p>
+<p>📐 <strong>数据来源</strong>：<code>bench_serving</code>（8192 in / 1024 out，64 prompts，concurrency 16），.13 容器，fusionfix 镜像，2026-08-26。三个配置在同一台机器、同一 checkpoint 上依次测，每轮重启 + 清 hicache。</p>
 </blockquote>
 <p>三个结论：</p>
 <ol>
 <li><strong>大头是 A 配置</strong>：全关 524 → A 配置 789，+50.5%。增益全部来自「flashinfer_trtllm + allreduce fusion」，可复现。</li>
-<li><strong>两个 patch 的增益都极小</strong>：有损 +0.8%、无损 +0.9%，都在 benchmark 噪声范围内（±1%）。step111 上「无损 +8%（856 vs 793）」的差异在公平对照下<strong>没有复现</strong>——那 8% 大概率混入了 .8 机器或 step111 checkpoint 的变量。</li>
-<li><strong>无损版的价值是精度，不是速度</strong>：有损版把 rope 位置编码一并量化（损精度），无损版保证字节级一致（见「无损的证明」）。两者速度相同，选无损版严格更优——同样的速度、不损精度。</li>
+<li><strong>无损 patch 的增益极小</strong>：+0.9%，在 benchmark 噪声范围内（±1%）。step111 上「无损 +8%（856 vs 793）」的差异在公平对照下<strong>没有复现</strong>——那 8% 大概率混入了 .8 机器或 step111 checkpoint 的变量。</li>
+<li><strong>无损版的价值是精度，不是速度</strong>：它保证和原版（<code>quantize_k_cache_separate</code> + <code>set_mla_kv_buffer_triton</code> 两步）字节级一致（见「无损的证明」），同时把两步合成一步。速度增益虽小，但「同样速度、保证无损」，是严格不劣于原版的选择。</li>
 </ol>
-<p>最终结论收敛为：<strong>这套配置的加速靠 A 配置（+50%）；QK RoPE 融合这个点，有损版和无损版速度持平（都只 +0.8% 左右），做它的意义是「用无损换掉有损」——保证精度，而不是「再快一点」。</strong></p>
+<p>最终结论收敛为：<strong>这套配置的加速靠 A 配置（+50%）；QK RoPE 融合这个点，无损版相对原版只 +0.9%，做它的意义是把「量化 + 写入」两步合成一步、且字节级无损——省的是中间 tensor 和一次 launch，不是「再快一档」。</strong></p>
 
 <h2>完整环境</h2>
 <table>
