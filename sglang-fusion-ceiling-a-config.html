@@ -80,6 +80,18 @@
 <pre><code>curl -s -X POST http://127.0.0.1:10100/start_profile \
   -H "Content-Type: application/json" \
   -d '{"output_dir":"/tmp/glm_prof_fusion","num_steps":5,"activities":["GPU","CPU"],"profile_by_stage":true,"with_stack":true,"record_shapes":false,"profile_id":"glm-fusion","profile_prefix":"glm"}'</code></pre>
+<p><code>10100</code> 就是启动命令里的 <code>--port 10100</code>（serving 主端口，<code>/generate</code>、<code>/metrics</code> 也挂在同一端口上）；<code>/start_profile</code> 是 sglang 内置的 torch profiler 采样开关——收到请求后 scheduler 进程直接开启 <code>torch.profiler</code>，serve 跑着就能采 kernel 级 trace，不用改代码、不用插桩。</p>
+<p>请求体字段（<code>ProfileReq</code>）：</p>
+<table>
+<tr><th>字段</th><th>作用</th></tr>
+<tr><td><code>output_dir</code></td><td>trace 落盘目录（默认 <code>/tmp</code>，可用环境变量 <code>SGLANG_TORCH_PROFILER_DIR</code> 覆盖）</td></tr>
+<tr><td><code>num_steps</code></td><td>采几步后自动停止，不用手动调 <code>/stop_profile</code></td></tr>
+<tr><td><code>activities</code></td><td>采集的 kernel/op 事件（<code>["GPU","CPU"]</code>）</td></tr>
+<tr><td><code>profile_by_stage</code></td><td>prefill / decode 分开落盘</td></tr>
+<tr><td><code>with_stack</code></td><td>记录 python 调用栈 → 用于定位每个 kernel 的 python location</td></tr>
+<tr><td><code>profile_id</code> / <code>profile_prefix</code></td><td>拼进 trace 文件名</td></tr>
+</table>
+<p>每个 TP rank 各产出一份 trace，文件名格式 <code>{profile_prefix}-{profile_id}-TP-{rank}-{STAGE}.trace.json.gz</code>——所以拉回 TP-0 的 decode 就是 <code>glm-glm-fusion-TP-0-DECODE.trace.json.gz</code>。</p>
 <p><strong>② 打 decode 流量</strong>（短输入 + 长输出，让 decode 阶段跑满采样窗口）：</p>
 <pre><code>for i in $(seq 1 6); do
   curl -s -m 180 http://127.0.0.1:10100/generate -H "Content-Type: application/json" \
