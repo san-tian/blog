@@ -233,12 +233,75 @@ fp8 和 bf16 在同一个 buffer 里混排，这就是"混合 dtype buffer"。
 
 #### 代码位置
 
-| 版本 | 文件 | 说明 |
-|---|---|---|
-| 有损版 | `python/sglang/srt/models/utils.py`（gate + arg 构造）<br>`python/sglang/srt/layers/rotary_embedding/base.py`（fallback 路径） | 改 3 处现有代码，让 `fused_qk_rope_reshape_and_cache` 的 fp8 路径走通 |
-| 无损版 | `python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py`（新 kernel）<br>`python/sglang/srt/mem_cache/memory_pool.py:3951`（接入点） | 新写 triton kernel + 替换 `_write_mla_kv_buffer` 的 `dsa_kv_cache_store_fp8` 分支 |
+| 版本 | 分支 | 文件 | 说明 |
+|---|---|---|---|
+| 有损版 | [`pex/qk-rope-fusion-lossy`](https://github.com/MindLab-Research/sglang/tree/pex/qk-rope-fusion-lossy) | `python/sglang/srt/models/utils.py`（gate + arg 构造）<br>`python/sglang/srt/layers/rotary_embedding/base.py`（fallback 路径） | 改 3 处现有代码，让 `fused_qk_rope_reshape_and_cache` 的 fp8 路径走通 |
+| 无损版 | [`pex/qk-rope-fusion-lossless`](https://github.com/MindLab-Research/sglang/tree/pex/qk-rope-fusion-lossless) | `python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py`（新 kernel）<br>`python/sglang/srt/mem_cache/memory_pool.py:3951`（接入点） | 新写 triton kernel + 替换 `_write_mla_kv_buffer` 的 `dsa_kv_cache_store_fp8` 分支 |
 
 > 📐 **数据来源**：有损版实测 802.78 tok/s（改 3 处 gate）；无损版 standalone 正确性验证（128 token 字节级对比 nope/scale/rope 全一致）+ 端到端 `bench_serving` 856.64 tok/s；.8 容器 2026-08-25。
+
+#### 为什么要这么改
+
+原始路径（b300-glm52 的 `_write_mla_kv_buffer`）把「量化」和「写入」拆成两步：
+
+```python
+# memory_pool.py 原 dsa_kv_cache_store_fp8 分支
+cache_k_nope_fp8, cache_k_rope_fp8 = quantize_k_cache_separate(cache_k_nope, cache_k_rope)  # ① 量化，产出中间 tensor
+set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)                # ② 按 loc 写入 paged buffer
+```
+
+两步的代价是三类调度开销：**两次 kernel launch**（GPU 每次 launch 有固定开销）、**一次中间 tensor 的显存分配 + 读写往返**、**一次按 loc 的 scatter 拷贝**。decode 阶段每步 token 数很小（M ≈ 当前并发请求数），单次 kernel 的计算量本来就小，这三类开销反而占大头——所以省掉它们能带来可见收益。
+
+现成的融合 kernel（`fused_qk_rope_reshape_and_cache`）之所以不能直接用，是因为它的量化逻辑和 DSA 不等价：它用**单个 `k_scale` 把整个 key（含 rope）统一量化成 fp8**，而 DSA 的 KV cache 要求 **k_nope 做 per-block 量化、k_rope 保留 bf16**。硬套上去，rope 位置编码被量化、精度受损——这正是有损版 803 tok/s 的代价。
+
+所以最终选择自己写一个 DSA 专用的融合 triton kernel（`fused_dsa_quant_store`），把「per-block 量化 + bf16 rope 保留 + paged 直接写入」压缩进一个 kernel，且量化公式与 DSA 原 `quantize_k_cache_separate` 完全一致——既拿到融合收益（省 launch + 省中间 tensor + 省 scatter），又不损精度（856 tok/s）。
+
+#### 涉及哪些基础知识
+
+**1. MLA 的 K 拆成 nope + rope**
+
+GLM-5.2 用 MLA（Multi-head Latent Attention），每个 token 的 K 由两部分拼成：**k_nope（512 维）**是内容向量、不带位置信息；**k_rope（64 维）**是位置向量。两者在 KV cache 里的存储需求不同（nope 可量化、rope 不能），这是「为什么要分开处理」的根因。
+
+**2. RoPE 位置编码为什么不能量化**
+
+RoPE（Rotary Position Embedding）通过旋转矩阵把「相对位置」编码进 k_rope 的 64 维。位置编码的微小误差会直接改变 token 之间的注意力关系，属于精度敏感部分，所以 DSA 对 rope 保留 bf16 原值、不做 fp8 量化。
+
+**3. fp8 量化与 per-block scale**
+
+fp8 e4m3fn 只有 4 位指数 + 3 位尾数，动态范围远小于 bf16。量化公式是 `y_q = clamp(y / scale, -448, 448)`，其中 `scale = max(|y|) / 448`（448 是 e4m3fn 的最大可表示值）。
+
+- **per-tensor 量化**：整个 tensor 一个 scale，简单，但个别大值会把 scale 撑大、让多数小值的量化误差变大。
+- **per-block 量化**：把 512 维按 128 一组切 4 块，每块独立算 scale（4 个 fp32 scale 共 16 字节），每块内数值范围相近，量化误差显著更小——这是 DSA 无损的关键。
+
+**4. Paged KV cache 的写入方式**
+
+KV cache 按固定大小 page 分配，`loc` 是每个 token 落到的 page 号。写入时不能简单 `buffer[loc] = tensor`，而要按 loc 把每个 token 的 656 字节 scatter 到对应 page——这正是 `set_mla_kv_buffer_triton` 那一步做的事，也是融合 kernel 里 `cache_loc = loc[token_id]` 之后按偏移写入的原因。
+
+**5. 混合 dtype buffer layout**
+
+DSA 每个 token 的 KV 存储是 656 字节，三种 dtype 挤在同一个 buffer 里：
+
+```
+[ k_nope 的 fp8（512 B）| 4 个 scale 的 fp32（16 B）| k_rope 的 bf16（128 B）]
+```
+
+一个 tensor 只能有一种 dtype，解法是**对同一块内存开三个不同 dtype 的 view**，各自指向不同字节偏移：fp8 view 写 nope（offset 0）、fp32 view 写 scale（offset 512）、bf16 view 写 rope（offset 528）。三个 view 共享底层内存，写入即落到正确位置。
+
+**6. Triton kernel 的 2D grid 设计**
+
+kernel 用 2D grid：`(num_tokens, 5)`——第 0 维是 token，第 1 维是 5 个 block（4 个 nope 块 + 1 个 rope 块）。`program_id(0)` 取 token、`program_id(1)` 分派到「量化哪个 nope 块」还是「拷 rope」。`GROUP_SIZE`、`DIM_NOPE` 等用 `tl.constexpr` 编译期常量，让 triton 按固定形状编译出最优指令；rope 块用 `mask = offs < DIM_ROPE` 处理 64 维对齐到 128 的越界。
+
+**7. 算子融合到底省什么**
+
+融合省的不是计算量，而是调度开销：
+
+| 开销 | 原始两步 | 融合后 |
+|---|---|---|
+| kernel launch | 2 次（量化 + 写入） | 1 次 |
+| 中间 tensor | `quantize_k_cache_separate` 的返回值 | 无（直接写进 KV buffer） |
+| scatter 拷贝 | 量化结果 → 按 loc 拷贝进 buffer | 无（量化时直接写目标位置） |
+
+这也是为什么融合收益出现在 decode（小 batch、launch 开销占比高），而不是 prefill（大 batch、计算密集、launch 开销被摊薄）。
 
 四个融合点里，三个被硬性条件挡住（闭源 kernel / 不是融合对象），但 QK RoPE + KV cache write 通过写一个 DSA 专用的融合 triton kernel 突破了——无损实现 per-block fp8 量化 + bf16 rope 保留 + 混合 layout paged 写入，端到端从 793 提升到 **856 tok/s（+8%）**，总收益从 baseline 的 **+63%**。
 
