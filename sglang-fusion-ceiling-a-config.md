@@ -1,4 +1,4 @@
-# sglang 算子融合：从天花板到突破，写新 kernel 无损实现 +63%
+# sglang 算子融合：从天花板到突破，写新 kernel 无损实现
 
 当前使用的启动命令（GLM-5.2 step111 FP8，B200 TP8）：
 
@@ -37,6 +37,8 @@ python3 -m sglang.launch_server \
 | **+ QK RoPE 无损融合（新 kernel）** | **856.64** | **15.61** | **+63%** |
 
 > 📐 **数据来源**：`bench_serving`（8192 input + 1024 output, 64 prompts, concurrency 16），.8 容器 2026-08-25。
+
+> ⚠️ **公平对照修正**：上表是 step111（.8 机器）数据。在 .13 用 coding-venti 同机器公平复测（见文末「最终复测」）：无损版 ≈ 有损版（796 vs 795），相对 A 配置（无 patch）只 +0.9% / +0.8%，step111 的「无损 +8%」未复现。无损版的价值是精度（字节级一致），不是速度。
 
 ## 排除法：为什么只剩这四个
 
@@ -182,9 +184,28 @@ for n, d in c.most_common():
 | 第3次 | 1.73ms | `_vocab_parallel_embedding_kernel` |
 | 第5次 | 2.10ms | `_vocab_parallel_embedding_kernel` |
 
-这是 **TP8 下 vocab embedding 的 allreduce**：每个 rank 只算自己那部分 vocab 的 embedding，然后 allreduce 把 8 个 rank 的 partial 求和。
+**前置知识：TP 下 vocab embedding 怎么拆、为什么要 allreduce**
 
-**为什么不能融合**：allreduce fusion 的原理是"allreduce + 下一层的 residual + rmsnorm 融合成一个 kernel"。但 embedding 后面直接是第一层 attention，**没有 layernorm 来吸收这个 allreduce**——它不是 residual+rmsnorm 的融合对象，是 TP vocab parallel embedding 的固有开销。
+TP8 下，`VocabParallelEmbedding` 把 154880 行的 embedding 权重按 **vocab 维度**切成 8 份，每个 rank 只存 19360 行（`python/sglang/srt/layers/vocab_parallel_embedding.py`）。forward 分两步：
+
+```python
+# VocabParallelEmbedding.forward
+output_parallel = self._embed_local_shard(input_)                    # ① 每个 rank 只查自己分片内的 token
+output_parallel = tensor_model_parallel_all_reduce(output_parallel)  # ② allreduce 汇总
+```
+
+① `_embed_local_shard`：对输入的 token id，**落在本 rank 分片内的**才查本地 embedding 表，**落在其他 rank 的**直接填 0。于是每个 rank 得到一个「partial」结果——只有自己负责的那几个 token 位置有值，其余全 0。
+
+② allreduce（sum）：8 个 rank 的 partial 相加。因为每个 token 位置只在「拥有它的那个 rank」上非零，sum 后正好还原出完整的 embedding。
+
+这就是 decode 头号瓶颈（27.8%）的来源：**每个 decode step 都要为最新生成的 1 个 token 走一遍「embedding 查表 + 8 卡 allreduce」**，而 decode 阶段 token 数极少（M ≈ 并发数），通信开销无法被计算摊薄。
+
+**为什么不能融合**：allreduce fusion 融合的是「allreduce + residual_add + rmsnorm」三个连续操作，这个模式只出现在**每个 transformer 层的输出处**——attention/MoE 的输出是 TP partial，后面紧跟「加回残差 + 归一化」，所以能合成一个 kernel。而 embedding 的 allreduce 有两个致命不同：
+
+1. **没有 residual 可加**：embedding 是模型的第一个输入，`residual = None`（GLM `forward` 里 `residual = None`），根本没有「上一层的残差」。
+2. **不构成「allreduce → rmsnorm」的紧邻序列**：embedding 的 allreduce 在 `embed_tokens` 内部结束，而下一层的 `input_layernorm` 在 layer.0 内部才执行，两者隔着层边界，不是连续 kernel。
+
+所以 embedding 的 allreduce 是「裸的 allreduce」，没有任何可以合并进去的操作——它是 TP vocab parallel embedding 的固有开销，不是融合的漏网之鱼。
 
 > 📐 **数据来源**：TP-0 DECODE trace 的 kernel 时序分析，`all_reduce_kernel` 事件的前驱 kernel 均为 `_vocab_parallel_embedding_kernel`。
 
@@ -487,6 +508,27 @@ kernel 用 2D grid：`(num_tokens, 5)`——第 0 维是 token，第 1 维是 5 
 1. 减少 embedding allreduce（27.8%，`--enable-attn-tp-input-scattered`，需实测 MLA/DSA 兼容性）
 2. 换更大 batch 摊薄通信开销
 3. 等 flashinfer_trtllm 后续版本开放 shared-expert fusion / epilogue 定制
+
+## 最终复测：coding-venti 四配置公平对照（.13）
+
+上面的数据来自 step111（.8 机器）。为排除机器和 checkpoint 的混杂变量，在 .13 上用 coding-venti（78 层，与 step111 同架构、同规模 705G）做了同机器、同 checkpoint 的公平对照：
+
+| 配置 | 输出吞吐 (tok/s) | TPOT (ms) | TTFT (ms) | vs 原版(A) |
+|---|---:|---:|---:|---:|
+| 全关 baseline（triton，参考） | 524.34 | 26.77 | 3850.85 | — |
+| 原版（A 配置，无 patch） | 789.20 | 17.04 | 3317.22 | — |
+| 有损版（A + 有损 patch） | 795.27 | 16.96 | 3243.80 | +0.8% |
+| 无损版（A + 无损 patch） | 796.04 | 16.96 | 3220.75 | +0.9% |
+
+> 📐 **数据来源**：`bench_serving`（8192 in / 1024 out，64 prompts，concurrency 16），.13 容器，fusionfix 镜像，2026-08-26。四个配置在同一台机器、同一 checkpoint 上依次测，每轮重启 + 清 hicache。
+
+三个结论：
+
+1. **大头是 A 配置**：全关 524 → A 配置 789，+50.5%。增益全部来自「flashinfer_trtllm + allreduce fusion」，可复现。
+2. **两个 patch 的增益都极小**：有损 +0.8%、无损 +0.9%，都在 benchmark 噪声范围内（±1%）。step111 上「无损 +8%（856 vs 793）」的差异在公平对照下**没有复现**——那 8% 大概率混入了 .8 机器或 step111 checkpoint 的变量。
+3. **无损版的价值是精度，不是速度**：有损版把 rope 位置编码一并量化（损精度），无损版保证字节级一致（见「无损的证明」）。两者速度相同，选无损版严格更优——同样的速度、不损精度。
+
+最终结论收敛为：**这套配置的加速靠 A 配置（+50%）；QK RoPE 融合这个点，有损版和无损版速度持平（都只 +0.8% 左右），做它的意义是「用无损换掉有损」——保证精度，而不是「再快一点」。**
 
 ## 完整环境
 
