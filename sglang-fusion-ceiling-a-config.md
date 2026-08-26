@@ -500,6 +500,42 @@ kernel 用 2D grid：`(num_tokens, 5)`——第 0 维是 token，第 1 维是 5 
 
 这也是为什么融合收益出现在 decode（小 batch、launch 开销占比高），而不是 prefill（大 batch、计算密集、launch 开销被摊薄）。
 
+#### 每个常量的来源与计算方式
+
+新 kernel `fused_dsa_quant_store.py` 顶部的每个常量都不是随意设的，而是从「模型架构 + 原量化 kernel + fp8 格式」一一对应搬过来。因为目标是字节级无损，这些常量必须和原 `quant_k_cache.py` 完全一致，一个都不能动。
+
+**① 模型架构决定（DSA MLA 写死的维度）**
+
+| 常量 | 值 | 来源 |
+|---|---|---|
+| `_DIM_NOPE` | 512 | 模型的 `kv_lora_rank=512`，即 K 经 LoRA 压缩后的低秩维度。原代码 `dv=512`、`assert dim_nope == 512` |
+| `_DIM_ROPE` | 64 | 模型的 `qk_rope_head_dim=64`，RoPE 位置编码维度（不做低秩压缩）。原代码 `assert dim_rope == 64` |
+
+这两个是 GLM-5.2 / DSA 架构的固有值，`quantize_k_cache_separate` 里还专门有 `if dim_nope != 512: raise ValueError` 校验。
+
+**② 量化算法 / fp8 格式决定**
+
+| 常量 | 值 | 来源 |
+|---|---|---|
+| `_GROUP_SIZE` | 128 | per-block 量化的 tile 大小。原代码 `tile_size: int = 128`、`assert tile_size == 128`，和权重 `weight_block_size=[128,128]` 的量化粒度一致 |
+| `_FP8_MAX` | 448.0 | fp8 e4m3fn 格式的最大可表示值。原 kernel 传 `torch.finfo(torch.float8_e4m3fn).max`（就是 448.0）；e4m3fn 对称（min = -448），所以新 kernel 用 `-FP8_MAX` 当 clamp 下界，省一个常量 |
+
+**③ 由上面推导的纯算术常量**
+
+| 常量 | 值 | 计算方式 |
+|---|---|---|
+| `_NUM_NOPE_BLOCKS` | 4 | `_DIM_NOPE // _GROUP_SIZE` = `512 // 128` |
+| `_SCALE_BYTES` | 16 | `_NUM_NOPE_BLOCKS × 4`（每块一个 fp32 scale，4 字节） |
+| `_ROPE_BYTES` | 128 | `_DIM_ROPE × 2`（bf16 每元素 2 字节） |
+| `_TOTAL_BYTES` | 656 | `512 + 16 + 128`（KV buffer 每 token 总字节） |
+| `_NOPE_OFFSET` | 0 | nope 排最前 |
+| `_SCALE_OFFSET` | 512 | nope 之后：`0 + _DIM_NOPE` |
+| `_ROPE_OFFSET` | 528 | scale 之后：`512 + _SCALE_BYTES` |
+
+**为什么必须逐字对齐**：per-block 量化是「每 128 个元素独立算一个 scale」——如果 `_GROUP_SIZE` 变了，scale 的划分边界就变，量化结果完全不同；如果 `_FP8_MAX` 变了，scale 公式 `y_s = max(|y|) / 448` 就变。所以这两个值一动，融合 kernel 写出的 656 字节就和原两步路径对不上，`test_correctness` 的字节级对比就会失败。这就是为什么这些常量要「照抄」而不是「优化」。
+
+> 📐 **数据来源**：常量定义来自 `python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py`（新 kernel），逐项对应 `python/sglang/kernels/ops/attention/dsa/quant_k_cache.py` 的 `_quantize_k_cache_fast_kernel` / `quantize_k_cache_separate`（原路径）。
+
 排除剩下的 4 个融合点里，3 个被硬性条件挡住（闭源 kernel / 不是融合对象），唯一能做的是 QK RoPE + KV cache write——写一个 DSA 专用的融合 triton kernel 无损实现，端到端从 789 提升到 **796 tok/s（+0.9%）**，总收益从 baseline 的 **+52%**。
 
 完整性能链条：baseline 524 → allreduce fusion + flashinfer_trtllm 789（+50%）→ 新 kernel 无损 QK RoPE 融合 **796（+52%）**。

@@ -418,6 +418,37 @@ set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope_fp8, cache_k_rope_fp8)   
 </table>
 <p>这也是为什么融合收益出现在 decode（小 batch、launch 开销占比高），而不是 prefill（大 batch、计算密集、launch 开销被摊薄）。</p>
 
+<h4>每个常量的来源与计算方式</h4>
+<p>新 kernel <code>fused_dsa_quant_store.py</code> 顶部的每个常量都不是随意设的，而是从「模型架构 + 原量化 kernel + fp8 格式」一一对应搬过来。因为目标是字节级无损，这些常量必须和原 <code>quant_k_cache.py</code> 完全一致，一个都不能动。</p>
+<p><strong>① 模型架构决定（DSA MLA 写死的维度）</strong></p>
+<table>
+<tr><th>常量</th><th>值</th><th>来源</th></tr>
+<tr><td><code>_DIM_NOPE</code></td><td>512</td><td>模型的 <code>kv_lora_rank=512</code>，即 K 经 LoRA 压缩后的低秩维度。原代码 <code>dv=512</code>、<code>assert dim_nope == 512</code></td></tr>
+<tr><td><code>_DIM_ROPE</code></td><td>64</td><td>模型的 <code>qk_rope_head_dim=64</code>，RoPE 位置编码维度（不做低秩压缩）。原代码 <code>assert dim_rope == 64</code></td></tr>
+</table>
+<p>这两个是 GLM-5.2 / DSA 架构的固有值，<code>quantize_k_cache_separate</code> 里还专门有 <code>if dim_nope != 512: raise ValueError</code> 校验。</p>
+<p><strong>② 量化算法 / fp8 格式决定</strong></p>
+<table>
+<tr><th>常量</th><th>值</th><th>来源</th></tr>
+<tr><td><code>_GROUP_SIZE</code></td><td>128</td><td>per-block 量化的 tile 大小。原代码 <code>tile_size: int = 128</code>、<code>assert tile_size == 128</code>，和权重 <code>weight_block_size=[128,128]</code> 的量化粒度一致</td></tr>
+<tr><td><code>_FP8_MAX</code></td><td>448.0</td><td>fp8 e4m3fn 格式的最大可表示值。原 kernel 传 <code>torch.finfo(torch.float8_e4m3fn).max</code>（就是 448.0）；e4m3fn 对称（min = -448），所以新 kernel 用 <code>-FP8_MAX</code> 当 clamp 下界，省一个常量</td></tr>
+</table>
+<p><strong>③ 由上面推导的纯算术常量</strong></p>
+<table>
+<tr><th>常量</th><th>值</th><th>计算方式</th></tr>
+<tr><td><code>_NUM_NOPE_BLOCKS</code></td><td>4</td><td><code>_DIM_NOPE // _GROUP_SIZE</code> = <code>512 // 128</code></td></tr>
+<tr><td><code>_SCALE_BYTES</code></td><td>16</td><td><code>_NUM_NOPE_BLOCKS × 4</code>（每块一个 fp32 scale，4 字节）</td></tr>
+<tr><td><code>_ROPE_BYTES</code></td><td>128</td><td><code>_DIM_ROPE × 2</code>（bf16 每元素 2 字节）</td></tr>
+<tr><td><code>_TOTAL_BYTES</code></td><td>656</td><td><code>512 + 16 + 128</code>（KV buffer 每 token 总字节）</td></tr>
+<tr><td><code>_NOPE_OFFSET</code></td><td>0</td><td>nope 排最前</td></tr>
+<tr><td><code>_SCALE_OFFSET</code></td><td>512</td><td>nope 之后：<code>0 + _DIM_NOPE</code></td></tr>
+<tr><td><code>_ROPE_OFFSET</code></td><td>528</td><td>scale 之后：<code>512 + _SCALE_BYTES</code></td></tr>
+</table>
+<p><strong>为什么必须逐字对齐</strong>：per-block 量化是「每 128 个元素独立算一个 scale」——如果 <code>_GROUP_SIZE</code> 变了，scale 的划分边界就变，量化结果完全不同；如果 <code>_FP8_MAX</code> 变了，scale 公式 <code>y_s = max(|y|) / 448</code> 就变。所以这两个值一动，融合 kernel 写出的 656 字节就和原两步路径对不上，<code>test_correctness</code> 的字节级对比就会失败。这就是为什么这些常量要「照抄」而不是「优化」。</p>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：常量定义来自 <code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code>（新 kernel），逐项对应 <code>python/sglang/kernels/ops/attention/dsa/quant_k_cache.py</code> 的 <code>_quantize_k_cache_fast_kernel</code> / <code>quantize_k_cache_separate</code>（原路径）。</p>
+</blockquote>
+
 <p>排除剩下的 4 个融合点里，3 个被硬性条件挡住（闭源 kernel / 不是融合对象），唯一能做的是 QK RoPE + KV cache write——写一个 DSA 专用的融合 triton kernel 无损实现，端到端从 789 提升到 <strong>796 tok/s（+0.9%）</strong>，总收益从 baseline 的 <strong>+52%</strong>。</p>
 <p>完整性能链条：baseline 524 → allreduce fusion + flashinfer_trtllm 789（+50%）→ 新 kernel 无损 QK RoPE 融合 <strong>796（+52%）</strong>。</p>
 <p>无损版的速度增益很小（+0.9%，在 benchmark 噪声范围内），它的核心价值是<strong>字节级无损</strong>——把「量化 + 写入」两步合成一步、且保证和开融合无 patch 的输出完全一致（见「无损的证明」），而不是「再快一档」。</p>
