@@ -290,6 +290,86 @@ assert (
 </ol>
 <p>替代原来的 <code>quantize_k_cache_separate()</code> + <code>set_mla_kv_buffer_triton()</code> 两步，消除中间 tensor 分配 + 额外 kernel launch。</p>
 
+<h4>无损的证明（理论 + 实验）</h4>
+<p>「无损」不是口头承诺，可以从理论和实验两方面证死。</p>
+<p><strong>理论：量化公式与 DSA 原 kernel 逐行等价</strong></p>
+<p>无损版 kernel（<code>_fused_dsa_quant_store_kernel</code>）的量化逻辑，和 DSA 原本的 <code>_quantize_k_cache_fast_kernel</code>（<code>quantize_k_cache_separate</code> 的底层 kernel，位于 <code>python/sglang/kernels/ops/attention/dsa/quant_k_cache.py</code>）<strong>逐行等价</strong>。</p>
+<p>DSA 原 kernel 的量化核心：</p>
+<pre><code>y_s = tl.max(tl.abs(y)) / FP8_MAX              # scale = max(|y|) / 448
+y_s_inv = 1.0 / y_s
+y_q = tl.clamp(y * y_s_inv, FP8_MIN, FP8_MAX).to(fp8)   # 量化
+tl.store(dst_q_ptr, y_q, mask=mask)            # 存 fp8 量化值
+tl.store(dst_s_ptr, y_s)                        # 存 fp32 scale
+# rope 部分：bf16 原样拷贝，不量化
+data = tl.load(src_ptr, mask=mask)
+tl.store(dst_ptr, data, mask=mask)</code></pre>
+<p>无损版 kernel 的量化核心：</p>
+<pre><code>y_s = tl.max(tl.abs(y)) / FP8_MAX
+y_s_inv = 1.0 / y_s
+y_q = tl.clamp(y * y_s_inv, -FP8_MAX, FP8_MAX).to(fp8)
+tl.store(dst_q, y_q)
+tl.store(dst_s, y_s)
+# rope 部分：bf16 原样拷贝
+data = tl.load(..., mask=mask, other=0.0)
+tl.store(dst, data, mask=mask)</code></pre>
+<p>逐项对照：</p>
+<table>
+<tr><th>环节</th><th>DSA 原 kernel</th><th>无损版 kernel</th><th>等价性</th></tr>
+<tr><td>scale 公式</td><td><code>y_s = max(abs(y)) / FP8_MAX</code></td><td>同</td><td>✅ 完全一致</td></tr>
+<tr><td>量化公式</td><td><code>clamp(y/y_s, FP8_MIN, FP8_MAX)</code></td><td><code>clamp(y/y_s, -FP8_MAX, FP8_MAX)</code></td><td>✅ fp8 e4m3fn 对称，<code>FP8_MIN = -FP8_MAX = -448</code></td></tr>
+<tr><td>scale 存储</td><td>每 128 维一块，fp32</td><td>同</td><td>✅</td></tr>
+<tr><td>rope 处理</td><td>bf16 原样拷贝，不量化</td><td>同</td><td>✅</td></tr>
+<tr><td>block 划分</td><td>512/128 = 4 个 nope 块 + 1 个 rope 块</td><td>同（<code>num_blocks_per_token = 5</code>）</td><td>✅</td></tr>
+<tr><td>字节布局</td><td><code>[fp8(512) | fp32(16) | bf16(128)]</code></td><td>同（offset 0 / 512 / 528）</td><td>✅</td></tr>
+</table>
+<p>唯一区别是<strong>写入目标</strong>：原路径先量化进中间 tensor，再由 <code>set_mla_kv_buffer_triton</code> 按 <code>loc</code> scatter 进 paged buffer；无损版在量化时直接把三个 dtype 写到 paged buffer 的对应偏移。<strong>写进去的 656 字节完全相同</strong>。</p>
+<p>为什么「字节相同 = 无损」：KV cache 里存的就是这 656 字节，下游 attention（flashinfer/trtllm）读的也是这 656 字节。字节一致 ⇒ 反量化出来的 K 完全一致 ⇒ decode 逐 token 输出相同。</p>
+<p><strong>实验：128 token 字节级对比</strong></p>
+<p>standalone 测试（<code>fused_dsa_quant_store.py</code> 的 <code>test_correctness</code>，随分支提交）：随机 128 个 token 的 k_nope/k_rope + 随机 loc，非融合路径（<code>quantize_k_cache</code> + <code>kv_buffer[loc] = ...</code>）和融合路径（<code>fused_dsa_quant_store</code>）各自写 paged buffer，逐字节对比三个区域：</p>
+<table>
+<tr><th>区域</th><th>字节范围</th><th>结果</th></tr>
+<tr><td>nope fp8 量化值</td><td><code>[0, 512)</code></td><td>✅ 完全一致</td></tr>
+<tr><td>scale fp32</td><td><code>[512, 528)</code></td><td>✅ 完全一致</td></tr>
+<tr><td>rope bf16</td><td><code>[528, 656)</code></td><td>✅ 完全一致</td></tr>
+</table>
+<p>128 token × 656 字节 = 83968 字节，逐字节全等。</p>
+<p>注：ground truth 用的 <code>quantize_k_cache</code>（concat 路径）和 b300-glm52 实际用的 <code>quantize_k_cache_separate</code> 共用同一个 <code>_quantize_k_cache_fast_kernel</code>，官方 <code>quant_k_cache.py</code> 的 <code>__main__</code> 已验证两者字节级一致，所以用 <code>quantize_k_cache</code> 做 ground truth 等价。</p>
+<p><strong>实验代码</strong>（<code>fused_dsa_quant_store.py</code>，clone 分支后在带 GPU 的容器里 <code>python fused_dsa_quant_store.py</code> 即可复现）：</p>
+<pre><code>def test_correctness():
+    from sglang.kernels.ops.attention.dsa.quant_k_cache import quantize_k_cache
+    torch.manual_seed(42)
+    num_tokens, size = 128, 256
+    k_nope = torch.randn(num_tokens, DIM_NOPE, dtype=torch.bfloat16, device="cuda")
+    k_rope = torch.randn(num_tokens, DIM_ROPE, dtype=torch.bfloat16, device="cuda")
+    loc = torch.randint(0, size, (num_tokens,), dtype=torch.int32, device="cuda")
+
+    # 非融合 ground truth：concat 量化 + index 写入
+    kv_buffer_ref = torch.zeros(size, 1, TOTAL_BYTES, dtype=torch.float8_e4m3fn, device="cuda")
+    cache_k = torch.cat([k_nope.unsqueeze(1), k_rope.unsqueeze(1)], dim=-1).unsqueeze(1)
+    cache_k_quant = quantize_k_cache(cache_k).squeeze(1).squeeze(1)
+    kv_buffer_ref[loc] = cache_k_quant.unsqueeze(1)
+
+    # 融合路径：一个 kernel 直接写 paged buffer
+    kv_buffer_fused = torch.zeros(size, 1, TOTAL_BYTES, dtype=torch.float8_e4m3fn, device="cuda")
+    fused_dsa_quant_store(k_nope, k_rope, kv_buffer_fused, loc)
+
+    # 字节级对比三个区域
+    ref_u8 = kv_buffer_ref.view(torch.uint8)
+    fused_u8 = kv_buffer_fused.view(torch.uint8)
+    ref_tokens, fused_tokens = ref_u8[loc], fused_u8[loc]
+    nope_match = torch.equal(ref_tokens[:, :, :DIM_NOPE], fused_tokens[:, :, :DIM_NOPE])
+    scale_match = torch.equal(ref_tokens[:, :, DIM_NOPE:DIM_NOPE+SCALE_BYTES],
+                               fused_tokens[:, :, DIM_NOPE:DIM_NOPE+SCALE_BYTES])
+    rope_match = torch.equal(ref_tokens[:, :, DIM_NOPE+SCALE_BYTES:],
+                              fused_tokens[:, :, DIM_NOPE+SCALE_BYTES:])
+    print(f"nope fp8 量化值:  {'✅ 一致' if nope_match else '❌ 不一致'}")
+    print(f"scale (fp32):    {'✅ 一致' if scale_match else '❌ 不一致'}")
+    print(f"rope (bf16):     {'✅ 一致' if rope_match else '❌ 不一致'}")
+    assert nope_match and scale_match and rope_match, "无损验证失败"</code></pre>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：<code>test_correctness</code> 在带 GPU 的容器（.8，B200，镜像 v0.5.15.post1-cuda13-b200）内运行，<code>torch.manual_seed(42)</code>，输出三行 <code>✅ 一致</code>。完整代码（含失败时 diff 打印的 <code>else</code> 分支）随分支 <code>pex/qk-rope-fusion-lossless</code> 的 <code>fused_dsa_quant_store.py</code> 提交，末尾 <code>if __name__ == "__main__": test_correctness()</code>。</p>
+</blockquote>
+
 <h4>代码位置</h4>
 <table>
 <tr><th>版本</th><th>分支</th><th>文件</th><th>说明</th></tr>
