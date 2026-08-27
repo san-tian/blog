@@ -38,7 +38,7 @@
 </header>
 
 <div class="callout">
-  <b>同源说明</b>：vLLM Router（vllm-project/router）与 <a href="smg.html">SMG</a> / <a href="sglang-router.html">SGLang Model Gateway</a> 同源——负载均衡策略（round_robin / random / consistent_hash / power_of_two / cache_aware）是同一套代码，代码结构（Rust + py_src + py_test）也一致。vLLM Router 是这套框架面向 vLLM 的分发。
+  <b>同源说明</b>：vLLM Router（vllm-project/router）与 <a href="smg.html">SMG</a> / （旧）sgl-model-gateway 同源——负载均衡策略（round_robin / random / consistent_hash / power_of_two / cache_aware）是同一套代码，代码结构（Rust + py_src + py_test）也一致。vLLM Router 是这套框架面向 vLLM 的分发。注意：SGLang 新的 <a href="sglang-router.html">experimental/sgl-router</a> 是重写的 slim 实现，与此不同源。
 </div>
 
 <section>

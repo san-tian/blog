@@ -33,23 +33,24 @@
 
 <header>
   <h1>SMG（Shepherd Model Gateway）功能实现讲解</h1>
-  <p>引擎无关的高性能路由 Gateway（Rust）。能力标注：<span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ 多实例HA</span><span class="tag ok">✅ 多后端</span><span class="tag no">✗ 块级KV感知</span><span class="tag no">✗ Token负载感知</span></p>
+  <p>引擎无关的高性能路由 Gateway（Rust）。能力标注：<span class="tag ok">✅ 块级KV感知（精确镜像）</span><span class="tag ok">✅ 多实例HA</span><span class="tag ok">✅ 多后端</span><span class="tag no">✗ Token负载感知</span></p>
 </header>
 
 <div class="callout">
-  <b>同源说明</b>：SMG（lightseekorg/smg，原 psrl-project/smg）是一个通用 Rust LLM router 框架，<b>被 SGLang 采用为 sgl-model-gateway、被 vLLM 采用为 vllm-router</b>——三者的调度策略（cache_aware / power_of_two / consistent_hash 等）是同一套代码。见 <a href="sglang-router.html">SGLang Router</a> 和 <a href="vllm-router.html">vLLM Router</a> 子页面。
+  <b>同源说明</b>：SMG（lightseekorg/smg，原 psrl-project/smg）是一个通用 Rust LLM router 框架，<b>被 vLLM 采用为 vllm-router</b>，也曾被 SGLang 采用为（旧的）sgl-model-gateway——三者的调度策略（cache_aware / power_of_two / consistent_hash 等）是同一套代码。注意：SGLang 新的 <code>experimental/sgl-router</code> 是重新实现的 slim KV-aware router，与 SMG 不同源。见 <a href="sglang-router.html">SGLang Router</a> 和 <a href="vllm-router.html">vLLM Router</a> 子页面。
 </div>
 
 <section>
-  <h2>前缀缓存感知 —— cache-aware routing tree 怎么实现</h2>
-  <p>SMG 的 <code>cache_aware</code> 策略（8 种之一，默认）维护一棵 <b>radix tree</b> 记录各 worker 的前缀缓存，路由时按前缀匹配度 + 负载平衡阈值打分。核心调优参数揭示了实现机制：</p>
+  <h2>块级 KV 感知 —— 精确镜像后端 KV cache</h2>
+  <p>SMG 的 <code>cache_aware</code> 策略（8 种之一，默认）维护一棵 radix tree，但它是<b>后端 KV cache 结构的精确镜像</b>——文档原话 <i>"exact replica of each backend's KV cache structure, enabling 100% accurate prefix match calculations"</i>：</p>
   <ul>
-    <li><code>--cache-threshold</code>（0.3）：前缀匹配比例低于此值视为缓存未命中。</li>
-    <li><code>--balance-abs-threshold</code>（64）/ <code>--balance-rel-threshold</code>（1.5）：负载差超过绝对/相对阈值才触发 rebalance——即"粘住缓存，直到负载失衡"。这与 llm-d 的 sticky-until-saturated 同思路。</li>
-    <li><code>--eviction-interval-secs</code>（120）、<code>--max-tree-size</code>（67M 节点）：radix tree 的驱逐周期和容量上限。</li>
+    <li><b>同 token / 同分页 / 同驱逐策略</b>：使用与后端调度器（SGLang / vLLM / TRT-LLM）完全相同的 token 表示、page size（如 FlashInfer 16 token）、驱逐策略（LRU / LFU / FIFO 等），所以前缀匹配 100% 准确。</li>
+    <li><b>两种树</b>：StringTree（HTTP，raw text）+ TokenTree（gRPC，token ID）。</li>
+    <li><b>Event-Driven Block Size</b>：当 worker 上报 KV cache 事件时，cache-aware 策略从事件流<b>学习实际 block size</b>（优先于 <code>--block-size</code> 默认值）——这是块级 KV 事件感知。</li>
+    <li><b>阈值参数</b>：<code>--cache-threshold</code>（0.3，前缀匹配比例门槛）、<code>--balance-abs-threshold</code>（64）、<code>--balance-rel-threshold</code>（1.5）——负载失衡才 rebalance（「粘缓存直到失衡」，与 llm-d sticky-until-saturated 同思路）。</li>
   </ul>
-  <p>注意：这是<b>前缀级</b>（radix tree 文本匹配），不订阅引擎 KV 事件，不感知引擎真实缓存和驱逐——所以标注"前缀缓存感知"而非"块级 KV 感知"。</p>
-  <span class="src">来源：<a href="https://github.com/lightseekorg/smg" target="_blank">SMG README</a>（8 策略 + cache-aware 描述）；策略参数见同源的 <a href="https://docs.sglang.ai/advanced_features/sgl_model_gateway.html" target="_blank">SGLang Model Gateway 文档</a>（"Cache-Aware Policy Tuning"）</span>
+  <p>效果：文档报告 TTFT p50 降 70%、p99 降 75%，cache hit 率 0%→65%。</p>
+  <span class="src">来源：<a href="https://lightseek.org/smg/concepts/routing/cache-aware/" target="_blank">SMG Cache-Aware Routing 文档</a>（"Radix Tree Mirroring" / "100% Backend Synchronization" / "Event-Driven Block Size"）</span>
 </section>
 
 <section>
@@ -82,7 +83,7 @@
 
 <section>
   <h2>小结</h2>
-  <p>SMG 的定位是「引擎无关 + 企业级路由 + 最强多实例 HA」：HA 同步用 SWIM+CRDT 做到了包括 cache-aware 路由树在内的全量状态跨副本一致；但 KV 感知停留在前缀级（radix tree），没有块级 KV 事件——这是它相对 Dynamo/llm-d 的主要短板。</p>
+  <p>SMG 的定位是「引擎无关 + 企业级路由 + 最强多实例 HA」：HA 同步用 SWIM+CRDT 做到了包括 cache-aware 路由树在内的全量状态跨副本一致；KV 感知是<b>精确镜像后端 KV cache</b>（100% 前缀匹配准确）+ KV 事件学习 block size，块级精确度与 Dynamo/llm-d 相当，但实现方式不同（主动镜像复刻 vs 被动事件订阅）。</p>
 </section>
 
 <div class="foot">

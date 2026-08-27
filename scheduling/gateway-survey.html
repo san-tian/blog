@@ -130,12 +130,12 @@
     <tr>
       <td><b><a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a></b><br><code>lightseekorg/smg</code></td>
       <td>Rust<br>Apache 2.0</td><td>—</td>
-      <td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="ok">✅</td>
+      <td class="ok">✅</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="ok">✅</td>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a></b><br><code>sgl-project/sglang</code> 内置</td>
-      <td>Rust</td><td>随 SGLang</td>
-      <td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td>
+      <td><b><a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a></b><br><code>sglang/experimental/sgl-router</code></td>
+      <td>Rust</td><td>—</td>
+      <td class="part">⚠️</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td>
     </tr>
     <tr>
       <td><b><a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a></b><br><code>vllm-project/aibrix</code></td>
@@ -164,7 +164,7 @@
     </tr>
   </table>
   <p class="muted">图例：<b class="ok">✅</b> 支持 / <b class="part">⚠️</b> 部分·受限 / <b class="no">✗</b> 无 / <b class="unk">?</b> 未知。<br>
-  能力术语：<b>块级 KV 感知</b>＝订阅引擎 KV 事件做块级精确 cache hit；<b>前缀缓存感知</b>＝radix 树 / 文本前缀近似；<b>Token 负载感知</b>＝prefill / decode token 级负载打分；<b>在线学习路由</b>＝ML 预测延迟 / 奖励；<b>多实例 HA 同步</b>＝跨副本路由状态同步；<b>SLA 自动扩缩</b>＝按 SLO 自动扩缩副本；<b>多后端</b>＝跨引擎 / 跨提供商。</p>
+  能力术语：<b>块级 KV 感知</b>＝订阅引擎 KV 事件或精确镜像后端 KV cache，做块级精确 cache hit；<b>前缀缓存感知</b>＝radix 树 / 文本前缀近似；<b>Token 负载感知</b>＝prefill / decode token 级负载打分；<b>在线学习路由</b>＝ML 预测延迟 / 奖励；<b>多实例 HA 同步</b>＝跨副本路由状态同步；<b>SLA 自动扩缩</b>＝按 SLO 自动扩缩副本；<b>多后端</b>＝跨引擎 / 跨提供商。</p>
 
   <h3>各 gateway 功能实现讲解（子页面）</h3>
   <ul>
@@ -211,14 +211,14 @@
     <tr>
       <td><b>SMG</b></td>
       <td><span class="yes">✅ 最完整</span> SWIM gossip（1s）+ CRDT，同步 worker registry / rate limit / <b>routing tree（含 cache-aware 状态）</b> / policy</td>
-      <td><span class="part">⚠️ 前缀级</span> cache-aware routing tree（radix tree，非 KV event）</td>
+      <td><span class="yes">✅ 精确镜像</span> 精确镜像后端 KV cache（同 token/分页/驱逐策略）+ KV 事件学习 block size</td>
       <td><span class="no">❌ 无</span> 引擎无关，可独立部署（K8s 可选，StatefulSet）</td>
       <td>8 种策略（cache_aware / power_of_two / consistent_hashing / prefix_hash…）</td>
     </tr>
     <tr>
       <td><b>SGLang Router</b></td>
       <td><span class="part">⚠️ 单实例</span> 引擎内嵌（sgl-router），多实例各自独立无跨实例同步</td>
-      <td><span class="yes">✅ 原生</span> 引擎内 radix tree 前缀复用</td>
+      <td><span class="part">⚠️ 外部索引</span> 支持 external KV indexer（cache_aware_zmq），可选需外部部署；默认本地 radix tree</td>
       <td><span class="no">❌ 无</span> 引擎内嵌，无需 K8s / Ray</td>
       <td>cache-aware（近似 radix tree）+ 最短队列（balance threshold）</td>
     </tr>
