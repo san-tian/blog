@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GLM-5.2 decode TPOT 优化：AllReduce 融合 + 融合 DSA 量化写回 kernel</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --card: #ffffff;
+    --card-2: #f8f8f7;
+    --border: #e7e5e4;
+    --text: #1c1917;
+    --text-dim: #78716c;
+    --accent: #1d4ed8;
+    --accent-2: #1d4ed8;
+    --green: #059669;
+    --red: #dc2626;
+    --yellow: #d97706;
+    --code-bg: #f8fafc;
+    --inline-code-bg: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    margin: 0;
+    padding: 0;
+    font-size: 16px;
+  }
+  .container { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+  header.hero { text-align: center; margin-bottom: 56px; padding-bottom: 32px; border-bottom: 1px solid var(--border); }
+  header.hero h1 { font-size: 2.1em; font-weight: 700; line-height: 1.3; color: #111111; margin: 0 0 16px; }
+  header.hero .subtitle { color: var(--text-dim); font-size: 1em; margin: 0 auto; max-width: 640px; }
+  header.hero .meta { margin-top: 20px; color: var(--text-dim); font-size: 0.85em; }
+  header.hero .meta span { display: inline-block; padding: 4px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 999px; margin: 0 4px; }
+  h2 { color: #111111; font-size: 1.5em; font-weight: 650; margin: 56px 0 20px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h3 { color: #111111; font-size: 1.18em; font-weight: 600; margin: 36px 0 14px; }
+  h4 { color: var(--text); font-size: 1.02em; font-weight: 600; margin: 24px 0 10px; }
+  p { margin: 14px 0; }
+  strong { color: #111111; font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: "JetBrains Mono", "Fira Code", "SF Mono", Consolas, "Liberation Mono", Menlo, monospace; background: var(--inline-code-bg); color: #2563eb; padding: 2px 6px; border-radius: 4px; font-size: 0.88em; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 18px 0; font-size: 0.85em; line-height: 1.6; }
+  pre code { background: none; color: var(--text); padding: 0; border-radius: 0; font-size: 1em; }
+  .tok-cmt { color: #9ca3af; font-style: italic; }
+  .tok-kw { color: #7c3aed; font-weight: 600; }
+  .tok-num { color: #b45309; }
+  .tok-str { color: #059669; }
+  blockquote { margin: 20px 0; padding: 14px 20px; border-left: 4px solid var(--accent); background: var(--card); border-radius: 0 8px 8px 0; color: var(--text); }
+  blockquote.keyinsight { border-left-color: var(--accent-2); }
+  blockquote.keyinsight::before { content: "💡 关键洞察"; display: block; color: var(--accent-2); font-weight: 700; font-size: 0.85em; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .background { background: var(--card); border-left: 4px solid var(--yellow); padding: 18px 24px; border-radius: 0 8px 8px 0; margin: 24px 0; }
+  .callout-summary { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin: 24px 0; }
+  .callout-summary h3 { margin: 0 0 16px; font-size: 1.1em; color: var(--accent); }
+  .callout-summary .point { margin: 12px 0; padding-left: 0; line-height: 1.7; }
+  .callout-summary .badge { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 0.75em; font-weight: 600; margin-right: 8px; }
+  .callout-summary .badge.ok { background: rgba(5, 150, 105, 0.12); color: var(--green); }
+  .callout-summary .badge.no { background: rgba(220, 38, 38, 0.12); color: var(--red); }
+  .callout-summary .badge.q { background: rgba(217, 119, 6, 0.12); color: var(--yellow); }
+  table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.92em; display: block; overflow-x: auto; }
+  th, td { border: 1px solid var(--border); padding: 10px 14px; text-align: left; vertical-align: top; }
+  th { background: var(--card-2); color: #111111; font-weight: 600; }
+  tr:nth-child(even) td { background: var(--card); }
+  td code, th code { font-size: 0.85em; }
+  ul, ol { padding-left: 1.5em; }
+  li { margin: 6px 0; }
+  footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85em; text-align: center; }
+  @media (max-width: 640px) { .container { padding: 24px 16px 64px; } header.hero h1 { font-size: 1.6em; } table { font-size: 0.82em; } }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header class="hero">
+  <h1>GLM-5.2 decode TPOT 优化：AllReduce 融合 + 融合 DSA 量化写回 kernel</h1>
+  <div class="subtitle">解读 sglang commit <code>1f3f4b1</code> —— 两个代码优化 + 一份优化报告，decode verify 累计 <strong>-13.1%</strong></div>
+  <div class="meta">
+    <span>📝 本文主要由 AI agent 完成</span>
+    <span>sglang</span>
+    <span>DSA</span>
+    <span>fp8 量化</span>
+    <span>triton</span>
+    <span>MoE</span>
+    <span>TPOT</span>
+  </div>
+</header>
+
+<div class="background">
+  <p>这个 commit（<a href="https://github.com/MindLab-Research/sglang/commit/1f3f4b12709525c951f7ab120371d4f022cf12e2">1f3f4b12709525c951f7ab120371d4f022cf12e2</a>）是 GLM-5.2 decode 阶段每 token 时延（TPOT）优化工作的一部分，目标是<strong>不改精度、纯代码/配置改动</strong>地把 decode TPOT 降低 30%。</p>
+  <p>它包含<strong>两处代码改动</strong> + <strong>一份优化文档</strong>：① 把 DSA KV cache 的量化 + 写回从「两步」融合成「一个 triton kernel」；② 在 MoE forward 里跳过一次无意义的 slice+copy；③ 文档记录了两项配置层优化（AllReduce 融合、tile 对齐）与一套严格的 A/B 方法论。</p>
+</div>
+
+<div class="callout-summary">
+  <h3>核心结论</h3>
+  <div class="point"><span class="badge ok">无损融合</span>新的 <code>fused_dsa_quant_store</code> 用一个 kernel 替代「量化 + 写回」两步，省掉一个中间 tensor 和一次 kernel launch，且 <strong>nope / scale / rope 三区域字节级一致（0-byte diff）</strong>。</div>
+  <div class="point"><span class="badge ok">量化公式逐行一致</span>量化必须用 <code>y * (1.0/y_s)</code> 而非 <code>y / y_s</code>——浮点舍入不同会导致<strong>非字节级无损</strong>，这是合并时被实测揪出来并修正的关键细节。</div>
+  <div class="point"><span class="badge q">诚实结论</span>这个融合 kernel 的端到端收益只有 <strong>+0.9%（噪声级）</strong>；本次 -13.1% 的核心增益来自 AllReduce 融合（-4.6~5.5%）和 tile 对齐（-8.8%），<strong>不是</strong>这个 kernel。</div>
+  <div class="point"><span class="badge ok">累计 -13.1%</span>decode verify 阶段 57.9ms → 50.3ms，主要来自 tile 对齐 <code>BLOCK_SIZE_M=64→16</code> 与去掉 <code>--enforce-disable-flashinfer-allreduce-fusion</code>。</div>
+</div>
+
+<h2>这个 commit 改了什么</h2>
+<p>整个 commit 共 <strong>5 个文件、+309 / -16 行</strong>：</p>
+<table>
+<tr><th>文件</th><th>改动</th><th>作用</th></tr>
+<tr><td><code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code></td><td><strong>新增 +192 行</strong></td><td>融合 DSA 量化 + paged 写回 triton kernel</td></tr>
+<tr><td><code>python/sglang/srt/mem_cache/memory_pool.py</code></td><td>+8 / -12</td><td>接入点：<code>_write_mla_kv_buffer</code> 的 <code>dsa_kv_cache_store_fp8</code> 分支改用融合 kernel</td></tr>
+<tr><td><code>python/sglang/srt/layers/moe/fused_moe_triton/layer.py</code></td><td>+8 / -4</td><td>跳过 no-op 的 slice + contiguous</td></tr>
+<tr><td><code>docs/agent/glm52-tpot-decode-optimization.md</code></td><td><strong>新增 +99 行</strong></td><td>优化报告：AllReduce 融合 + tile 对齐 + 方法论</td></tr>
+<tr><td><code>AGENTS.md</code></td><td>+2</td><td>登记文档 + PR#5 合并备注</td></tr>
+</table>
+
+<h2>背景：DSA 的 KV cache 长什么样</h2>
+<p>GLM-5.2 走的是 DSA（DeepSeek Sparse Attention）路径。在 DSA 里，每 token 每层的 K 被拆成两部分：</p>
+<ul>
+<li><strong><code>k_nope</code>（512 维）</strong>：不带位置编码的 latent 部分，可以做量化压缩；</li>
+<li><strong><code>k_rope</code>（64 维）</strong>：已经过 RoPE 的旋转位置编码部分，<strong>位置敏感、保持 bf16 不量化</strong>。</li>
+</ul>
+<p>写进 paged KV buffer 时，两种 dtype 混在同一个 buffer 里，字节布局固定为：</p>
+<pre><code><span class="tok-cmt"># 每 token 每层 656 字节</span>
+[ nope_fp8(512) | scales_fp32(16) | rope_bf16(128) ]
+    0 .. 511        512 .. 527        528 .. 655   (字节偏移)
+
+<span class="tok-cmt"># fused_dsa_quant_store.py:15-27</span>
+_DIM_NOPE = 512          <span class="tok-cmt"># k_nope 维度</span>
+_DIM_ROPE = 64           <span class="tok-cmt"># k_rope 维度</span>
+_GROUP_SIZE = 128        <span class="tok-cmt"># 量化分组大小</span>
+_NUM_NOPE_BLOCKS = 4     <span class="tok-cmt"># 512 / 128</span>
+_SCALE_BYTES = 16        <span class="tok-cmt"># 4 blocks × 4 字节 fp32 scale</span>
+_ROPE_BYTES = 128        <span class="tok-cmt"># 64 × 2 字节 bf16</span>
+_TOTAL_BYTES = 656</code></pre>
+<p>其中 <code>scales_fp32(16)</code> 是 k_nope 每 128 个元素一组的量化 scale（4 组 × 4 字节），<code>rope_bf16(128)</code> 是 64 个 bf16 元素（64 × 2 = 128 字节）。MLA/DSA 的更完整背景见姊妹篇 <a href="sglang-fusion-ceiling-a-config.html">《sglang 算子融合：从天花板到突破》</a>。</p>
+
+<h2>改动①：融合 DSA 量化写回 kernel</h2>
+<p>这是本 commit 的核心代码。原来这条路径要分两步走：</p>
+<ol>
+<li><code>quantize_k_cache_separate()</code> —— 先把 k_nope 量化成 fp8、拿到 scale，产出一个<strong>中间 tensor</strong>；</li>
+<li><code>set_mla_kv_buffer_triton()</code> —— 再把这个中间 tensor 写进 paged KV buffer。</li>
+</ol>
+<p>两步意味着：<strong>一个中间 tensor 的显存分配/释放 + 两次 kernel launch</strong>。融合后，一个 kernel 边量化边按字节偏移直接写进 paged buffer，省掉中间 tensor 和一次 launch。</p>
+
+<h3>三个 dtype 视图覆盖同一个 buffer</h3>
+<p>融合的关键是：同一个 paged buffer，用三个不同 dtype 的 view 分别覆盖三段字节区间——这样 triton kernel 写不同区域时能各自以「元素」为单位寻址，而不需要手动拼字节：</p>
+<pre><code><span class="tok-cmt"># fused_dsa_quant_store.py:102-109</span>
+buf_flat = kv_buffer.view(kv_buffer.shape[0], kv_buffer.shape[1], -1)
+nope_buf  = buf_flat[:, :, _NOPE_OFFSET : _NOPE_OFFSET + _DIM_NOPE]          <span class="tok-cmt"># fp8</span>
+scale_buf = buf_flat[:, :, _SCALE_OFFSET : _SCALE_OFFSET + _SCALE_BYTES].view(torch.float32) <span class="tok-cmt"># fp32</span>
+rope_buf  = buf_flat[:, :, _ROPE_OFFSET : _ROPE_OFFSET + _ROPE_BYTES].view(torch.bfloat16)   <span class="tok-cmt"># bf16</span></code></pre>
+
+<h3>kernel 网格：每 token 5 个 block</h3>
+<p>kernel 用二维 program grid <code>(num_tokens, 5)</code>：前 4 个 block 各量化一段 128 维的 k_nope，第 5 个 block 负责拷贝 k_rope。这样 128 个元素一组恰好整除、nope 段无需 mask：</p>
+<pre><code><span class="tok-cmt"># fused_dsa_quant_store.py:50-80（节选）</span>
+token_id = tl.program_id(0)
+block_id = tl.program_id(1)
+cache_loc = tl.load(loc_ptr + token_id).to(tl.int64)
+
+<span class="tok-kw">if</span> block_id &lt; NUM_NOPE_BLOCKS:
+    <span class="tok-cmt"># 量化这一段 nope，用自己的 per-block scale</span>
+    offs = block_id * GROUP_SIZE + tl.arange(0, GROUP_SIZE)
+    y = tl.load(k_nope_ptr + token_id * k_nope_stride_0 + offs).to(tl.float32)
+    y_s = tl.max(tl.abs(y)) / FP8_MAX
+    y_s_inv = 1.0 / y_s
+    y_q = tl.clamp(y * y_s_inv, -FP8_MAX, FP8_MAX).to(nope_buf_ptr.dtype.element_ty)
+    tl.store(nope_buf_ptr + cache_loc * nope_buf_stride_0 + offs, y_q)
+    tl.store(scale_buf_ptr + cache_loc * scale_buf_stride_0 + block_id, y_s)
+<span class="tok-kw">else</span>:
+    <span class="tok-cmt"># 拷贝 rope 部分，保持 bf16（位置敏感，不量化）</span>
+    rope_block = block_id - NUM_NOPE_BLOCKS
+    offs = rope_block * GROUP_SIZE + tl.arange(0, GROUP_SIZE)
+    mask = offs &lt; DIM_ROPE
+    data = tl.load(k_rope_ptr + token_id * k_rope_stride_0 + offs, mask=mask, other=0.0)
+    tl.store(rope_buf_ptr + cache_loc * rope_buf_stride_0 + offs, data, mask=mask)</code></pre>
+
+<h3>正确性细节一：量化公式必须逐行一致</h3>
+<p>per-block 量化是「按块找最大绝对值 → 除以 fp8 上限得到 scale → 乘 scale 的倒数」：</p>
+<pre><code>y_s = max(|y|) / 448.0
+y_q = clamp(y * (1.0 / y_s), -448.0, 448.0)</code></pre>
+<p>这里的陷阱在 <strong><code>y * (1.0/y_s)</code> vs <code>y / y_s</code></strong>：两者数学上等价，但浮点舍入不同。融合 kernel 必须与未融合路径 <code>quant_k_cache._quantize_k_cache_fast_kernel</code> <strong>逐行一致</strong>（用 scale 倒数相乘，不用除法），否则写出的字节与未融合路径对不上——就不是「无损」了。源码注释明确写了这一点（B300 + triton 3.6.0 上实测 <code>y / y_s</code> 会产出不同的 nope 字节）。<span class="badge ok">✓ 源码确认</span></p>
+
+<h3>正确性细节二：fp8 e4m3fn 是对称的，max = 448</h3>
+<p>代码里 <code>_FP8_MAX = 448.0</code> 不是随便取的：fp8 e4m3fn 是对称格式，可表示的最大有限值是 448，且 <code>max = -min</code>。所以 clamp 的上下界是 <code>±448</code>。<span class="badge ok">✓ 源码确认</span></p>
+
+<h3>正确性细节三：测试必须用无碰撞的 loc</h3>
+<p><code>test_correctness()</code> 里对 fused 与未融合两条路径做<strong>字节级对比</strong>（nope / scale / rope 三段分别 <code>torch.equal</code>）。一个容易踩的坑：槽位 id <code>loc</code> 必须用 <code>torch.randperm</code>（无碰撞），不能用 <code>randint</code>——128 token 撒进 256 个槽，<code>randint</code> 平均产生 ~27 个碰撞槽；碰撞槽的「最后写入者」在 torch 参考实现（串行覆盖）与 triton 融合 kernel（并行、顺序未定义）之间不一致，会让测试<strong>假失败</strong>，尽管 kernel 本身是无损的。</p>
+
+<blockquote class="keyinsight">
+<p>这个测试细节本身就是一个好例子：验证「无损」时，<strong>对照实验和被测对象必须在同样的并行语义下比较</strong>，否则测的不是正确性，而是两条路径对同一竞态的未定义行为差异。</p>
+</blockquote>
+
+<h2>改动②：跳过 no-op 的 slice + contiguous</h2>
+<p>第二个代码改动很小，但目标明确：在 MoE forward 里，<code>final_hidden_states</code> 的最后一维如果已经等于 <code>origin_hidden_states_dim</code>，就不再做 slice + contiguous。原来是无条件的：</p>
+<pre><code><span class="tok-cmt"># fused_moe_triton/layer.py:1291 附近（改前）</span>
+final_hidden_states = final_hidden_states[..., :origin_hidden_states_dim].contiguous()
+
+<span class="tok-cmt"># 改后：维度已匹配就直接跳过</span>
+<span class="tok-kw">if</span> final_hidden_states.shape[-1] != origin_hidden_states_dim:
+    final_hidden_states = final_hidden_states[..., :origin_hidden_states_dim].contiguous()</code></pre>
+<p>那个无条件的 view + contiguous 会额外起一个 copy kernel（profile 里表现为 <code>unrolled/vectorized_elementwise</code>），数值上完全无影响，只是白跑一次拷贝。加一个 shape 判断就能省掉每个 MoE forward 的一次 kernel launch——它计入本次 -13.1% 的累计收益里。<span class="badge ok">✓ 源码确认</span></p>
+
+<h2>改动③：文档记录的两项配置层优化</h2>
+<p>真正拉开收益的两项，其实不在「写代码」而在「改配置」，它们记录在新增文档 <code>docs/agent/glm52-tpot-decode-optimization.md</code> 里。</p>
+
+<h3>AllReduce 融合（-4.6~5.5%）</h3>
+<p>GLM-5.2 的 <code>GlmMoeDsaForCausalLM</code> 在 SM100（Blackwell）支持列表内，去掉 <code>--enforce-disable-flashinfer-allreduce-fusion</code> 后，TP 的 AllReduce 能融进 mnnvl attention kernel，省掉单独的通信-计算切换。同 bs/seq_len 的 A/B 下，decode verify 中位数下降 4.6%~5.5%。</p>
+
+<h3>tile 对齐 BLOCK_SIZE_M=64→16（-8.8%，最大单项）</h3>
+<p>decode 日志显示 GLM-5.2（E=257, N=256, L20D）<strong>没有匹配的 MoE config 文件，走了默认 <code>BLOCK_SIZE_M=64</code></strong>。参考同构 B200 实测 tune 值，为 L20D 生成 <code>BLOCK_SIZE_M=16</code> 的 config（含 down TMA），严格 A/B 下：</p>
+<table>
+<tr><th>batch size</th><th>baseline（BLOCK_M=64）</th><th>B200 精确（BLOCK_M=16）</th><th>改善</th></tr>
+<tr><td>bs = 9</td><td>67.6ms</td><td>60.8ms</td><td><strong>-10.1%</strong></td></tr>
+<tr><td>bs = 13</td><td>73.7ms</td><td>67.6ms</td><td><strong>-8.3%</strong></td></tr>
+<tr><td>bs = 16</td><td>76.0ms</td><td>69.3ms</td><td><strong>-8.8%</strong></td></tr>
+<tr><td>平均</td><td>57.9ms</td><td>50.3ms</td><td><strong>-8.8%</strong></td></tr>
+</table>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：<code>docs/agent/glm52-tpot-decode-optimization.md</code>，SPEC-TIMING verify 口径、同 bs/seq_len 严格 A/B、排除缓存混杂；2026-08-27 结案。</p>
+</blockquote>
+<p>一个值得注意的细节：config 的 18 个标准 key 里，<code>BLOCK_M=16</code> 覆盖了 1~512 的全部 decode 实际 M 值；decode 里 46.4% 的非标准 M（40/72/88/104）fallback 到邻近 key 后 BLOCK_M 仍为 16。也就是说<strong>主导的 tile 维度被 100% 覆盖</strong>，残留的只是 N/K 的 64↔128 小差异。</p>
+
+<h3>判定不做的方向（避免负优化）</h3>
+<table>
+<tr><th>方向</th><th>结论</th><th>原因</th></tr>
+<tr><td>非标准 M 精确 tune（40/72/88/104）</td><td>❌ 不做</td><td>上游设计本身也 fallback；blind tune 会负优化；tune 需 ~19.3GB 显存而 decode 仅剩 ~14GB</td></tr>
+<tr><td>FP8 AllReduce 通信量化</td><td>❌ 回退</td><td>quant/dequant 开销 &gt; 通信节省，且引入精度风险</td></tr>
+<tr><td>Elementwise kernel 融合（第二瓶颈）</td><td>❌ 暂缓</td><td>分散在几十个小 kernel，非单点；ROI 低、改动面大</td></tr>
+</table>
+
+<h2>性能收益汇总</h2>
+<table>
+<tr><th>优化项</th><th>类型</th><th>实测效果</th><th>状态</th></tr>
+<tr><td>AllReduce 融合</td><td>启动参数</td><td>decode verify -4.6%~5.5%</td><td>✅ 已验证</td></tr>
+<tr><td>tile 对齐 <code>BLOCK_SIZE_M=64→16</code></td><td>MoE kernel config</td><td>decode verify <strong>-8.8%</strong></td><td>✅ 已验证</td></tr>
+<tr><td>融合 DSA 量化写回 kernel</td><td>代码</td><td>端到端 <strong>+0.9%（噪声级）</strong></td><td>✅ 已验证（无损）</td></tr>
+<tr><td>no-op slice 跳过</td><td>代码</td><td>计入累计收益</td><td>✅ 已验证</td></tr>
+<tr><td><strong>decode verify 累计</strong></td><td>—</td><td><strong>57.9ms → 50.3ms（-13.1%）</strong></td><td>生产稳定</td></tr>
+</table>
+<blockquote>
+<p>📐 <strong>数据来源</strong>：commit message + <code>AGENTS.md</code> PR#5 合并备注 + <code>docs/agent/glm52-tpot-decode-optimization.md</code>。融合 kernel 的「+0.9%」出自 AGENTS.md 自承——「博客自承端到端 +0.9%（噪声级），核心增益来自 allreduce fusion 非此 kernel」。</p>
+</blockquote>
+
+<h2>诚实结论</h2>
+<p>这个 commit 最有教学价值的一点，恰恰是它<strong>如实标注了每个优化的真实贡献</strong>：</p>
+<ul>
+<li><strong>融合 DSA 量化写回 kernel</strong> 在工程上是干净的——省中间 tensor、省一次 launch、字节级无损，但端到端只带来 <strong>+0.9%（噪声级）</strong>。它的价值在「消除低效、为后续优化铺路」，不在「直接提速」。</li>
+<li><strong>-13.1% 的大头来自配置层</strong>：AllReduce 融合（-4.6~5.5%）和 tile 对齐（-8.8%）。这两项不写一行算子代码，只是「去掉一个错误的启动 flag」和「补上一份匹配的 config 文件」。</li>
+<li>方法论上，文档反复强调<strong>同 bs/seq_len 的严格 A/B 才可信</strong>——grep 全日志均值会混入多次重启的不同批次，直接导致误判。</li>
+</ul>
+<p>一句话：<strong>机制上「能不能融合」和性能上「融合划不划算」是两件事</strong>，这个 commit 用源码和实测把两者都讲清楚了。</p>
+
+<footer>
+  <p>源仓库：<a href="https://github.com/MindLab-Research/sglang">MindLab-Research/sglang</a> · 本文解读的 commit：<a href="https://github.com/MindLab-Research/sglang/commit/1f3f4b12709525c951f7ab120371d4f022cf12e2">1f3f4b12709525c951f7ab120371d4f022cf12e2</a></p>
+  <p>源码索引：<code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code>（新增）· <code>python/sglang/srt/mem_cache/memory_pool.py::_write_mla_kv_buffer</code> · <code>python/sglang/srt/layers/moe/fused_moe_triton/layer.py::forward_impl</code> · <code>docs/agent/glm52-tpot-decode-optimization.md</code></p>
+</footer>
+
+</div>
+</body>
+</html>

@@ -103,6 +103,19 @@
   <h1>san-tian 的技术 blog</h1>
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
+  <a class="post" href="glm52-tpot-decode-optimization.html">
+    <div class="title">GLM-5.2 decode TPOT 优化：AllReduce 融合 + 融合 DSA 量化写回 kernel（commit 解读）</div>
+    <div class="desc">解读 sglang commit <code>1f3f4b1</code>：融合 DSA KV cache 量化写回 kernel（一个 triton kernel 替代「量化 + 写回」两步、字节级无损）+ MoE 跳过 no-op slice。诚实结论：融合 kernel 端到端 +0.9%（噪声级），-13.1% 的核心增益来自 AllReduce 融合（-4.6~5.5%）和 tile 对齐 BLOCK_SIZE_M=64→16（-8.8%）。含量化公式字节级一致性、fp8 e4m3fn max=448、无碰撞 loc 测试三个正确性细节。</div>
+    <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
+      <span class="tag">sglang</span>
+      <span class="tag">DSA</span>
+      <span class="tag">fp8</span>
+      <span class="tag">triton</span>
+      <span class="tag">TPOT</span>
+    </div>
+  </a>
+
   <a class="post" href="scheduling/index.html">
     <div class="title">调度调研：GLM-5.2 prefill 实测 + LLM 路由全景调研</div>
     <div class="desc">一个专题目录：① GLM-5.2 prefill 实测报告（弱超线性 α≈1.12，cache hit 22× 远超长度 1.3×）；② LLM 推理「调度 &amp; 负载感知」路由全景调研（Dynamo/llm-d/SMG 等开源 gateway + Llumnix/LMetric 等 CCF-A 论文）。</div>
