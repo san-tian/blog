@@ -1,43 +1,32 @@
 # blog
 
-技术博客仓库：文章 + 写作 skill + 自动部署。仓库地址 `pex_org/blog`（私有）。
+技术博客仓库：文章 + 写作方法论（blog-skill）+ 自动部署。私有仓库 `pex_org/blog`。
 
-## 这是什么
+把技术讨论、源码调研、部署复盘整理成可发布的技术文章。
 
-| 内容 | 说明 |
-|---|---|
-| 文章 | 根目录的 `.md`（草稿/源码）+ `.html`（渲染版，蓝白简约主题） |
-| `index.html` | 目录页，每发一篇 HTML 文章在此加入口 |
-| `SKILL.md` | 写作方法论（blog-skill），完整写作流程与配色规范 |
-| 本文件 | 仓库首页说明 |
+## 仓库组成
+
+| 内容 | 位置 | 说明 |
+|---|---|---|
+| 文章（`.md` / `.html`） | 根目录 | `.md` 草稿 + `.html` 渲染版（蓝白简约主题） |
+| `index.html` | 根目录 | 目录页，每发一篇 HTML 文章加一个入口 |
+| `SKILL.md` | 根目录 | 写作 skill 入口（供 agent 识别，内容同本文） |
+| 本文件 `README.md` | 根目录 | 仓库首页 = 完整写作方法论 + 部署说明 |
 
 ## 🔄 自动部署（push 后网页自动更新）
 
-这个仓库接入了自动部署：**main 分支更新后，网页博客会自动更新，无需任何手动操作。**
-
-### 工作流
+**main 分支更新后，网页博客会自动更新，无需任何手动操作。**
 
 ```
-改文章 → 建分支 → push → 提 PR → san-tian approve + merge
-                                          │
-                     main 更新 ──► Gitea webhook（push 事件）
-                                          │
-                     NAS blog-serve 容器收到 webhook → git pull --ff-only
-                                          │
-                              网页静态文件更新，立即生效
+改文章 → push main（bot 可直接 push）→ Gitea webhook（push 事件）
+        → NAS blog-serve 容器收到 webhook → git pull --ff-only
+        → 网页静态文件更新，立即生效
 ```
 
-1. **改动必须走 PR**：main 有分支保护（禁止直接 push），流程是建分支 → 提 PR → `san-tian` review 后 merge。
-2. **merge 即触发部署**：PR merge 到 main 后，Gitea 向 `blog-serve` 容器的 webhook 端点发 push 通知。
-3. **自动 pull**：容器收到 webhook 后执行 `git pull --ff-only`，拉取最新 main。
-4. **立即生效**：容器直接托管 `git pull` 后的目录，无需重启、无需拷贝。
-
-### 技术栈
-
-- **静态托管**：NAS 上的 Docker 容器 `blog-serve`（Python 静态服务器 + webhook 一体，监听 8081）
-- **自动更新**：Gitea webhook（`push` 事件）→ 容器内 `git pull --ff-only`
-- **源目录**：NAS `/vol1/1000/blog`（本仓库的 clone）
-- **容器维护**：`docker restart blog-serve`；已设 `--restart unless-stopped`（NAS 重启自动恢复）
+- blog 仓库**允许直接 push main**（不走 PR），其余 pex_org 仓库才走 PR + review。
+- 技术栈：NAS 上的 Docker 容器 `blog-serve`（Python 静态服务器 + webhook 一体，监听 8081）
+- 源目录：NAS `/vol1/1000/blog`（本仓库 clone）
+- 容器维护：`docker restart blog-serve`；已设 `--restart unless-stopped`
 
 ## 访问方式
 
@@ -45,24 +34,112 @@
 |---|---|
 | tailscale 内网 | http://100.78.161.108:8081/ |
 | 公网 | 见 PassNAT 穿透（8081 端口映射） |
+| 仓库 | http://100.78.161.108:3000/pex_org/blog |
 
-## 写作流程（摘要）
-
-详见 `SKILL.md`。核心几条：
-
-1. 草稿用 Markdown（`.md`），需展示时生成 HTML（蓝白主题，inline CSS 自包含）
-2. 文件名 kebab-case 英文：`pd-decode-kvcache-offload.md`
-3. 只写最终正确结论，不写过程叙事；数据来源标注在对应表格底下
-4. 每发一篇 HTML，在 `index.html` 加目录入口
-5. 诚实标注不确定处：`✓ 源码确认` / `✗ 纠正` / `⚠ 诚实标注`
-
-## 目录结构
+## 本地工作目录（唯一 source of truth）
 
 ```
-blog/
-├── README.md          # 本文件（仓库首页）
-├── SKILL.md           # 写作 skill（完整方法论）
-├── index.html         # 目录页
-├── *.md / *.html      # 文章
-└── ...
+~/blog
 ```
+
+这是 `pex_org/blog` 的本地 clone，是**唯一**编辑目录。不使用 sync workspace，避免双 source of truth 分歧。
+
+### 首次 clone（新机器上）
+
+```bash
+git clone http://100.78.161.108:3000/pex_org/blog.git ~/blog
+```
+
+### 写完发布
+
+```bash
+cd ~/blog
+git add -A
+git commit -m "<文章标题/更新说明>"
+git push
+```
+
+push 后自动部署，文章即可在线访问。
+
+## 写作流程
+
+1. **先理清结构和结论**：技术 blog 先定结论再展开推导，读者能一眼看到核心观点
+2. **源码引用带行号**：涉及代码调研的，关键论断必须附源码文件路径 + 行号，方便复核
+3. **诚实标注不确定处**：区分"源码可确认"和"需实测"，不强行下结论。用明确措辞：
+   - `✓ 源码确认` —— 有源码证据的事实
+   - `✗ 纠正` —— 推翻之前的错误论断
+   - `⚠ 诚实标注` —— 无法仅凭分析断言、需实测
+4. **复盘类文章**：记录每一步纠正踩在什么取舍上，表格化呈现"错误论断 → 被什么纠正 → 暴露的真实取舍"
+5. **只写最终正确结论，不写过程叙事**：不要出现"误解""纠正""错误版本""之前以为""最初几轮""被什么纠正"这类过程性措辞——读者要的是结论，不是你的认知曲折。直接写正确的版本即可。
+6. **实验环境简化或不提**：背景块里不要写"我们这套部署是 8× MI300X + 8× HDR IB + CP8 + layersplit..."这种具体环境细节，只在需要复现的"怎么开"等实操章节里给参数。背景只讲概念。
+7. **不写术语条**：背景里不要列"术语：P/D = ... · KV cache = ..."这种术语表。概念在正文里自然解释，需要术语首次出现时括号注释。
+8. **不写复盘/教训章节**：文章末尾不要加"复盘：每一步纠正踩在什么取舍上"这种元叙事小节。文章只讲技术本身。
+9. **数据来源标注在对应表格底下**：任何含实测数据的表格、benchmark 结果、性能数字，必须在表格正下方用 blockquote 标注数据来源——命令、脚本路径、实测时间、环境（机器/镜像/版本）。数据要可复现、可追溯，不能让读者猜数字从哪来。
+
+## 格式
+
+- 草稿用 Markdown（`.md`），便于版本控制和 diff
+- 需要分享/展示时再生成 HTML（蓝白简约主题，代码块语法高亮，inline CSS 自包含）
+- 文件名用 kebab-case 英文，不用中文：`pd-decode-kvcache-offload.md`
+- 每发一篇 HTML 文章，在 `index.html` 目录页加一个入口
+
+## 配色方案（蓝白简约）
+
+所有 HTML 文章统一一套 inline CSS，保持视觉一致。
+
+### 颜色变量
+
+```css
+:root {
+  --bg: #fafaf9;            /* 页面背景（米白） */
+  --card: #ffffff;          /* 卡片背景（纯白） */
+  --card-2: #f8f8f7;        /* 次级卡片背景 */
+  --border: #e7e5e4;        /* 边框（浅灰） */
+  --text: #1c1917;          /* 正文（深灰黑） */
+  --text-dim: #78716c;      /* 辅助文字（暖灰） */
+  --accent: #1d4ed8;        /* 强调色（深蓝） */
+  --accent-2: #1d4ed8;      /* 次强调（同深蓝，保持一致） */
+  --green: #059669;
+  --red: #dc2626;
+  --yellow: #d97706;
+  --code-bg: #f8fafc;       /* 代码块背景 */
+  --inline-code-bg: #f1f5f9;/* 行内 code 背景 */
+}
+```
+
+### 使用约定
+
+- **背景**：页面背景用 `--bg`（米白），卡片/区块用 `--card`（纯白），代码块用 `--code-bg`
+- **文字**：正文 `--text`，辅助说明/元信息用 `--text-dim`
+- **链接 / 强调**：统一用 `--accent`（深蓝），不用紫色或绿色
+- **卡片边界**：用 `1px solid var(--border)`，避免黑实线
+- **不要用深色主题**：早期文章用过深色背景（`#0d1117`），现统一为浅色
+
+### 复用方法
+
+复制 `glm52-llm-d-agentic-serving.html` 的 `<style>` 块作为模板：颜色变量、代码块高亮（`.tok-cmt`）、卡片样式（`.callout-summary`、`.background`）、表格样式都已正确实现。新文章以此为骨架，只改 body 内容即可。
+
+### 调用样式
+
+- `.background`：左侧橙色/蓝色边框的解释性块（背景、定义）
+- `.callout-summary`：多 bullet 总结块（核心结论、关键决策）
+- `.point` + `.badge.ok/no/q`：总结块内的三色标签（绿/红/黄）
+- `blockquote`：补充说明、诚实标注
+
+## 现有文章
+
+| 文件 | 主题 |
+|---|---|
+| `pd-decode-kvcache-offload.md` | PD 分离架构里 decode 二级 KV 缓存机制与路径 A/B 对比 |
+| `why-decode-needs-no-l2-cache.html` | 上面那篇的 HTML 版，标题《为什么 PD 分离中，decode 不需要二级缓存？》 |
+| `sglang-fusion-ceiling-a-config.html` | sglang 融合 ceiling A 配置 |
+| `dynamic-context-parallelism.html` | 动态上下文并行 |
+
+## 关键原则
+
+- **机制 ≠ 划算**：源码告诉你"能不能做"，硬件配置告诉你"做了划不划算"，两者要分开论证
+- **带宽要算聚合**：多卡/多链路场景，按单链路算带宽会得出错误结论（实测教训：8×IB 聚合后路径 A 反而比路径 B 快）
+- **每轮纠正是资产**：技术讨论里被纠正的错误论断，本身就是最有价值的复盘素材，别藏起来
+- **单一 source of truth**：所有编辑只在 `~/blog` 这个 clone 里进行，不引入额外同步层，避免双 source of truth 分歧
+- **配色一致**：所有 HTML 文章用同一套蓝白主题，不各搞一套
+- **数据可追溯**：每个含数据的表格底下必须标注数据来源（命令/脚本/时间/环境），不写无来源的数字

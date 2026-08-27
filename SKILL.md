@@ -1,7 +1,7 @@
 ---
 name: blog
 version: 1.2.0
-description: "技术 blog 写作与发布。当用户要写技术文章/blog/讲解文档/复盘笔记，或要把草稿整理成 Markdown/HTML 发布时使用。文章仓库与 skill 已合并到私有 Gitea 组织仓库 pex_org/blog（http://106.52.237.179:50787/pex_org/blog），通过 Gitea Pages 渲染。"
+description: "技术 blog 写作与发布。当用户要写技术文章/blog/讲解文档/复盘笔记，或要把草稿整理成 Markdown/HTML 发布时使用。文章仓库与 skill 已合并到私有 Gitea 组织仓库 pex_org/blog（http://100.78.161.108:3000/pex_org/blog），push 后自动部署到网页。"
 metadata:
   requires: []
 ---
@@ -19,7 +19,7 @@ metadata:
 |---|---|
 | 文章（`.md` / `.html`）+ `index.html` | `pex_org/blog` 根目录 |
 | 本 skill（`SKILL.md`） | `pex_org/blog` 根目录 |
-| 仓库 | `http://106.52.237.179:50787/pex_org/blog`（私有，组织 `pex_org`） |
+| 仓库 | `http://100.78.161.108:3000/pex_org/blog`（私有，组织 `pex_org`） |
 | Pages 渲染 | Gitea Pages（域名配置见下） |
 
 ## 本地工作目录（唯一 source of truth）
@@ -33,7 +33,7 @@ metadata:
 ### 首次 clone（新机器上）
 
 ```bash
-git clone http://106.52.237.179:50787/pex_org/blog.git ~/blog
+git clone http://100.78.161.108:3000/pex_org/blog.git ~/blog
 ```
 
 ### 写完发布
@@ -51,16 +51,13 @@ push 后 Gitea Pages 会自动重建，文章即可在线访问。
 
 | 用途 | URL |
 |---|---|
-| 仓库 | http://106.52.237.179:50787/pex_org/blog |
-| Pages 渲染 | （Gitea Pages 域名，见下） |
+| 仓库 | http://100.78.161.108:3000/pex_org/blog |
+| 网页（tailscale 内网） | http://100.78.161.108:8081/ |
+| 网页（公网） | 见 PassNAT 穿透（8081 端口映射） |
 
-> ⚠️ Pages 域名待定：Gitea 服务器尚未开启 Pages 功能，开启后这里补上实际 URL。
+## 自动部署
 
-## Pages 配置
-
-Gitea Pages 需服务器端 `app.ini` 开启 `[server] ENABLE_GITEA_PAGES = true` + `[pages] DOMAIN`，
-并在仓库 Settings → Pages 里指定构建分支（`main`）与目录（`/`）。
-HTML 文件是自包含 inline CSS，Pages 直接托管不做 Jekyll 转换，蓝白主题和语法高亮完整保留。
+main 分支更新后自动部署：Gitea webhook（push 事件）→ NAS `blog-serve` 容器 `git pull --ff-only` → 网页立即更新。详见 `README.md`。
 
 ## 写作流程
 
