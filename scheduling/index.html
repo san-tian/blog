@@ -38,6 +38,8 @@
     transition: all 0.2s ease;
   }
   .post:last-of-type { border-bottom: 1px solid var(--border); }
+  .post.sub { margin-left: 28px; padding-left: 18px; border-left: 2px solid var(--border); padding-top: 18px; padding-bottom: 18px; }
+  .post.sub .title { font-size: 1.05em; font-weight: 500; }
   .post:hover {
     padding-left: 12px;
     border-left: 3px solid var(--accent);
@@ -127,8 +129,8 @@
     </div>
   </a>
 
-  <a class="post" href="gateway-comparison.html">
-    <div class="title">调度 Gateway 四维度对比 + 学术论文调度策略</div>
+  <a class="post sub" href="gateway-survey/comparison.html">
+    <div class="title">↳ 深入对比：四维度对比 + 学术论文调度策略</div>
     <div class="desc">四个关注维度（多实例 HA/同步、SGLang KV event 感知、K8s/Ray 依赖、调度方式）× 9 个 gateway 横向对比；第二部分逐篇梳理 CCF-A 论文（Llumnix/LMetric/QUARTZ/Lodestar 等）的调度/路由策略，并给出按四个关注点的选型建议。</div>
     <div class="meta">
       <span class="tag agent">🤖 AI-assisted</span>
