@@ -141,16 +141,27 @@ W_i(r) = Σ c_j        # 所有「排在 r 前面」的请求的剩余 prefill �
     </tr>
   </table>
 
-  <h3>更底层的理论锚点（可追溯的经典文献）</h3>
+  <h3>概念来源：经典调度理论（<b>注意：结论不能直接套用</b>）</h3>
   <ul>
-    <li><b>SRPT 最优性</b>：单机、已知处理时间下，<b>SRPT（最短剩余处理时间优先）最小化平均响应时间</b>——这是「短请求插队」的教科书级最优性依据，本设计的 SJF 重排直接继承此结论。来源：Schrage &amp; Miller, "The Queue M/G/1 with the Shortest Remaining Processing Time Discipline", Operations Research 14(4):670–684, 1966。 <a href="https://doi.org/10.1287/opre.14.4.670" target="_blank">DOI →</a></li>
-    <li><b>SPT（Smith 规则）</b>：<b>最短处理时间优先最小化平均等待时间</b>。来源：W. E. Smith, "Various Optimizers for Single-Stage Production", Naval Research Logistics Quarterly 3(1-2):59–66, 1956。 <a href="https://doi.org/10.1002/nav.3800030106" target="_blank">DOI →</a></li>
-    <li><b>Size-based dispatching</b>：按 job size 路由 + size-aware 排序，是 Harchol-Balter 等人的经典方向。本设计就是把 size-based dispatching 引入 LLM 推理 gateway，其中 size = 剩余 prefill token（KV 命中后）。来源：Harchol-Balter, Schroeder, Bansal, Agrawal, "Size-Based Scheduling to Improve Web Performance", ACM TOCS 21(2), 2003。 <a href="https://researchr.org/publication/Harchol-BalterSBA03" target="_blank">论文 →</a></li>
+    <li><b>SRPT 最优性</b>：单机、已知处理时间下，SRPT（最短剩余处理时间优先）最小化平均响应时间。来源：Schrage &amp; Miller, "The Queue M/G/1 with the Shortest Remaining Processing Time Discipline", Operations Research 14(4):670–684, 1966。 <a href="https://doi.org/10.1287/opre.14.4.670" target="_blank">DOI →</a></li>
+    <li><b>SPT（Smith 规则）</b>：最短处理时间优先最小化平均等待时间。来源：W. E. Smith, "Various Optimizers for Single-Stage Production", Naval Research Logistics Quarterly 3(1-2):59–66, 1956。 <a href="https://doi.org/10.1002/nav.3800030106" target="_blank">DOI →</a></li>
+    <li><b>Size-based dispatching</b>：按 job size 路由 + size-aware 排序。来源：Harchol-Balter, Schroeder, Bansal, Agrawal, "Size-Based Scheduling to Improve Web Performance", ACM TOCS 21(2), 2003。 <a href="https://researchr.org/publication/Harchol-BalterSBA03" target="_blank">论文 →</a></li>
   </ul>
+  <div class="callout warn">
+    <b>这些经典结论在 LLM 推理场景下假设不成立，只能当「概念来源」、不能当「理论依据」</b>：
+    <ul>
+      <li><b>「处理时间已知」只对 prefill 成立</b>：SRPT/SPT 假设 job size 到达即知；LLM 里 decode 长度不可预测（用户随时停），只有 prefill 的「需新算 token」可估计。</li>
+      <li><b>「可抢占且无成本」不成立</b>：SRPT 依赖免费抢占；LLM 里抢占 = 丢弃/换出 KV cache，代价不小。</li>
+      <li><b>「服务时间外生」不成立</b>：经典模型里 job 处理时间与调度无关；LLM 里 batching 让处理时间内生（取决于和谁同批）。</li>
+      <li><b>「size 不随服务器改变」不成立（最关键）</b>：经典 size-based 里同一 job 到处一样；LLM 里 size = KV 命中后需新算 token，因实例缓存状态而异——这正是 KV 感知路由存在的原因，也是经典结论失效的根源。</li>
+      <li><b>「最小化平均」目标不匹配</b>：SRPT/SPT 优化平均响应时间；LLM 要的是尾延迟（P99 TTFT）和 SLO 达成率，SRPT 甚至会恶化长请求的尾延迟。</li>
+    </ul>
+    所以：这些文献的价值在于<b>提供正确的概念框架 + 「短任务优先」的普适直觉</b>；真正可直接作为依据的前身是 <b>QUARTZ</b>——它已经用「分位预测」处理了「处理时间未知」、用「aging」处理了「短任务优先的公平性」，这两个正是经典文献没解决、而 LLM 场景必须解决的问题。
+  </div>
 
   <div class="callout core">
     <b>一句话谱系</b>：<br>
-    <b>经典调度理论</b>（JSQ 路由目标 + SPT/SRPT 最优排序 + size-based dispatching）<br>
+    <b>经典调度理论</b>（JSQ 路由目标 + SPT/SRPT + size-based dispatching，<b>作为概念来源，结论见上限定</b>）<br>
     → <b>LLM 系统的旧指标</b>（LMetric 的需新算 prefill token、llm-d/Lodestar 的 inflight token 总和、QUARTZ 的逐请求准入队列）<br>
     → <b>本设计</b>（把这些旧指标的粒度统一推进到「逐请求」，路由层直接算 W_i(r) 而非聚合值）。<br>
     <b>所以它不发明新指标，真正的增量只有一处</b>：把「队列总成本」换成「排在 r 前面的成本之和」（逐请求前缀和），以及把 QUARTZ 的准入层逐请求机制提前到路由层。
