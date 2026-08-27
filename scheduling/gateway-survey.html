@@ -362,9 +362,50 @@
   </table>
 </section>
 
+<!-- ============ 路由策略 + 负载指标总结 ============ -->
+<section>
+  <h2>路由策略 + 负载指标总结（论文提炼）</h2>
+  <p>把读论文得到的「可选路由策略」和「负载指标」提炼成两张表，作为选型/实现的参考清单。</p>
+
+  <h3>组合范式：如何平衡「KV 命中」+「负载均衡」</h3>
+  <table>
+    <tr><th>范式</th><th>代表</th><th>机制</th><th>调参成本</th></tr>
+    <tr><td><b>加权求和</b></td><td>Dynamo（cache-credit）、llm-d 旧默认、AIBrix</td><td>score = α·KV 指标 + β·负载指标</td><td class="part">⚠️ 逐负载调参（LMetric 指出其缺点）</td></tr>
+    <tr><td><b>阈值过滤 + 择优</b></td><td>llm-d sticky-until-saturated</td><td>先过滤过载实例，再在剩余里选 KV 最优</td><td class="ok">✅ τ = R_peak × T_max 闭式可推导</td></tr>
+    <tr><td><b>乘法路由</b></td><td>LMetric（OSDI 26）</td><td>score = KV 指标 × 负载指标</td><td class="ok">✅ 零调参（超参跨实例约去）</td></tr>
+    <tr><td><b>学习式</b></td><td>Lodestar</td><td>MLP 预测 −TTFT，特征含各指标</td><td class="part">⚠️ 免手工规则，需在线训练</td></tr>
+    <tr><td><b>分位感知</b></td><td>QUARTZ</td><td>保守分位预测 + K=2 候选 + 三成分打分</td><td class="ok">✅ 分位水平 α 可定（默认 0.95）</td></tr>
+  </table>
+
+  <h3>负载指标清单</h3>
+  <table>
+    <tr><th>类别</th><th>指标</th><th>说明 / 来源</th></tr>
+    <tr><td rowspan="4"><b>KV 感知<br>（cache hit）</b></td><td>KV cache 命中率</td><td>比例；LMetric 指出不能反映绝对计算量</td></tr>
+    <tr><td>需新算的 prefill token 数</td><td>LMetric 推荐（考虑 KV 命中后的绝对量）</td></tr>
+    <tr><td>前缀匹配长度（LPM）</td><td>QUARTZ 用；反映前缀局部性</td></tr>
+    <tr><td>块级重叠（gpu/cpu/disk 分层）</td><td>Dynamo/llm-d/SMG 块级感知</td></tr>
+    <tr><td rowspan="8"><b>负载<br>（load）</b></td><td>batch size</td><td>LMetric 负载指标</td></tr>
+    <tr><td>queued requests（队列深度）</td><td>Lodestar、QUARTZ</td></tr>
+    <tr><td>running requests（活跃请求数）</td><td>Lodestar；llm-d decode 瓶颈信号</td></tr>
+    <tr><td>inflight prefill tokens</td><td>Lodestar；llm-d prefill 瓶颈信号</td></tr>
+    <tr><td>inflight decode tokens</td><td>Lodestar</td></tr>
+    <tr><td>KV cache 利用率</td><td>通用</td></tr>
+    <tr><td>GPU 内存利用率 / 型号</td><td>Lodestar（异构集群）</td></tr>
+    <tr><td>延迟估计（unfinished_requests / speed）</td><td>DLRouter</td></tr>
+  </table>
+
+  <div class="callout tip">
+    <b>关键洞察：prefill / decode token 必须分开</b>。Lodestar 明确强调 inflight prefill tokens 和 inflight decode tokens 要<b>分开保留</b>——prefill 是计算密集、decode 是内存带宽密集，合并会掩盖实例正逼近哪个瓶颈。llm-d 的「瓶颈匹配」是同一条思路：prefill 受限看 in-flight 未缓存 token，decode 受限看活跃请求数。这是「负载感知」最容易被忽视、也最关键的细节。
+  </div>
+</section>
+
 <!-- ============ 结论 ============ -->
 <section>
   <h2 class="core">结论与建议</h2>
+  <div class="callout core">
+    <b>工业 gateway 三选一结论</b>：同时满足「块级 KV 感知 + Token 负载感知 + 多实例 HA 同步 + 引擎无关」四个条件的，目前只有 <b>Dynamo、llm-d、SMG</b> 三家。<br>
+    其余六家短板：SGLang Router（slim，块级靠外部 indexer 可选，单实例无 HA）、AIBrix（前缀级 + 必须 K8s）、vLLM Router（前缀级 + vLLM 专用）、Ray Serve LLM（必须 Ray + SGLang 早期）、Lodestar（学术，单实例，学习式部署重）、DLRouter（新项目，前缀级）。
+  </div>
   <ul>
     <li><b>工业侧主流</b>（调度/负载感知）：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a>、<a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a> / <a href="https://github.com/vllm-project/router" target="_blank">vLLM Router</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve LLM</a>。</li>
     <li><b>学术侧核心会议</b>：<b>OSDI / NSDI / SOSP</b>（系统方向）+ ICML（ML 系统方向）。</li>
