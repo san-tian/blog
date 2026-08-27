@@ -186,6 +186,7 @@
 <!-- ============ 四维度对比 ============ -->
 <section>
   <h2 class="core">四维度对比：多实例 HA / SGLang KV event / K8s·Ray 依赖 / 调度方式</h2>
+  <p class="muted">③ 列语义：✅ 无编排依赖（可独立部署）/ ⚠️ 部分依赖 / ❌ 必须 K8s 或 Ray。</p>
   <table>
     <tr>
       <th style="min-width:100px">Gateway</th>
@@ -198,7 +199,7 @@
       <td><b>Dynamo</b></td>
       <td><span class="yes">✅</span> selection service replica sync（ZMQ）+ KV indexer P2P 恢复 + 启动 /dump；output-block 故意不同步</td>
       <td><span class="yes">✅ 块级</span> KV indexer 订阅 vLLM / SGLang 的 ZMQ KV 事件</td>
-      <td><span class="no">❌ 无</span> 引擎无关，可独立部署（K8s 可选，Grove operator）</td>
+      <td><span class="yes">✅ 无</span> 引擎无关，可独立部署（K8s 可选）</td>
       <td>token 负载打分（cache-credit 公式：KV 重叠度折算剩余 prefill + decode 负载），选最低</td>
     </tr>
     <tr>
@@ -212,14 +213,14 @@
       <td><b>SMG</b></td>
       <td><span class="yes">✅ 最完整</span> SWIM gossip（1s）+ CRDT，同步 worker registry / rate limit / <b>routing tree（含 cache-aware 状态）</b> / policy</td>
       <td><span class="yes">✅ 精确镜像</span> 精确镜像后端 KV cache（同 token/分页/驱逐策略）+ KV 事件学习 block size</td>
-      <td><span class="no">❌ 无</span> 引擎无关，可独立部署（K8s 可选，StatefulSet）</td>
+      <td><span class="yes">✅ 无</span> 引擎无关，可独立部署（K8s 可选）</td>
       <td>8 种策略（cache_aware / power_of_two / consistent_hashing / prefix_hash…）</td>
     </tr>
     <tr>
       <td><b>SGLang Router</b></td>
       <td><span class="part">⚠️ 单实例</span> 引擎内嵌（sgl-router），多实例各自独立无跨实例同步</td>
       <td><span class="part">⚠️ 外部索引</span> 支持 external KV indexer（cache_aware_zmq），可选需外部部署；默认本地 radix tree</td>
-      <td><span class="no">❌ 无</span> 引擎内嵌，无需 K8s / Ray</td>
+      <td><span class="yes">✅ 无</span> 引擎内嵌，无需 K8s / Ray</td>
       <td>cache-aware（近似 radix tree）+ 最短队列（balance threshold）</td>
     </tr>
     <tr>
@@ -254,7 +255,7 @@
       <td><b>DLRouter</b></td>
       <td><span class="q">❓ 信息少</span>（新项目）</td>
       <td><span class="q">❓</span></td>
-      <td><span class="part">⚠️ 独立</span> OpenAI 兼容 gateway</td>
+      <td><span class="yes">✅ 无</span> OpenAI 兼容 gateway，独立部署</td>
       <td>可插拔路由策略（跨 LMDeploy / vLLM / SGLang）</td>
     </tr>
   </table>
