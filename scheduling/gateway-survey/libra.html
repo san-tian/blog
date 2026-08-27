@@ -65,6 +65,15 @@
     <li><b>任意 s</b> → 混合切分（如把部分 decode 并进 prefill 段，或把部分 prefill 搬到另一 GPU 与 decode 并跑）</li>
   </ul>
   <p><b>所以 colocation 和 disaggregation 都是 FPS 的特例</b>——FPS 在更广的切分空间里动态找最优。</p>
+  <div class="callout tip">
+    <b>具体例子：让 prefill 节点多扛一部分 decode</b>（论文图 5，1024 prompt + 1024 output，两个 A100）：
+    <table>
+      <tr><th>切分点</th><th>GPU-1 做</th><th>GPU-2 做</th><th>吞吐</th></tr>
+      <tr><td>s=1024（传统 PD 分离）</td><td>1024 prefill</td><td>1024 decode</td><td>GPU-1 5.6 rps、GPU-2 1.7 rps → 端到端 <b>1.7 rps</b></td></tr>
+      <tr><td>s=1358（Libra 最优）</td><td>1024 prefill + 334 decode</td><td>690 decode</td><td>两者都 2.5 rps → 端到端 <b>2.5 rps</b></td></tr>
+    </table>
+    把切分点从 1024 移到 1358，就是让 prefill 节点多扛 334 个 decode token，直到两个 GPU 吞吐平衡——消除传统 PD 分离的「木桶效应」。
+  </div>
 </section>
 
 <section>
@@ -82,9 +91,15 @@
     <li>流程：先纳入所有 decode 请求（延迟关键），再根据 profile table 决定最大 prefill token 预算 M，贪心加 prefill 请求。</li>
     <li>profile table 用每批实测延迟（plen, ctx, dnum, time）持续校准。</li>
   </ul>
-  <h3>③ chunk-based KV transfer</h3>
+  <h3>③ chunk-based KV transfer（和 PD 分离的 KV 传输同机制，但更细粒度）</h3>
+  <p>切分后 micro-request 跨实例执行，需要把 KV cache 从 r_α 那台实例传给 r_β 那台实例——<b>本质上和 PD 分离的 KV cache 传输是同一类机制</b>（都是把 prefill 产生的 KV 传给继续 decode 的实例）。但有两点区别：</p>
   <ul>
-    <li>micro-request 跨实例执行时，KV cache 按 chunk 粒度传输（append-only，chunk 完成立即 DMA push 到对端），重叠通信与计算（RDMA/NCCL/Mooncake）。</li>
+    <li><b>传统 PD 分离</b>：在 prompt 末尾切，prefill 全部算完后<b>一次性</b>传整个 KV。</li>
+    <li><b>Libra</b>：切分点深入 decode 段，r_α 混合了 prefill + decode，KV 是<b>边产生边传</b>——每完成一个 chunk 立即 DMA push 到对端，Server1 边算 chunk k+1 边传 chunk k（重叠通信与计算，RDMA/NCCL/Mooncake）。</li>
+  </ul>
+  <ul>
+    <li><b>可行性前提</b>：KV cache 是 <b>append-only（追加写）</b>，已完成的 chunk 不可变，可安全并行传输，无一致性问题。</li>
+    <li><b>代价（论文 challenge 3）</b>：切分越深入 decode，需传输的 KV 越多——论文指出合并了 decode 段的 micro-request 比标准分离<b>多 3 次 token cache 传输</b>，显著增加 KV 传输量。所以 chunk 级流式 + 重叠计算是这套机制能落地的关键。</li>
   </ul>
 </section>
 
@@ -107,7 +122,7 @@
 <section>
   <h2>和你研究主线的区别（重要）</h2>
   <div class="callout ac">
-    Libra 的核心是「<b>请求切分</b>」（在任意 token 边界切请求）而非「<b>实例间 KV 感知路由</b>」——它不按 KV cache 命中选实例，而是按<b>吞吐均衡</b>切分请求、平衡两阶段的 GPU 负载。它是 PD 分离/共置之上的<b>请求级调度范式</b>，解决的是"prefill 和 decode 负载不平衡"问题，不是"哪个实例缓存了这个前缀"问题。所以它在全景调研里归「实例间调度」的边缘（有全局调度器路由 micro-request，但核心机制是切分而非 KV 路由）。
+    Libra 的核心是「<b>请求切分</b>」（在任意 token 边界切请求）而非「<b>实例间 KV 感知路由</b>」——它不按 KV cache 命中选实例，而是按<b>吞吐均衡</b>切分请求、平衡两阶段的 GPU 负载。它是 PD 分离/共置之上的<b>请求级调度范式</b>，解决的是「prefill 和 decode 负载不平衡」问题，不是「哪个实例缓存了这个前缀」问题。因此在全景调研里它<b>不属于「实例间调度」（A 类）</b>，已归到「其他方向」（C 类，次要）——虽有全局调度器路由 micro-request，但核心机制是切分而非 KV 路由。
   </div>
 </section>
 
