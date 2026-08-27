@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>调度调研 · san-tian 的技术 blog</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --card: #ffffff;
+    --text: #1c1917;
+    --text-dim: #78716c;
+    --text-faint: #a8a29e;
+    --border: #e7e5e4;
+    --border-hover: #d6d3d1;
+    --accent: #1d4ed8;
+    --accent-soft: rgba(29,78,216,0.08);
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    margin: 0;
+    padding: 0;
+  }
+  .container { max-width: 720px; margin: 0 auto; padding: 96px 24px 120px; }
+  h1 { font-size: 2em; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.02em; color: var(--text); }
+  .subtitle { color: var(--text-dim); font-size: 0.98em; margin: 0 0 64px; line-height: 1.6; }
+
+  .post {
+    display: block;
+    padding: 28px 0;
+    border-top: 1px solid var(--border);
+    text-decoration: none;
+    color: var(--text);
+    transition: all 0.2s ease;
+  }
+  .post:last-of-type { border-bottom: 1px solid var(--border); }
+  .post:hover {
+    padding-left: 12px;
+    border-left: 3px solid var(--accent);
+    background: linear-gradient(90deg, var(--accent-soft) 0%, transparent 100%);
+  }
+  .post .title {
+    font-size: 1.2em;
+    font-weight: 600;
+    margin-bottom: 10px;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    transition: color 0.2s;
+  }
+  .post:hover .title { color: var(--accent); }
+  .post .desc {
+    color: var(--text-dim);
+    font-size: 0.9em;
+    line-height: 1.65;
+  }
+  .post .meta { margin-top: 14px; }
+  .tag {
+    display: inline-block;
+    margin-right: 8px;
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 0.7em;
+    font-weight: 500;
+    background: #f5f5f4;
+    color: var(--text-dim);
+    border: 1px solid transparent;
+    transition: all 0.2s;
+  }
+  .post:hover .tag {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: rgba(29,78,216,0.15);
+  }
+  .tag.agent {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(59, 130, 246, 0.1));
+    color: #7c3aed;
+    border: 1px solid rgba(124, 58, 237, 0.2);
+    font-weight: 600;
+  }
+  .post:hover .tag.agent {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(59, 130, 246, 0.15));
+    color: #6d28d9;
+    border-color: rgba(124, 58, 237, 0.3);
+  }
+
+  .footer {
+    margin-top: 80px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    color: var(--text-faint);
+    font-size: 0.85em;
+  }
+  .footer a { color: var(--text-dim); text-decoration: none; transition: color 0.2s; }
+  .footer a:hover { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>调度调研</h1>
+  <p class="subtitle">LLM 推理调度 &amp; 负载感知：prefill 实测 + 路由全景调研</p>
+
+  <a class="post" href="glm52-prefill-experiment.html">
+    <div class="title">GLM-5.2 prefill 实测报告：两个核心结论</div>
+    <div class="desc">两个核心结论：① prefill 随 prompt 长度呈弱超线性增长（α≈1.12，源自 GLM-5.2 的 DSA 稀疏注意力 O(n·k)）；② 300k×1 与 30k×10 的总 prefill 仅差 1.3×，而 cache hit 的影响达 22×——远大于长度的影响。含 log-log 回归、每 token 成本曲线、冷缓存实测数据表。</div>
+    <div class="meta">
+      <span class="tag">prefill</span>
+      <span class="tag">实测</span>
+      <span class="tag">GLM-5.2</span>
+      <span class="tag">DSA</span>
+      <span class="tag">弱超线性</span>
+    </div>
+  </a>
+
+  <a class="post" href="gateway-survey.html">
+    <div class="title">LLM 推理「调度 &amp; 负载感知」路由全景调研</div>
+    <div class="desc">聚焦「请求发给哪个引擎实例」的调度决策层：梳理 Dynamo、llm-d、SMG、SGLang Router、AIBrix 等开源路由 gateway，对照 OSDI/NSDI/SOSP 等 CCF-A 会议上的路由与负载均衡论文（Llumnix、LMetric、AlpaServe 等），交叉对照工业与学术在「KV 重叠度是负载估计的代理」上的合流。</div>
+    <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
+      <span class="tag">调研</span>
+      <span class="tag">路由</span>
+      <span class="tag">负载感知</span>
+      <span class="tag">CCF-A</span>
+    </div>
+  </a>
+
+  <div class="footer">
+    <a href="../index.html">← 返回首页</a>
+  </div>
+</div>
+</body>
+</html>

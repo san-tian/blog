@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GLM-5.2 prefill 实测：两个核心结论</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0;
+          --danger:#ea580c; --ok:#16a34a; --info:#2563eb; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:900px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0f172a,#334155); color:#fff; border-radius:14px;
+           padding:26px 28px; margin-bottom:20px; }
+  header h1 { font-size:23px; margin-bottom:6px; }
+  header .meta { color:#cbd5e1; font-size:13px; }
+  /* 核心结论 */
+  .conclusions { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:18px; }
+  @media (max-width:640px){ .conclusions { grid-template-columns:1fr; } }
+  .concl-card { background:#eff6ff; border:2px solid #93c5fd; border-radius:14px; padding:20px 22px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .concl-card .kicker { font-size:12px; letter-spacing:1px; color:var(--muted); margin-bottom:6px; }
+  .concl-card h2 { font-size:18px; margin-bottom:10px; border:none; padding:0; }
+  .concl-card .big { font-size:34px; font-weight:800; line-height:1.1; }
+  .concl-card .big small { font-size:16px; font-weight:600; color:var(--muted); }
+  .concl-card p { font-size:13.5px; color:var(--ink); margin-top:8px; }
+  section { background:var(--card); border-radius:14px; padding:22px 26px; margin-bottom:18px;
+            box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:18px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--info); }
+  h2.warn { border-left-color:var(--danger); }
+  h2.g { border-left-color:var(--ok); }
+  h3 { font-size:15px; margin:16px 0 8px; }
+  p { margin-bottom:10px; font-size:14.5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; }
+  pre { background:#1e293b; color:#e2e8f0; border-radius:10px; padding:12px 14px;
+        overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:12.5px; margin:10px 0; line-height:1.5; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
+  th,td { border:1px solid var(--line); padding:7px 11px; text-align:left; }
+  th { background:#f1f5f9; font-weight:600; }
+  td.mono { font-family:Consolas,monospace; font-size:13px; }
+  .hl { background:#fef3c7; }
+  .callout { border-radius:10px; padding:13px 16px; margin-top:12px; font-size:14px; }
+  .callout.note { background:#eff6ff; border:1px solid #93c5fd; }
+  .callout.warn { background:#fff7ed; border:1px solid #fdba74; }
+  .callout.danger { background:#fef2f2; border:1px solid #fca5a5; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  .chart-box { position:relative; height:340px; margin-top:8px; }
+  .chart-box.short { height:260px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:10px; }
+  .legend-row { display:flex; gap:16px; flex-wrap:wrap; margin-top:6px; }
+  .legend { font-size:12.5px; color:var(--muted); }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>GLM-5.2 prefill 实测报告</h1>
+  <div class="meta">endpoint: http://38.255.28.13:10100 · glm-5.2-fp8 · 冷缓存 / 随机独立内容 / 每点 2 次取中位数</div>
+</header>
+
+<!-- 两个核心结论 -->
+<div class="conclusions">
+  <div class="concl-card">
+    <div class="kicker">核心结论 1</div>
+    <h2>prefill 随 prompt 长度呈弱超线性增长</h2>
+    <div class="big">α ≈ 1.12</div>
+    <p>实测 prefill ∝ n<sup>1.12</sup>（弱超线性）：每 token 成本中段稳定 ~45μs，长段（>128k）回升到 93μs。架构上，GLM-5.2 用 DSA 稀疏注意力 + MoE，attention 复杂度为 O(n·k)。</p>
+  </div>
+  <div class="concl-card">
+    <div class="kicker">核心结论 2</div>
+    <h2>300k×1 与 30k×10 的总 prefill 接近</h2>
+    <div class="big">1.3×</div>
+    <p>实测 1×300k ≈ 17s、10×30k ≈ 13s，比值 <b>1.3×</b>。对比之下，cache hit 的影响（22×）远大于长度的影响。</p>
+  </div>
+</div>
+
+<!-- 环境 -->
+<section>
+  <h2>实验环境</h2>
+  <p>GLM-5.2 关键架构（config.json）：<code>glm_moe_dsa</code>，256 路由专家（每 token 激活 8+1），
+  <b>DSA 稀疏注意力 <code>index_topk=2048</code></b>，MLA（KV 压缩到 512 维），78 层，1M 上下文。
+  这些架构让 prefill 的 attention 是 O(n·k) 而非 O(n²)。</p>
+</section>
+
+<!-- 结论1 佐证 -->
+<section>
+  <h2 class="warn">佐证 1 · prefill 随长度呈弱超线性增长（α ≈ 1.12）</h2>
+
+  <h3>图 1 · prefill 随长度增长（log-log，斜率即指数 α）</h3>
+  <div class="sub">灰虚线 = 纯线性 α=1 参考；实测数据点斜率 ≈1.12（α=2 表示平方）。</div>
+  <div class="chart-box"><canvas id="c1"></canvas></div>
+  <div class="legend-row">
+    <span class="legend"><span class="dot" style="background:#16a34a"></span>固定开销段(8–16k)</span>
+    <span class="legend"><span class="dot" style="background:#2563eb"></span>线性段(16–128k)</span>
+    <span class="legend"><span class="dot" style="background:#ea580c"></span>超线性段(128–896k)</span>
+    <span class="legend"><span class="dot" style="background:#94a3b8"></span>纯线性 α=1 参考</span>
+  </div>
+
+  <h3>图 2 · 每 token 成本（μs/token）——中段是平的，不是递增</h3>
+  <div class="sub">实测每 token 成本中段稳定 ~45μs，长段（>128k）回升到 93μs。</div>
+  <div class="chart-box"><canvas id="c2"></canvas></div>
+
+  <h3>数据表</h3>
+  <table>
+    <tr><th>prompt token</th><th>prefill</th><th>每 token 成本</th></tr>
+    <tr><td class="mono">8k</td><td class="mono">0.492s</td><td class="mono">61.5 μs</td></tr>
+    <tr><td class="mono">16k</td><td class="mono">0.611s</td><td class="mono">38.2 μs</td></tr>
+    <tr><td class="mono">32k</td><td class="mono">1.418s</td><td class="mono">44.3 μs</td></tr>
+    <tr><td class="mono">64k</td><td class="mono">2.912s</td><td class="mono">45.5 μs</td></tr>
+    <tr><td class="mono">128k</td><td class="mono">5.909s</td><td class="mono">46.2 μs</td></tr>
+    <tr><td class="mono">256k</td><td class="mono">13.447s</td><td class="mono">52.5 μs</td></tr>
+    <tr><td class="mono">384k</td><td class="mono">23.575s</td><td class="mono">61.4 μs</td></tr>
+    <tr><td class="mono">512k</td><td class="mono">34.224s</td><td class="mono">66.8 μs</td></tr>
+    <tr><td class="mono">768k</td><td class="mono">64.018s</td><td class="mono">83.4 μs</td></tr>
+    <tr><td class="mono">896k</td><td class="mono">83.383s</td><td class="mono">93.1 μs</td></tr>
+  </table>
+  <pre>log-log 回归：prefill ∝ n^1.12    （α=1 线性，α=2 平方）</pre>
+</section>
+
+<!-- 结论2 佐证 -->
+<section>
+  <h2 class="warn">佐证 2 · 分散与集中的 prefill 对比（1.3×）</h2>
+
+  <h3>图 3 · 分散(10×30k) vs 集中(1×300k) 的总 prefill</h3>
+  <div class="sub">用冷缓存数据：10×30k ≈ 10×1.3s = 13s；1×300k ≈ 17s（256k/384k 线性插值）。比值 1.3×。</div>
+  <div class="chart-box short"><canvas id="c3"></canvas></div>
+
+  <table>
+    <tr><th>方案</th><th>总 prefill</th><th>比值</th></tr>
+    <tr><td>10 × 30k（分散）</td><td class="mono">≈ 13s</td><td rowspan="2" class="mono hl">比值 <b>1.3×</b></td></tr>
+    <tr><td>1 × 300k（集中）</td><td class="mono">≈ 17s</td></tr>
+  </table>
+
+  <h3>图 4 · cache hit 的影响（22×）</h3>
+  <div class="sub">同一 896k prompt：命中缓存 3.75s vs 未命中 83.38s——22 倍，远大于长度的 1.3×。</div>
+  <div class="chart-box short"><canvas id="c4"></canvas></div>
+
+  <h3>图 5 · 忙碌节点下短请求的等待（辅助）</h3>
+  <div class="sub">后台跑超长请求时，短请求 TTFT 仍 ≈ 空闲基线——chunked prefill 让短请求插队。</div>
+  <div class="chart-box short"><canvas id="c5"></canvas></div>
+</section>
+
+<!-- 方法论教训 -->
+<section>
+  <h2>方法论教训（3 条）</h2>
+  <table>
+    <tr><th>#</th><th>教训</th><th>踩坑表现</th></tr>
+    <tr><td>1</td><td>构造 prompt 必须用<b>随机独立内容</b>，不能重复</td><td>重复文本让长 prompt 前缀命中缓存，prefill 低估 ~22 倍</td></tr>
+    <tr><td>2</td><td>必须测<b>冷缓存</b>（每个 prompt 第一次请求）</td><td>同 prompt 第二次请求命中前缀缓存，加速数倍</td></tr>
+    <tr><td>3</td><td>必须<b>多次测量取中位数</b></td><td>多租户共享服务单次测量有 2~4 倍噪声（曾出现 5.2s、23.2s 异常值）</td></tr>
+  </table>
+</section>
+
+<!-- 脚本 -->
+<section>
+  <h2>脚本与复现</h2>
+  <p><code>scripts/cold_prefill_test.py</code> 含全部实验，其余 <code>test_*.py</code> 为历史版本（踩坑记录）。</p>
+  <pre>python3 scripts/cold_prefill_test.py prefill   # prefill vs 长度（拟合 α）
+python3 scripts/cold_prefill_test.py cache     # cache hit 影响
+python3 scripts/cold_prefill_test.py busy      # 忙碌节点等待</pre>
+  <div class="callout note">多租户共享 endpoint，绝对秒数会漂移，结论以<b>相对形状</b>（斜率、比值）为准；定案需在独占 GPU 复测。</div>
+</section>
+
+</div>
+
+<script>
+const tokens = [8000,16000,32000,64000,128000,256000,384000,512000,768000,896000];
+const prefill = [0.492,0.611,1.418,2.912,5.909,13.447,23.575,34.224,64.018,83.383];
+const linearRef = tokens.map(x => 0.611 * x / 16000);
+const segColors = ['#16a34a','#16a34a','#2563eb','#2563eb','#2563eb','#ea580c','#ea580c','#ea580c','#ea580c','#ea580c'];
+
+new Chart(document.getElementById('c1'), {
+  type:'line',
+  data:{ datasets:[
+    { label:'实测 prefill', data: tokens.map((x,i)=>({x,y:prefill[i]})),
+      borderColor:'#1e293b', borderWidth:2, pointBackgroundColor:segColors, pointRadius:5, pointHoverRadius:7, tension:0 },
+    { label:'纯线性 α=1', data: tokens.map((x,i)=>({x,y:linearRef[i]})),
+      borderColor:'#94a3b8', borderWidth:1.5, borderDash:[6,4], pointRadius:0, tension:0 }
+  ]},
+  options:{ responsive:true, maintainAspectRatio:false,
+    scales:{ x:{ type:'logarithmic', title:{display:true,text:'prompt token 数'} },
+             y:{ type:'logarithmic', title:{display:true,text:'prefill 时间 (s)'} } },
+    plugins:{ legend:{display:false},
+      tooltip:{ callbacks:{ label:c=>`${c.dataset.label}: ${c.parsed.y.toFixed(2)}s @ ${c.parsed.x.toLocaleString()} token` } } } }
+});
+
+const cost = [61.5,38.2,44.3,45.5,46.2,52.5,61.4,66.8,83.4,93.1];
+new Chart(document.getElementById('c2'), {
+  type:'line',
+  data:{ labels: tokens.map(x=>(x>=1000?(x/1000)+'k':x)),
+    datasets:[{ data:cost, borderColor:'#2563eb', borderWidth:2, pointBackgroundColor:segColors, pointRadius:5, pointHoverRadius:7, tension:0.2 }]},
+  options:{ responsive:true, maintainAspectRatio:false,
+    scales:{ y:{ title:{display:true,text:'μs / token'}, min:0 } },
+    plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:c=>`${c.parsed.y.toFixed(1)} μs/token` } } } }
+});
+
+new Chart(document.getElementById('c3'), {
+  type:'bar',
+  data:{ labels:['10 × 30k\n(分散)','1 × 300k\n(集中)'],
+    datasets:[{ data:[13,17], backgroundColor:['#2563eb','#ea580c'], borderRadius:6 }]},
+  options:{ responsive:true, maintainAspectRatio:false,
+    scales:{ y:{ title:{display:true,text:'总 prefill (s)'}, min:0 } },
+    plugins:{ legend:{display:false},
+      tooltip:{ callbacks:{ label:c=>`${c.parsed.y.toFixed(0)}s` } } } }
+});
+
+new Chart(document.getElementById('c4'), {
+  type:'bar',
+  data:{ labels:['命中缓存\n(重复文本)','未命中\n(随机文本)'],
+    datasets:[{ data:[3.75,83.38], backgroundColor:['#16a34a','#ea580c'], borderRadius:6 }]},
+  options:{ responsive:true, maintainAspectRatio:false,
+    scales:{ y:{ title:{display:true,text:'prefill 时间 (s)'} } },
+    plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:c=>`${c.parsed.y.toFixed(2)}s` } } } }
+});
+
+new Chart(document.getElementById('c5'), {
+  type:'bar',
+  data:{ labels:['空闲','后台 30k','后台 60k','后台 120k','后台 240k'],
+    datasets:[{ data:[0.768,0.765,0.747,0.744,0.745],
+      backgroundColor:['#2563eb','#93c5fd','#93c5fd','#93c5fd','#93c5fd'], borderRadius:6 }]},
+  options:{ responsive:true, maintainAspectRatio:false,
+    scales:{ y:{ title:{display:true,text:'短请求 TTFT (s)'}, min:0, max:1.0 } },
+    plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:c=>`${c.parsed.y.toFixed(3)}s` } } } }
+});
+</script>
+</body>
+</html>
