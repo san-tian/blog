@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM 推理「调度 & 负载感知」路由调研（开源工业项目 + CCF-A 学术论文）</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --ind: #0066ff;      /* 工业项目 蓝 */
+    --aca: #8b20be;      /* 学术论文 紫 */
+    --core: #ea580c;     /* 核心方向 橙 */
+    --ink: #1e293b;
+    --muted: #64748b;
+    --line: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--ink); line-height: 1.7;
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  header {
+    background: linear-gradient(135deg, #0b1f4b, #0066ff 55%, #8b20be);
+    color: #fff; border-radius: 14px; padding: 28px 28px 24px; margin-bottom: 22px;
+  }
+  header h1 { font-size: 24px; margin-bottom: 10px; line-height: 1.4; }
+  header p { color: #e0e7ff; font-size: 14px; }
+  .badge { display: inline-block; background: rgba(255,255,255,.16); border-radius: 20px;
+    padding: 2px 12px; font-size: 12px; margin-right: 6px; margin-bottom: 4px; }
+  section {
+    background: var(--card); border-radius: 14px; padding: 22px 24px; margin-bottom: 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+  h2 { font-size: 19px; margin-bottom: 14px; padding-left: 10px; border-left: 4px solid var(--ind); }
+  h2.aca { border-left-color: var(--aca); }
+  h2.core { border-left-color: var(--core); }
+  h3 { font-size: 15px; margin: 18px 0 8px; }
+  p { margin-bottom: 10px; font-size: 14.5px; }
+  b { color: #0f172a; }
+  code {
+    background: #eef2f7; padding: 1px 6px; border-radius: 5px;
+    font-family: "SF Mono", Consolas, monospace; font-size: 12.5px; color: #0f172a;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 10px 0; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; font-weight: 600; }
+  td.mono { font-family: Consolas, monospace; font-size: 12.5px; }
+  .conf { font-weight: 700; color: var(--aca); white-space: nowrap; }
+  .core-tag { display: inline-block; background: #fff7ed; color: #ea580c; border: 1px solid #fdba74;
+    border-radius: 4px; font-size: 11px; padding: 0 6px; margin-left: 4px; font-weight: 600; }
+  .arx { color: var(--muted); font-weight: 400; }
+  .callout { border-radius: 10px; padding: 14px 16px; margin-top: 12px; font-size: 14px; }
+  .callout.tip { background: #eff6ff; border: 1px solid #93c5fd; }
+  .callout.warn { background: #fff7ed; border: 1px solid #fdba74; }
+  .callout.ac { background: #faf5ff; border: 1px solid #d8b4fe; }
+  .callout.bg { background: #f8fafc; border: 1px dashed #cbd5e1; }
+  ul { padding-left: 20px; margin: 8px 0; }
+  li { font-size: 14px; margin-bottom: 5px; }
+  .tag { font-size: 12px; border-radius: 4px; padding: 1px 7px; color: #fff; }
+  .tag.ind { background: var(--ind); }
+  .tag.aca { background: var(--aca); }
+  .muted { color: var(--muted); font-size: 13px; }
+  a { color: #0066ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>LLM 推理「调度 &amp; 负载感知」路由调研</h1>
+  <p>
+    <span class="badge">开源工业项目</span>
+    <span class="badge">CCF-A 会议学术论文</span>
+    <span class="badge">路由 / 负载均衡 / 调度</span>
+  </p>
+  <p style="margin-top:10px">
+    聚焦范围：<b>调度（scheduling）+ 负载感知（load-aware routing）</b>——即「请求发给谁、何时发、如何估计每台副本的负载」这一决策层。
+  </p>
+</header>
+
+<!-- 三层边界 -->
+<section>
+  <h2>0. 三层边界（聚焦第二层）</h2>
+  <table>
+    <tr><th>层</th><th>角色</th><th>代表项目</th><th>是否本调研目标</th></tr>
+    <tr><td><b>推理引擎</b></td><td>单副本内调度（continuous batching、prefix cache）</td><td><a href="https://github.com/vllm-project/vllm" target="_blank">vLLM</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang</a>、<a href="https://github.com/NVIDIA/TensorRT-LLM" target="_blank">TensorRT-LLM</a>、<a href="https://github.com/huggingface/text-generation-inference" target="_blank">TGI</a>、<a href="https://github.com/InternLM/lmdeploy" target="_blank">LMDeploy</a></td><td>❌ 引擎本身</td></tr>
+    <tr class="hl"><td><b>引擎级调度 Gateway</b></td><td>跨副本路由：KV 感知、负载感知、动态调度</td><td><a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve LLM</a>、<a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a>、<a href="https://github.com/vllm-project/router" target="_blank">vLLM Router</a>、<a href="https://github.com/gangmuk/Lodestar" target="_blank">Lodestar</a>、<a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter</a></td><td>✅ <b>核心</b></td></tr>
+    <tr><td><b>AI API Gateway</b></td><td>多模型/多提供商治理（预算、鉴权、限流）</td><td><a href="https://github.com/BerriAI/litellm" target="_blank">LiteLLM</a>、<a href="https://github.com/envoyproxy/ai-gateway" target="_blank">Envoy AI Gateway</a>、<a href="https://github.com/alibaba/higress" target="_blank">Higress</a>、<a href="https://github.com/substratusai/kubeai" target="_blank">KubeAI</a>、<a href="https://github.com/Kong/kong" target="_blank">Kong</a></td><td>⚠️ 相邻，仅列名</td></tr>
+  </table>
+</section>
+
+<!-- ============ 第一部分 工业项目 ============ -->
+<section>
+  <h2>第一部分：开源工业项目 <span class="tag ind">Industry</span></h2>
+  <p>聚焦「路由 gateway」——决定请求发给哪个引擎实例的项目。</p>
+
+  <table>
+    <tr><th>项目</th><th>语言 / License</th><th>⭐（约）</th><th>调度 / 负载感知核心能力</th></tr>
+    <tr>
+      <td><b><a href="https://github.com/ai-dynamo/dynamo" target="_blank">NVIDIA Dynamo</a></b><br><code>ai-dynamo/dynamo</code></td><td>Rust / Apache 2.0</td><td>7800</td>
+      <td>块级 KV 感知（KV indexer + selection service）、token 负载打分（cache-credit 公式）、SLA 驱动 Planner 自动扩缩容</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a></b><br><code>llm-d/llm-d</code></td><td>Go / Apache 2.0</td><td>4100</td>
+      <td>sticky-until-saturated token-aware 路由、阈值可推导（τ = R_peak × T_max）、K8s Gateway API InferencePool、插件化 filter/scorer/picker</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://github.com/lightseekorg/smg" target="_blank">SMG（Shepherd Model Gateway）</a></b><br><code>lightseekorg/smg</code></td><td>Rust / Apache 2.0</td><td>—</td>
+      <td>cache-aware + 8 种路由策略（cache_aware、power_of_two、consistent_hashing、prefix_hash…）、亚毫秒路由决策、SWIM HA mesh</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a></b><br><code>sgl-project/sglang</code> 内置</td><td>Rust</td><td>随 SGLang</td>
+      <td>cache-aware（近似 radix tree）+ 最短队列（带 balance threshold），缓存复用与负载均衡的折中</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a></b><br><code>vllm-project/aibrix</code></td><td>Go</td><td>—</td>
+      <td>Envoy ext_proc gateway、前缀缓存感知路由、pod registry、vLLM 指标采集</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://github.com/vllm-project/router" target="_blank">vLLM Router</a></b><br><code>vllm-project/router</code></td><td>Go</td><td>—</td>
+      <td>负载均衡、响应缓存、语义路由、Anthropic/OpenAI 协议转换</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://github.com/ray-project/ray" target="_blank">Ray Serve LLM</a></b><br><code>ray-project/ray</code></td><td>Python</td><td>—</td>
+      <td>KVAwareRouter：vLLM KV 块事件 + Dynamo radix 树 + token 负载感知（你已精读）</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://github.com/gangmuk/Lodestar" target="_blank">Lodestar</a></b><br><code>gangmuk/Lodestar</code></td><td>Go + Python</td><td>学术</td>
+      <td>在线学习路由（MLP 预测 −TTFT），构建在 AIBrix 的 Envoy ext_proc 上（你已精读）</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter</a></b><br><code>DeepLink-org/DLRouter</code></td><td>—</td><td>新</td>
+      <td>OpenAI 兼容，跨 <a href="https://github.com/InternLM/lmdeploy" target="_blank">LMDeploy</a>/<a href="https://github.com/vllm-project/vllm" target="_blank">vLLM</a>/<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang</a> 实例，可插拔路由策略</td>
+    </tr>
+  </table>
+
+  <h3>AI API Gateway（相邻层，仅列名，不展开）</h3>
+  <p class="muted"><a href="https://github.com/BerriAI/litellm" target="_blank">LiteLLM</a>、<a href="https://github.com/envoyproxy/ai-gateway" target="_blank">Envoy AI Gateway</a>、<a href="https://github.com/substratusai/kubeai" target="_blank">KubeAI</a>、<a href="https://github.com/alibaba/higress" target="_blank">Higress</a>、<a href="https://github.com/Kong/kong" target="_blank">Kong AI Gateway</a>、<a href="https://github.com/lm-sys/RouteLLM" target="_blank">RouteLLM</a>、<a href="https://github.com/agentgateway/agentgateway" target="_blank">Agent Gateway</a> —— 面向多模型/多提供商治理，与「引擎调度」目标不同。</p>
+</section>
+
+<!-- ============ 第二部分 学术论文 ============ -->
+<section>
+  <h2 class="aca">第二部分：CCF-A 会议学术论文 <span class="tag aca">Academic</span></h2>
+  <p>聚焦「调度 + 负载感知」三块：跨实例路由/负载均衡、请求调度、集群调度。</p>
+
+  <h3>A. 跨实例路由 / 负载均衡 / 动态调度 <span class="core-tag">最相关</span></h3>
+  <table>
+    <tr><th>论文</th><th>会议</th><th>核心贡献</th></tr>
+    <tr><td><b><a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a></b>: Dynamic Scheduling for LLM Serving</td><td class="conf">OSDI 2024</td><td>运行时多实例<b>动态调度 + 重调度</b>（请求可在实例间迁移），缓解调度抖动</td></tr>
+    <tr><td><b><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">Simple is Better</a></b>（LMetric）: Multiplication May Be All You Need</td><td class="conf">OSDI 2026</td><td>乘法式 token-aware 路由：一个正确信号 &gt; 一堆加权（你已精读）</td></tr>
+    <tr><td><b><a href="https://www.usenix.org/system/files/nsdi26-ruan-libra.pdf" target="_blank">Libra</a></b></td><td class="conf">NSDI 2026</td><td>负载均衡路由（最新）</td></tr>
+    <tr><td><b><a href="https://www.usenix.org/system/files/osdi23-li-zhuohan.pdf" target="_blank">AlpaServe</a></b>: Statistical Multiplexing with Model Parallelism</td><td class="conf">OSDI 2023</td><td>模型并行的统计复用、实例级聚合调度</td></tr>
+    <tr><td><b><a href="https://www.usenix.org/system/files/nsdi23-zhang-hong.pdf" target="_blank">Shepherd</a></b>: Serving DNNs in the Wild</td><td class="conf">NSDI 2023</td><td>抢占式模型放置、异构请求聚合</td></tr>
+    <tr><td><b><a href="https://arxiv.org/abs/2408.13510" target="_blank">Intelligent Router for LLM Workloads</a></b></td><td class="conf arx">arXiv</td><td>workload-aware 负载均衡（方向高度相关，未中顶会）</td></tr>
+    <tr><td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b>: Online-Learning LLM Inference Router</td><td class="conf arx">arXiv</td><td>在线学习路由：MLP 预测 reward（你已精读）</td></tr>
+  </table>
+
+  <h3>B. 请求 / 批调度（引擎内调度）</h3>
+  <table>
+    <tr><th>论文</th><th>会议</th><th>核心贡献</th></tr>
+    <tr><td><b><a href="https://www.usenix.org/conference/osdi22/presentation/yu" target="_blank">Orca</a></b></td><td class="conf">OSDI 2022</td><td>iteration-level scheduling（首篇，连续 batching 的调度基础）</td></tr>
+    <tr><td><b><a href="https://www.usenix.org/conference/osdi24/presentation/agrawal" target="_blank">Sarathi-Serve</a></b></td><td class="conf">OSDI 2024</td><td>chunked prefill，吞吐-延迟权衡</td></tr>
+    <tr><td><b><a href="https://www.usenix.org/system/files/conference/nsdi26/nsdi26spring_wu-bingyang_prepub.pdf" target="_blank">FastServe</a></b>: Iteration-Level Preemptive Scheduling</td><td class="conf">NSDI 2026</td><td>迭代级抢占、尾延迟优化</td></tr>
+    <tr><td><b><a href="https://arxiv.org/abs/2406.13511" target="_blank">Slice-Level Scheduling</a></b></td><td class="conf arx">arXiv</td><td>切片级调度，高吞吐负载均衡</td></tr>
+  </table>
+
+  <h3>C. 集群 / 多租户调度</h3>
+  <table>
+    <tr><th>论文</th><th>会议</th><th>核心贡献</th></tr>
+    <tr><td><b><a href="https://dl.acm.org/doi/10.1145/3600006.3613175" target="_blank">Sia</a></b></td><td class="conf">SOSP 2023</td><td>异构感知、goodput 优化的集群调度</td></tr>
+    <tr><td><b><a href="https://proceedings.mlr.press/v235/duan24a.html" target="_blank">MuxServe</a></b></td><td class="conf">ICML 2024</td><td>多模型时空复用（flexible spatial-temporal multiplexing）</td></tr>
+    <tr><td><b><a href="https://arxiv.org/abs/2407.00023" target="_blank">Preble</a></b></td><td class="conf">NSDI 2024</td><td>分布式 prompt 调度、前缀缓存</td></tr>
+  </table>
+
+  <div class="callout bg">
+    <b>背景前提（引擎侧，非调度本身）</b>：<b><a href="https://arxiv.org/abs/2309.06180" target="_blank">vLLM / PagedAttention</a></b>（SOSP 2023，块级 KV 管理）与
+    <b><a href="https://arxiv.org/abs/2312.07104" target="_blank">SGLang / RadixAttention</a></b>（NeurIPS 2024，前缀复用）——它们是「KV 感知负载估计」的引擎侧基础：
+    路由要估算「能省多少 prefill」，靠的就是这两篇定义的块级/前缀缓存语义。此处仅作背景，不展开。
+  </div>
+</section>
+
+<!-- ============ 交叉对照 ============ -->
+<section>
+  <h2>交叉对照：工业项目 ↔ 学术论文</h2>
+  <p>核心观察：<b>「KV 重叠度是负载估计的代理、不是路由目标」已成为工业界与学术界的共同结论</b>。</p>
+  <table>
+    <tr><th>调度 / 负载感知理念</th><th>工业实现</th><th>学术对应</th></tr>
+    <tr><td>块级 KV 感知 + token 负载打分</td><td><a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a> / <a href="https://github.com/ray-project/ray" target="_blank">Ray Serve KVAwareRouter</a></td><td><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）</td></tr>
+    <tr><td>阈值可推导的粘性路由</td><td><a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a> sticky-until-saturated</td><td><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）</td></tr>
+    <tr><td>连续打分 + 多策略</td><td><a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a> / <a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a> cache-aware</td><td><a href="https://arxiv.org/abs/2312.07104" target="_blank">SGLang RadixAttention</a>（背景）</td></tr>
+    <tr><td>在线学习路由</td><td><a href="https://github.com/gangmuk/Lodestar" target="_blank">Lodestar</a>（开源）</td><td><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a>（arXiv）</td></tr>
+    <tr><td>动态重调度</td><td><a href="https://github.com/AlibabaPAI/llumnix" target="_blank">Llumnix</a>（开源，Alibaba）</td><td><a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a>（OSDI 2024）</td></tr>
+  </table>
+</section>
+
+<!-- ============ 结论 ============ -->
+<section>
+  <h2 class="core">结论与建议</h2>
+  <ul>
+    <li><b>工业侧主流</b>（调度/负载感知）：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a>、<a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a> / <a href="https://github.com/vllm-project/router" target="_blank">vLLM Router</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve LLM</a>。</li>
+    <li><b>学术侧核心会议</b>：<b>OSDI / NSDI / SOSP</b>（系统方向）+ ICML（ML 系统方向）。</li>
+    <li><b>最该精读的三篇</b>：<a href="https://arxiv.org/abs/2406.03243" target="_blank"><b>Llumnix</b></a>（OSDI 24，动态重调度）、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank"><b>LMetric</b></a>（OSDI 26，乘法路由）、<a href="https://www.usenix.org/system/files/osdi23-li-zhuohan.pdf" target="_blank"><b>AlpaServe</b></a>（OSDI 23，统计复用）。</li>
+    <li><b>你目录里已有的</b>：<a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a>、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>、<a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve</a> 博客——已覆盖「学习式」和「启发式」两条主线，与本次调研的 A 类高度重合，形成闭环。</li>
+  </ul>
+
+  <div class="callout ac">
+    <b>贯穿性共识</b>：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a> 四个独立工业实现，加上 <a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）、<a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a>（OSDI 24）两篇顶会论文，
+    在「负载感知路由」上殊途同归——<b>KV 重叠度只是负载估计的输入，真正的路由目标是让 token 负载均衡</b>。
+  </div>
+
+  <p class="muted" style="margin-top:12px">
+    核实说明：Llumnix=OSDI 2024、LMetric=OSDI 2026、Libra=NSDI 2026、AlpaServe=OSDI 2023、Shepherd=NSDI 2023、
+    Orca=OSDI 2022、Sarathi-Serve=OSDI 2024、FastServe=NSDI 2026、Sia=SOSP 2023、MuxServe=ICML 2024、Preble=NSDI 2024 均已核实；
+    Intelligent Router、Lodestar、Slice-Level Scheduling 为 arXiv。
+  </p>
+</section>
+
+</div>
+</body>
+</html>

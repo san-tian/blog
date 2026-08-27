@@ -103,6 +103,19 @@
   <h1>san-tian 的技术 blog</h1>
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
+  <a class="post" href="llm-serving-routing-gateway-survey.html">
+    <div class="title">LLM 推理「调度 &amp; 负载感知」路由全景调研：开源工业项目 + CCF-A 论文</div>
+    <div class="desc">聚焦「请求发给哪个引擎实例」的调度决策层：梳理 Dynamo、llm-d、SMG、SGLang Router、AIBrix 等开源路由 gateway，对照 OSDI/NSDI/SOSP 等 CCF-A 会议上的路由与负载均衡论文（Llumnix、LMetric、AlpaServe 等），交叉对照工业与学术在「KV 重叠度是负载估计的代理」上的合流。</div>
+    <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
+      <span class="tag">调研</span>
+      <span class="tag">路由</span>
+      <span class="tag">负载感知</span>
+      <span class="tag">调度</span>
+      <span class="tag">CCF-A</span>
+    </div>
+  </a>
+
   <a class="post" href="sglang-fusion-ceiling-a-config.html">
     <div class="title">sglang 算子融合：从天花板到突破，写新 kernel 无损实现 +63%</div>
     <div class="desc">这套配置（flashinfer_trtllm + allreduce fusion，793 tok/s）还能不能继续做融合？profile 排除法发现 4 个融合点，3 个被闭源/不支持挡住，但 QK RoPE 通过写 DSA 专用融合 triton kernel 无损突破：856 tok/s（+63%）。含排除法、MLA 背景、混合 dtype 写入解法、正确性验证与端到端数据：embedding allreduce 无 layernorm 吸收、shared-expert 被 GLM+trtllm 双重 disable、QK RoPE+KV write 要求 bf16 KV cache（GLM 用 fp8）、FP8 quant 遇 trtllm 闭源不开放 epilogue。含完整启动命令、排除法表格与每个挡路条件的源码证据。</div>
