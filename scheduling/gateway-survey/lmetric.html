@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LMetric（Simple is Better）论文讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --aca:#8b20be; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  h3 { font-size:15px; margin:14px 0 8px; }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  pre { background:#1e293b; color:#e2e8f0; border-radius:10px; padding:12px 14px; overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:12.5px; margin:10px 0; line-height:1.5; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#f1f5f9; }
+  .callout { border-radius:10px; padding:13px 16px; margin:10px 0; font-size:14px; }
+  .callout.tip { background:#eff6ff; border:1px solid #93c5fd; }
+  .callout.ac { background:#faf5ff; border:1px solid #d8b4fe; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>LMetric（Simple is Better）论文讲解</h1>
+  <p>OSDI 2026 · Multiplication May Be All You Need for LLM Request Scheduling · 阿里（已部署百炼生产）</p>
+</header>
+
+<section>
+  <h2>一句话</h2>
+  <p>用「一个 KV 感知指标 × 一个负载指标」的<b>乘积</b>作为调度分数，同时兼顾 KV cache 命中与负载均衡，且<b>零超参调优</b>（超参在跨实例比较时约去）。相比 vLLM-v1 和生产调度器，TTFT 最多降 92%。</p>
+  <span class="src">来源：<a href="https://arxiv.org/abs/2603.15202" target="_blank">arXiv 2603.15202</a> / <a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">OSDI 26 PDF</a></span>
+</section>
+
+<section>
+  <h2>问题：集群级请求调度的两个目标</h2>
+  <p>LLM 提供商部署多个 serving 实例（引擎最小部署单元）+ 一个全局调度器，把请求路由到实例。调度要同时满足两个目标：</p>
+  <ul>
+    <li><b>KV cache 感知</b>：请求的部分输入命中某实例的 KV cache，该实例能跳过这些 token 的 prefill，加速 TTFT。</li>
+    <li><b>负载均衡</b>：把请求均匀分到各实例，避免热点。</li>
+  </ul>
+  <p>只做负载均衡（vLLM 默认）不够——不同请求因 KV cache 命中的计算量不同；只做 KV 感知也不够——会偏向有命中的实例，损害负载均衡。</p>
+</section>
+
+<section>
+  <h2>现有三种组合策略的缺陷</h2>
+  <table>
+    <tr><th>策略</th><th>机制</th><th>缺陷</th></tr>
+    <tr><td><b>线性组合（加权求和）</b></td><td>score = α·KV 指标 + β·负载指标</td><td>需逐工作负载调超参；静态调好的超参在动态负载下次优（阿里百炼现用方案）</td></tr>
+    <tr><td><b>Filter 策略</b></td><td>先过滤过载实例，再选 KV 命中最多的</td><td>阈值需调参；偏向负载均衡，无法充分利用 KV cache</td></tr>
+    <tr><td><b>Simulation 策略</b></td><td>仿真器预测路由到各实例的期望延迟</td><td>依赖仿真器精度；需逐模型/硬件/部署开发</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>核心解法：乘法路由</h2>
+  <pre>score(实例) = KV 感知指标 × 负载指标
+
+KV 感知指标 = 路由到该实例、考虑 KV 命中后需新算的 prefill token 数
+负载指标   = 该实例当前的 batch size</pre>
+  <ul>
+    <li><b>关键思想</b>：把线性组合的<b>加法换成乘法</b>。乘积保持了与线性组合相似的趋势，但<b>超参在跨实例分数比较时相互约去，无需调参</b>。</li>
+    <li><b>指标选择</b>：KV 感知用「需排队的新 prefill token 数」比「KV 命中率」更好（命中率是比例，不能反映绝对计算量）。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>鲁棒性：乘法何时失效</h2>
+  <ul>
+    <li>论文<b>数学推导</b>了乘法可能失效的近似条件：只在损害负载均衡的<b>极端 KV 偏斜</b>下发生，实践中极罕见。</li>
+    <li>设计<b>两阶段检测</b>：检测到极端偏斜时，回退到纯负载均衡策略。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>效果</h2>
+  <ul>
+    <li>H20 集群（最多 16 GPU），dense + MoE 模型，负载覆盖 chatbot / API 调用 / coding agent。</li>
+    <li>对比 vLLM、ai-Dynamo、llm-d、阿里百炼生产调度器：TTFT 最多降 92%。</li>
+    <li>已部署阿里百炼数百 GPU 生产环境（金丝雀验证）。</li>
+    <li>聚焦 <b>PD 共置</b>（prefill/decode 同实例），论文第 7 节讨论如何扩展到 PD 分离。</li>
+  </ul>
+  <span class="src">来源：论文 §5（乘法组合）、§6（评测）、§7（PD 分离讨论）</span>
+</section>
+
+<section>
+  <h2>为什么它重要（对照你的研究主线）</h2>
+  <div class="callout ac">
+    这篇论文<b>系统性否定了「加权求和」</b>（Dynamo cache-credit、llm-d 旧默认、AIBrix 等工业方案的底层范式），论证了它的根本缺陷：<b>需逐负载调参、静态超参在动态负载下次优</b>。乘法路由给出了零调参的替代——这正是「如何同时均衡 cache hit 和负载」这个问题的学术最干净解。对照：llm-d 的 sticky-until-saturated 用「阈值可推导」达到类似目的，Lodestar 用「在线学习」绕开手工规则，LMetric 用「乘法」。
+  </div>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+</div>
+
+</div>
+</body>
+</html>

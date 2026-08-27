@@ -32,7 +32,7 @@
 
 <header>
   <h1>Lodestar 功能实现讲解</h1>
-  <p>在线学习路由（Go gateway + Python 训练服务，构建在 AIBrix 上）。能力标注：<span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ Token负载感知</span><span class="tag ok">✅ 在线学习路由</span><span class="tag no">✗ 块级KV感知</span><span class="tag no">✗ 多实例HA</span></p>
+  <p>arXiv 2606.00946 · 在线学习路由（Go gateway + Python 训练服务，构建在 AIBrix 上，完全开源）。能力标注：<span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ Token负载感知</span><span class="tag ok">✅ 在线学习路由</span><span class="tag no">✗ 块级KV感知</span><span class="tag no">✗ 多实例HA</span></p>
 </header>
 
 <section>
@@ -75,13 +75,21 @@
 </section>
 
 <section>
+  <h2>效果</h2>
+  <ul>
+    <li>在公有云集群（同构 + 异构 GPU）真实负载上，相比最先进的 LLM 感知路由（prefix-cache-and-load-aware），<b>平均 TTFT 降 1.41×、P99 TTFT 降 1.47×</b>。</li>
+    <li>发布首个公开的逐请求 LLM 路由数据集（集群快照 + 请求特征 + 延迟）。</li>
+  </ul>
+  <span class="src">来源：论文 Contributions</span>
+</section>
+
+<section>
   <h2>小结</h2>
   <p>Lodestar 是「学习式路由」的代表：用 MLP 把 KV 命中率 + token 级负载（inflight prefill/decode 分开）+ 硬件状态一起学成 −TTFT 预测，在线训练应对分布漂移。它是单实例 gateway（无跨副本路由状态同步），这是相对 SMG/Dynamo 的短板；但"把 prefill/decode token 分开当特征"这个设计，正是"负载感知"的关键细节。</p>
 </section>
 
 <div class="foot">
   <a href="../gateway-survey.html">← 返回全景调研</a>
-  <a href="comparison.html">← 返回四维度对比</a>
 </div>
 
 </div>

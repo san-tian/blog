@@ -303,10 +303,10 @@
   <p class="muted">真正做「把请求路由到哪个实例」——KV 感知 / 负载感知的跨实例路由。</p>
   <table>
     <tr><th style="min-width:130px">论文</th><th>会议</th><th>调度 / 路由策略</th><th>核心机制（含名词解释）</th></tr>
-    <tr><td><b><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">Simple is Better</a></b>（LMetric）</td><td class="conf">OSDI 2026</td><td>乘法路由</td><td><b>score = KV 感知指标（需新算的 prefill token）× 负载指标（batch size）</b>，乘法替代加权和，超参跨实例约去，零调参</td></tr>
-    <tr><td><b><a href="https://www.usenix.org/system/files/nsdi26-ruan-libra.pdf" target="_blank">Libra</a></b></td><td class="conf">NSDI 2026</td><td>负载均衡路由</td><td>负载均衡路由（最新，公开细节少）</td></tr>
-    <tr><td><b><a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a></b></td><td class="conf">ACL 2026 Findings</td><td>分位感知路由 + 排队</td><td><b>分位感知</b>＝用分位数（非点估计）预测 prefill 服务时间，对齐尾部 SLO；K=2 候选 + 三成分打分选 worker（实例间），准入队列按 成本+aging+token公平 派发（实例内）</td></tr>
-    <tr><td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b></td><td class="conf arx">arXiv</td><td>在线学习路由</td><td>MLP 预测 <b>−TTFT</b> 选最大；特征含 KV 命中率、inflight prefill/decode token（分开保留）；参数跨实例共享；<b>在线训练</b>应对分布漂移</td></tr>
+    <tr><td><b><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">Simple is Better</a></b>（LMetric） <a href="gateway-survey/lmetric.html" target="_blank">📖</a></td><td class="conf">OSDI 2026</td><td>乘法路由</td><td><b>score = KV 感知指标（需新算的 prefill token）× 负载指标（batch size）</b>，乘法替代加权和，超参跨实例约去，零调参</td></tr>
+    <tr><td><b><a href="https://www.usenix.org/system/files/nsdi26-ruan-libra.pdf" target="_blank">Libra</a></b> <a href="gateway-survey/libra.html" target="_blank">📖</a></td><td class="conf">NSDI 2026</td><td>负载均衡路由</td><td>负载均衡路由（最新，公开细节少）</td></tr>
+    <tr><td><b><a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a></b> <a href="gateway-survey/quartz.html" target="_blank">📖</a></td><td class="conf">ACL 2026 Findings</td><td>分位感知路由 + 排队</td><td><b>分位感知</b>＝用分位数（非点估计）预测 prefill 服务时间，对齐尾部 SLO；K=2 候选 + 三成分打分选 worker（实例间），准入队列按 成本+aging+token公平 派发（实例内）</td></tr>
+    <tr><td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b> <a href="gateway-survey/lodestar.html" target="_blank">📖</a></td><td class="conf arx">arXiv</td><td>在线学习路由</td><td>MLP 预测 <b>−TTFT</b> 选最大；特征含 KV 命中率、inflight prefill/decode token（分开保留）；参数跨实例共享；<b>在线训练</b>应对分布漂移</td></tr>
     <tr><td><b><a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a></b></td><td class="conf">OSDI 2024</td><td>动态调度 + 重调度</td><td>运行时感知实例状态，<b>请求可在实例间迁移（重调度）</b>——把「派错了」变成「能改派」，缓解调度抖动</td></tr>
     <tr><td><b><a href="https://arxiv.org/abs/2408.13510" target="_blank">Intelligent Router</a></b></td><td class="conf arx">arXiv</td><td>workload-aware 负载均衡</td><td>按工作负载特征做负载均衡（未中顶会）</td></tr>
   </table>

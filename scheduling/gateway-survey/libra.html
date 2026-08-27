@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Libra 论文讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --aca:#8b20be; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  h3 { font-size:15px; margin:14px 0 8px; }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  pre { background:#1e293b; color:#e2e8f0; border-radius:10px; padding:12px 14px; overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:12.5px; margin:10px 0; line-height:1.5; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#f1f5f9; }
+  .callout { border-radius:10px; padding:13px 16px; margin:10px 0; font-size:14px; }
+  .callout.tip { background:#eff6ff; border:1px solid #93c5fd; }
+  .callout.ac { background:#faf5ff; border:1px solid #d8b4fe; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Libra 论文讲解</h1>
+  <p>NSDI 2026 · Flexible Request Partitioning and Scheduling for Serving Unbalanced and Dynamic LLM Workloads · NUS + USTC</p>
+</header>
+
+<section>
+  <h2>一句话</h2>
+  <p>提出 <b>FPS（Flexible Partition and Scheduling）</b>范式：把请求在<b>任意 token 边界</b>切分成 micro-request，两级调度（全局选切分点 + 本地 SLO 感知组批），把 PD 共置和 PD 分离统一进一个更灵活的空间，动态适应不平衡负载。</p>
+  <span class="src">来源：<a href="https://www.usenix.org/system/files/nsdi26-ruan-libra.pdf" target="_blank">NSDI 26 PDF</a></span>
+</section>
+
+<section>
+  <h2>问题：共置 vs 分离的两难</h2>
+  <p>LLM 推理分 prefill（计算密集）和 decode（内存受限）两阶段。真实负载的 prompt/response 长度高度动态，导致两阶段负载失衡：</p>
+  <ul>
+    <li><b>PD 共置（colocation）</b>：prefill/decode 同实例，吞吐高但<b>互相干扰</b>——长 prefill 阻塞 decode，P99 TBT 尾延迟爆表（实测 352ms，SLO 达成率低至 1.73%）。chunked prefill 只能粗粒度缓解，chunk size 是敏感超参。</li>
+    <li><b>PD 分离（disaggregation）</b>：prefill/decode 分池，SLO 稳定但<b>资源碎片化</b>——固定 1P:1D 划分在 prefill-heavy 负载下 decode GPU 几乎闲置（MFU 0.19%）。</li>
+  </ul>
+  <p>核心洞察：<b>任何静态分区对动态负载都必然次优</b>。</p>
+</section>
+
+<section>
+  <h2>核心抽象：micro-request（FPS）</h2>
+  <p>每个请求有 prompt 长度 P 和（预测的）decode 长度 D，总逻辑长度 L = P + D。在切分点 s ∈ [0, L] 把请求切成两个 micro-request：r_α（tokens 1..s）和 r_β（tokens s+1..L）。</p>
+  <ul>
+    <li><b>s = 0 或 s = L</b> → 无分区（即 colocation）</li>
+    <li><b>s = P</b> → 在 prompt 末尾切（即 PD 分离）</li>
+    <li><b>任意 s</b> → 混合切分（如把部分 decode 并进 prefill 段，或把部分 prefill 搬到另一 GPU 与 decode 并跑）</li>
+  </ul>
+  <p><b>所以 colocation 和 disaggregation 都是 FPS 的特例</b>——FPS 在更广的切分空间里动态找最优。</p>
+</section>
+
+<section>
+  <h2>两级调度框架</h2>
+  <h3>① 全局调度器：选切分点 + 路由</h3>
+  <ul>
+    <li>对每个请求，二分搜索 partition ratio φ ∈ [0,1]（最多 K=6 次迭代），用轻量 cost model 预测两个服务器上的执行时间 T1、T2，平衡到 |T1 − T2| < ε。</li>
+    <li><b>吞吐均衡约束</b>：平衡两个 GPU 的吞吐，消除"木桶效应"（不平衡时快的一端空等慢的一端）。</li>
+    <li>预测器：offline-profiled lookup table + LRU cache，每次 probe 微秒级；O(1) per-request 复杂度。</li>
+    <li>路由：least-loaded 策略（r_α、r_β 分到负载最低的两个实例，round-robin 破平局）。</li>
+  </ul>
+  <h3>② 本地调度器：SLO-aware 组批</h3>
+  <ul>
+    <li>每个 GPU 实例动态组 batch，调三个因素：<b>batch size、prefill-to-decode token ratio、decode context length</b>，在 P99 TBT SLO 下维持高利用率。</li>
+    <li>流程：先纳入所有 decode 请求（延迟关键），再根据 profile table 决定最大 prefill token 预算 M，贪心加 prefill 请求。</li>
+    <li>profile table 用每批实测延迟（plen, ctx, dnum, time）持续校准。</li>
+  </ul>
+  <h3>③ chunk-based KV transfer</h3>
+  <ul>
+    <li>micro-request 跨实例执行时，KV cache 按 chunk 粒度传输（append-only，chunk 完成立即 DMA push 到对端），重叠通信与计算（RDMA/NCCL/Mooncake）。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>扩展：多切分（multi-split）</h2>
+  <p>FPS 自然推广到多段切分。例如 CoT 请求切成 prefill / think / decode 三段——think 阶段非用户可见，可用宽松 SLO，做更激进的负载均衡而不牺牲最终输出延迟。</p>
+</section>
+
+<section>
+  <h2>效果</h2>
+  <ul>
+    <li>goodput 提升 up to <b>1.91×</b>（vs PD 共置）、<b>1.61×</b>（vs PD 分离）；serving capacity <b>1.15–3.07×</b>。</li>
+    <li>hybrid workload 下比不对称基线（TP/DP 优化）再提 <b>74.2%</b>；H100 严格 SLO 下 goodput 提升 up to 134%。</li>
+    <li>实现：基于 vLLM（4K 行 Python），Qwen-2.5 14B/32B/72B，A100/H100。</li>
+    <li>对 decode 长度预测误差不敏感（决策基于相对执行时间，非精确 token 数；保守 20 token 安全余量）。</li>
+  </ul>
+  <span class="src">来源：论文 §6 Evaluation</span>
+</section>
+
+<section>
+  <h2>和你研究主线的区别（重要）</h2>
+  <div class="callout ac">
+    Libra 的核心是「<b>请求切分</b>」（在任意 token 边界切请求）而非「<b>实例间 KV 感知路由</b>」——它不按 KV cache 命中选实例，而是按<b>吞吐均衡</b>切分请求、平衡两阶段的 GPU 负载。它是 PD 分离/共置之上的<b>请求级调度范式</b>，解决的是"prefill 和 decode 负载不平衡"问题，不是"哪个实例缓存了这个前缀"问题。所以它在全景调研里归「实例间调度」的边缘（有全局调度器路由 micro-request，但核心机制是切分而非 KV 路由）。
+  </div>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+</div>
+
+</div>
+</body>
+</html>

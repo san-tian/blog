@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QUARTZ 论文讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --aca:#8b20be; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  h3 { font-size:15px; margin:14px 0 8px; }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  pre { background:#1e293b; color:#e2e8f0; border-radius:10px; padding:12px 14px; overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:12.5px; margin:10px 0; line-height:1.5; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#f1f5f9; }
+  .callout { border-radius:10px; padding:13px 16px; margin:10px 0; font-size:14px; }
+  .callout.tip { background:#eff6ff; border:1px solid #93c5fd; }
+  .callout.ac { background:#faf5ff; border:1px solid #d8b4fe; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>QUARTZ 论文讲解</h1>
+  <p>ACL 2026 Findings · Quantile-Aware Routing and Queueing for TTFT SLOs · 修改 SGLang router 实现</p>
+</header>
+
+<section>
+  <h2>一句话</h2>
+  <p>面向 TTFT 尾部 SLO 的<b>分位感知路由 + 排队</b>：用分位（而非点估计）预测 prefill 服务时间，同时覆盖「实例间路由（选 worker）」和「实例内准入（排顺序）」两层，对齐 P95/P99 SLO 并保持公平性。</p>
+  <span class="src">来源：<a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">ACL Anthology</a></span>
+</section>
+
+<section>
+  <h2>核心洞察：尾部 SLO 是分位目标，要用分位预测</h2>
+  <p>尾部 TTFT 的相当一部分在 GPU 执行之前、在 router 队列里就被决定了——size-unaware 的准入会让长请求过早准入，堵塞后面的短请求（队头阻塞），放大尾延迟。</p>
+  <p><b>为什么用分位而非点估计</b>：SLO 是分位目标（P99 TTFT < 2s）。点估计（均值）会系统性低估长请求——一个实际 5000ms 的长请求被均值估成 590ms，看起来"不算长"，被过早准入，堵塞后面所有短请求。用保守的高分位（α=0.95）预测，长请求会被正确延后。</p>
+</section>
+
+<section>
+  <h2>四组件架构</h2>
+  <table>
+    <tr><th>组件</th><th>作用</th></tr>
+    <tr><td><b>分位预测器</b></td><td>轻量决策树 + pinball loss，预测 prefill 的 α∈{0.9, 0.95} 条件分位（默认 α=0.95）</td></tr>
+    <tr><td><b>分位感知路由</b></td><td>实例间：K=2 候选（power-of-two）+ 三成分打分，选预测尾部完成时间最小的 worker</td></tr>
+    <tr><td><b>分位感知准入</b></td><td>实例内：准入队列按 成本+aging+token公平 排序派发</td></tr>
+    <tr><td><b>鲁棒性</b></td><td>监控残差、轻量校准、负载漂移下回退安全基线（FIFO + least-loaded）</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>分位预测器：输入特征</h2>
+  <ul>
+    <li><b>请求侧</b>：prompt length、max new tokens、decoding 参数、request type。</li>
+    <li><b>局部性</b>：prefix-locality proxy（命中多少缓存前缀）、LPM 长度（最长前缀匹配）、locality bucket（none/partial/high 三档）。</li>
+    <li><b>worker 侧</b>：active sequences、prefill backlog、KV 压力。</li>
+  </ul>
+  <p>输出：Q̂_prefill_α(r,w)——请求 r 在 worker w 上 prefill 成本的 α 分位。</p>
+</section>
+
+<section>
+  <h2>阶段一：实例间路由（选 worker）</h2>
+  <pre>S_α(r,w) = Ŵ(w) + Q̂_prefill_α(r,w) + ψ(r,w)</pre>
+  <ul>
+    <li><b>Ŵ(w)</b>：已排队请求的期望工作量（用均值，分位不能直接相加）。</li>
+    <li><b>Q̂_prefill_α(r,w)</b>：当前请求自己的 prefill α 分位（用分位，点估计会低估长请求）。</li>
+    <li><b>ψ(r,w)</b>：KV 压力等不健康状态的惩罚。</li>
+    <li><b>K=2 候选</b>：先随机抽 2 个候选，再在其中用完整分数选最优（power-of-two-choices，O(2) 开销接近全局最优，且随机性避免羊群效应）。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>阶段二：实例内准入（排顺序）</h2>
+  <pre>k(r)      = Q̂_prefill_α(r,w) + λ·a_r      # 成本 + aging
+k_fair(r) = k(r) + β·u(c(r))            # 再 + token 公平</pre>
+  <ul>
+    <li><b>Q̂_prefill_α</b>：成本小的先派（类 SJF），减少队头阻塞。</li>
+    <li><b>λ·a_r（aging）</b>：到达越早 key 越小，防长请求饿死。</li>
+    <li><b>β·u(c)（token 公平）</b>：已用 token 越多 key 越大，防单 client 垄断。</li>
+    <li>容量可用时 pop 最小 key 派发。</li>
+  </ul>
+  <p class="callout tip"><b>这一层是 QUARTZ 独有的</b>：Lodestar 选完 worker 就直接交给 vLLM 的 FCFS 队列了；QUARTZ 额外控制"何时派发"。</p>
+</section>
+
+<section>
+  <h2>和实例间/实例内调度的关系</h2>
+  <p>QUARTZ 恰好<b>同时覆盖两层</b>：阶段一是实例间路由（选 worker），阶段二是实例内准入（排顺序）。这正是它名字"Routing <b>and</b> Queueing"的含义——所以它在全景调研里归「实例间调度」（A 类），但它的准入队列部分已经是实例内调度的范畴。</p>
+</section>
+
+<section>
+  <h2>默认参数</h2>
+  <p>分位水平 α=0.95、候选数 K=2、aging λ=0.02、公平 β=0.10、回退阈值 δ=0.05。</p>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+</div>
+
+</div>
+</body>
+</html>
