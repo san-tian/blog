@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang Router（Model Gateway）功能实现讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .tag { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11px; font-weight:700; margin-right:4px; }
+  .tag.ok { background:#dcfce7; color:#15803d; }
+  .tag.no { background:#fee2e2; color:#b91c1c; }
+  .callout { border-radius:10px; padding:12px 14px; margin:10px 0; font-size:13.5px; background:#faf5ff; border:1px solid #d8b4fe; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>SGLang Router（sgl-model-gateway）功能实现讲解</h1>
+  <p>SGLang 的模型路由 Gateway（Rust）。能力标注：<span class="tag ok">✅ 前缀缓存感知</span><span class="tag no">✗ 块级KV感知</span><span class="tag no">✗ Token负载感知</span><span class="tag no">✗ 多实例HA同步</span></p>
+</header>
+
+<div class="callout">
+  <b>同源说明</b>：SGLang Model Gateway 的代码与 <a href="smg.html">SMG</a> 同源（文档中大量 <code>smg launch</code>、<code>SMG_*</code> 环境变量、<code>smg_*</code> 指标前缀）。SGLang 深度优化它适配 SGLang runtime，同时可路由任意 OpenAI 兼容后端。
+</div>
+
+<section>
+  <h2>前缀缓存感知 —— cache_aware 策略怎么实现</h2>
+  <p><code>cache_aware</code> 是默认策略，把「缓存局部性」和「负载均衡」组合在一起：维护一棵 radix cache tree，按前缀匹配度 + 负载平衡阈值打分选 worker。</p>
+  <ul>
+    <li><code>--cache-threshold</code>（默认 0.3）：前缀匹配比例低于此值视为未命中。</li>
+    <li><code>--balance-abs-threshold</code>（64）/ <code>--balance-rel-threshold</code>（1.5）：负载差超过阈值才 rebalance，即"粘缓存直到负载失衡"。</li>
+    <li><code>--eviction-interval-secs</code>（120）、<code>--max-tree-size</code>（67M 节点）：radix tree 驱逐周期和容量。</li>
+  </ul>
+  <p>官方给出效果：cache_aware 对重复 prompt 约 <b>30% 延迟降低</b>。这是 gateway 层的前缀 tree，<b>不订阅引擎 KV 事件</b>（引擎内的 RadixAttention 是另一回事，属引擎内部复用）。</p>
+  <span class="src">来源：<a href="https://docs.sglang.ai/advanced_features/sgl_model_gateway.html" target="_blank">SGLang Model Gateway 文档</a>（"Load Balancing Policies" / "Cache-Aware Policy Tuning" / "Performance"）</span>
+</section>
+
+<section>
+  <h2>负载均衡策略（5 种）</h2>
+  <p><code>random</code>（均匀随机）、<code>round_robin</code>（顺序轮转）、<code>power_of_two</code>（抽两个取较闲）、<code>cache_aware</code>（默认，缓存+负载）、<code>bucket</code>（动态负载桶）。</p>
+  <span class="src">来源：同上文档（"Load Balancing Policies"）</span>
+</section>
+
+<section>
+  <h2>多实例 HA —— 有水平扩展，但 radix tree 不同步</h2>
+  <p>文档明确：支持多副本跑在负载均衡器后，但 <b>worker registry、radix cache tree、熔断状态、限流计数都是各副本独立的</b>——radix tree 不跨副本同步，<b>预期 cache hit 下降 10-20%</b>。官方建议：可接受这个代价换取 HA；若缓存效率关键，用会话亲和（一致性哈希）把同用户固定到同副本。</p>
+  <span class="src">来源：同上文档（"High Availability" 小节，"Shared Across Replicas: No (independent)"）</span>
+</section>
+
+<section>
+  <h2>多后端 / 协议</h2>
+  <p>控制面统一管理 regular/prefill/decode worker；数据面跨 HTTP、gRPC、PD（prefill/decode 分离）、OpenAI 兼容后端。OpenAI router 模式可把 OpenAI 兼容端点代理到外部供应商（OpenAI、xAI 等），同时把 chat history 留在本地。</p>
+  <span class="src">来源：同上文档（"Overview" / "OpenAI Backend Proxy"）</span>
+</section>
+
+<section>
+  <h2>小结</h2>
+  <p>SGLang Router 定位是「SGLang runtime 的原生 gateway」：cache_aware 前缀策略 + gRPC 高性能流水线 + PD 分离。但多副本时路由状态（尤其 radix cache tree）不跨副本同步，cache hit 会降 10-20%——这与 SMG（同步了 routing tree）形成鲜明对比，也解释了为什么对比表里它的"多实例 HA 同步"是 ✗。</p>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="comparison.html">← 返回四维度对比</a>
+</div>
+
+</div>
+</body>
+</html>

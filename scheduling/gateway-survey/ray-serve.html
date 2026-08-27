@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ray Serve LLM（KVAwareRouter）功能实现讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .tag { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11px; font-weight:700; margin-right:4px; }
+  .tag.ok { background:#dcfce7; color:#15803d; }
+  .tag.no { background:#fee2e2; color:#b91c1c; }
+  .tag.part { background:#fef3c7; color:#b45309; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Ray Serve LLM（KVAwareRouter）功能实现讲解</h1>
+  <p>Ray 生态的 LLM 服务层（Python）。能力标注：<span class="tag ok">✅ 块级KV感知</span><span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ Token负载感知</span><span class="tag ok">✅ 多实例HA</span><span class="tag ok">✅ SLA自动扩缩</span><span class="tag part">⚠️ 多后端</span></p>
+</header>
+
+<section>
+  <h2>块级 KV 感知 —— KVAwareRouter 怎么实现</h2>
+  <p>KVAwareRouter 摄取引擎的 <b>KV 块创建/驱逐事件</b>，构建全局 KV radix 树。关键分工：Ray Serve 负责事件面/请求面/数据面，<b>NVIDIA Dynamo 的 KV indexer</b>（进程内库）消费事件、在块级算每个请求的前缀重叠。</p>
+  <ul>
+    <li>vLLM 原生发 KV 事件（块创建/移除），Ray Serve 转发给 KVAwareRouter，广播到所有 ingress 副本。</li>
+    <li>注意：文档写明 KV 事件是 <b>vLLM-native</b>；SGLang 引擎能跑（<code>server_cls=SGLangServer</code>），但社区支持早期。</li>
+  </ul>
+  <span class="src">来源：<a href="https://docs.ray.io/en/master/serve/llm/user-guides/kv-aware-routing.html" target="_blank">kv-aware-routing 文档</a>（"Each replica reports KV block creation and eviction through vLLM-native KV events"）</span>
+</section>
+
+<section>
+  <h2>Token 负载感知 —— cache-credit 打分</h2>
+  <p>KVAwareRouter 用 KV 重叠度<b>估算剩余 prefill 负载</b>，再叠加活跃 decode 负载，合成 token 负载，选最低的副本。Dynamo selection service 负责打分，权重可调：</p>
+  <ul>
+    <li><code>DYN_ROUTER_PREFILL_LOAD_SCALE</code>（1.0）：prefill 项相对 decode 的权重。</li>
+    <li><code>DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT</code>（1.0）：GPU 驻留 KV 重叠能扣多少 prefill 成本（设 0 = 纯负载路由）。</li>
+    <li>GPU 驻留块全额信用，offload 到 CPU 的块打折。</li>
+  </ul>
+  <span class="src">来源：<a href="https://docs.ray.io/en/master/serve/llm/user-guides/kv-aware-routing.html" target="_blank">kv-aware-routing 文档</a>（"How a replica is chosen" / "Tune the scoring weights"）</span>
+</section>
+
+<section>
+  <h2>前缀缓存感知 —— PrefixCacheAffinityRouter</h2>
+  <p>除 KVAwareRouter 外，Ray Serve LLM 还提供 <b>PrefixCacheAffinityRouter</b>（基于请求文本的前缀树）和 ConsistentHashRouter（会话亲和）。前缀树是文本近似，不感知驱逐——这是"前缀级"的兜底/简化方案。</p>
+  <span class="src">来源：<a href="https://docs.ray.io/en/master/serve/llm/user-guides/kv-aware-routing.html" target="_blank">kv-aware-routing 文档</a>（路由策略对比表）</span>
+</section>
+
+<section>
+  <h2>多实例 HA —— ingress 副本 + 最终一致</h2>
+  <p>路由器被复制成多个 ingress 副本，各自<b>本地</b>做路由决策，token 负载更新<b>异步</b>共享，最终收敛。文档明确：视图是 <i>"eventually consistent"</i>——某副本可能短暂基于稍旧视图决策，换取"路由不阻塞在同步路径"。</p>
+  <span class="src">来源：<a href="https://docs.ray.io/en/master/serve/llm/user-guides/kv-aware-routing.html" target="_blank">kv-aware-routing 文档</a>（"Scaling the ingress tier"）</span>
+</section>
+
+<section>
+  <h2>SLA 自动扩缩 + 多后端</h2>
+  <ul>
+    <li><b>自动扩缩</b>：Ray Serve 的 autoscaling（<code>autoscaling_config</code>，min/max replicas、target_ongoing_requests）。</li>
+    <li><b>多后端（⚠️）</b>：vLLM 为主；SGLang 通过 <code>server_cls=SGLangServer</code> 支持，但明确"community support, early development"，且 engine replicas、KV 利用率等 SGLang 特性尚未集成。</li>
+  </ul>
+  <span class="src">来源：<a href="https://docs.ray.io/en/latest/serve/llm/user-guides/sglang.html" target="_blank">Ray Serve SGLang 文档</a>（"Community SGLang support is in early development" / Limitations）</span>
+</section>
+
+<section>
+  <h2>小结</h2>
+  <p>Ray Serve LLM 的 KVAwareRouter 是「块级 KV 事件 + Dynamo radix 树 + token 负载打分」的组合，正是 Anyscale 博客（你已精读）的落地。它强绑定 Ray 集群，多后端以 vLLM 为主、SGLang 早期。</p>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="comparison.html">← 返回四维度对比</a>
+</div>
+
+</div>
+</body>
+</html>

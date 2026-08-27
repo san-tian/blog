@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SMG（Shepherd Model Gateway）功能实现讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .tag { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11px; font-weight:700; margin-right:4px; }
+  .tag.ok { background:#dcfce7; color:#15803d; }
+  .tag.no { background:#fee2e2; color:#b91c1c; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+  .callout { border-radius:10px; padding:12px 14px; margin:10px 0; font-size:13.5px; background:#faf5ff; border:1px solid #d8b4fe; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>SMG（Shepherd Model Gateway）功能实现讲解</h1>
+  <p>引擎无关的高性能路由 Gateway（Rust）。能力标注：<span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ 多实例HA</span><span class="tag ok">✅ 多后端</span><span class="tag no">✗ 块级KV感知</span><span class="tag no">✗ Token负载感知</span></p>
+</header>
+
+<div class="callout">
+  <b>同源说明</b>：SMG（lightseekorg/smg，原 psrl-project/smg）是一个通用 Rust LLM router 框架，<b>被 SGLang 采用为 sgl-model-gateway、被 vLLM 采用为 vllm-router</b>——三者的调度策略（cache_aware / power_of_two / consistent_hash 等）是同一套代码。见 <a href="sglang-router.html">SGLang Router</a> 和 <a href="vllm-router.html">vLLM Router</a> 子页面。
+</div>
+
+<section>
+  <h2>前缀缓存感知 —— cache-aware routing tree 怎么实现</h2>
+  <p>SMG 的 <code>cache_aware</code> 策略（8 种之一，默认）维护一棵 <b>radix tree</b> 记录各 worker 的前缀缓存，路由时按前缀匹配度 + 负载平衡阈值打分。核心调优参数揭示了实现机制：</p>
+  <ul>
+    <li><code>--cache-threshold</code>（0.3）：前缀匹配比例低于此值视为缓存未命中。</li>
+    <li><code>--balance-abs-threshold</code>（64）/ <code>--balance-rel-threshold</code>（1.5）：负载差超过绝对/相对阈值才触发 rebalance——即"粘住缓存，直到负载失衡"。这与 llm-d 的 sticky-until-saturated 同思路。</li>
+    <li><code>--eviction-interval-secs</code>（120）、<code>--max-tree-size</code>（67M 节点）：radix tree 的驱逐周期和容量上限。</li>
+  </ul>
+  <p>注意：这是<b>前缀级</b>（radix tree 文本匹配），不订阅引擎 KV 事件，不感知引擎真实缓存和驱逐——所以标注"前缀缓存感知"而非"块级 KV 感知"。</p>
+  <span class="src">来源：<a href="https://github.com/lightseekorg/smg" target="_blank">SMG README</a>（8 策略 + cache-aware 描述）；策略参数见同源的 <a href="https://docs.sglang.ai/advanced_features/sgl_model_gateway.html" target="_blank">SGLang Model Gateway 文档</a>（"Cache-Aware Policy Tuning"）</span>
+</section>
+
+<section>
+  <h2>多实例 HA —— SWIM gossip + CRDT（最完整）</h2>
+  <p>SMG 是 9 个 gateway 里多实例同步<b>最完整</b>的：</p>
+  <ul>
+    <li><b>SWIM gossip 协议</b>：1s 心跳 ping/ping-req，自动 peer 发现，秒级故障检测（INIT→ALIVE→SUSPECTED→DOWN→LEAVING）。</li>
+    <li><b>CRDT 存储</b>：G-Counter（请求计数）、PN-Counter（token bucket）、LWW-Register（worker 状态）、OR-Set（worker 集合），无协调锁、分区容忍、自动冲突解决。</li>
+    <li><b>同步的状态包括 cache-aware routing tree 本身</b>：radix tree 操作、前缀匹配数据、LRU 驱逐协调都跨节点同步——这是唯一把「KV 路由树」纳入跨实例同步的方案，保证任一 router 处理请求时缓存路由决策一致。</li>
+    <li>3 节点容忍 1 故障、5 节点容忍 2 故障；支持 K8s StatefulSet + headless service + pod discovery。</li>
+  </ul>
+  <span class="src">来源：<a href="https://lightseek.org/smg/concepts/architecture/high-availability/" target="_blank">SMG High Availability 文档</a>（Gossip Protocol / State Synchronization / CRDT Implementation）</span>
+</section>
+
+<section>
+  <h2>多后端</h2>
+  <p>自托管引擎（vLLM、TensorRT-LLM、TokenSpeed、SGLang、Ollama、任意 OpenAI 兼容）+ 云提供商（OpenAI、Anthropic、Gemini、Bedrock 等），统一 OpenAI 端点。</p>
+  <span class="src">来源：<a href="https://github.com/lightseekorg/smg" target="_blank">SMG README</a>（"Supported Backends"）</span>
+</section>
+
+<section>
+  <h2>其他能力（不在 7 维对比内，但值得一提）</h2>
+  <ul>
+    <li><b>gRPC 流水线</b>：原生 Rust tokenization、reasoning parser、tool call 解析，亚毫秒路由决策、zero-copy tokenization。</li>
+    <li><b>可靠性</b>：熔断（Closed/Open/Half-Open）、指数退避重试 + jitter、token bucket 限流 + 排队。</li>
+    <li><b>WASM 插件</b>：沙箱内自定义请求/响应逻辑。</li>
+  </ul>
+  <span class="src">来源：<a href="https://github.com/lightseekorg/smg" target="_blank">SMG README</a>（Features 表）</span>
+</section>
+
+<section>
+  <h2>小结</h2>
+  <p>SMG 的定位是「引擎无关 + 企业级路由 + 最强多实例 HA」：HA 同步用 SWIM+CRDT 做到了包括 cache-aware 路由树在内的全量状态跨副本一致；但 KV 感知停留在前缀级（radix tree），没有块级 KV 事件——这是它相对 Dynamo/llm-d 的主要短板。</p>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="comparison.html">← 返回四维度对比</a>
+</div>
+
+</div>
+</body>
+</html>

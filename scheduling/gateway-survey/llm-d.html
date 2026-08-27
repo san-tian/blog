@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llm-d 功能实现讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .tag { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11px; font-weight:700; margin-right:4px; }
+  .tag.ok { background:#dcfce7; color:#15803d; }
+  .tag.no { background:#fee2e2; color:#b91c1c; }
+  .tag.part { background:#fef3c7; color:#b45309; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>llm-d 功能实现讲解</h1>
+  <p>Kubernetes 原生推理 Gateway（Go）。能力标注：<span class="tag ok">✅ 块级KV感知</span><span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ Token负载感知</span><span class="tag part">⚠️ 在线学习路由(可选)</span><span class="tag ok">✅ 多实例HA</span><span class="tag ok">✅ 多后端</span></p>
+</header>
+
+<section>
+  <h2>块级 KV 感知 —— KV-Cache Indexer（精确视图）</h2>
+  <p>llm-d 的 KV-Cache Indexer 订阅模型服务器（<b>vLLM 和 SGLang</b>）经 ZMQ 发的 <b>KVEvents</b>，在 EPP 里维护块级精确视图。三种事件类型：<code>BlockStored</code>（含 chained parent hash、token chunk、LoRA、multimodal extra_keys）、<code>BlockRemoved</code>、<code>AllBlocksCleared</code>。</p>
+  <ul>
+    <li><b>事件交付两种模式</b>：Centralized（所有 pod 连单个 EPP 的 ZMQ SUB）；Pod-discovery（每个 EPP 副本独立订阅每个 pod，用于 active-active 多副本）。</li>
+    <li><b>Scorer</b>：算请求 block 序列的<b>最长连续前缀</b>（因果性：缓存块是链式的，链断了后面都不可用），分层权重 gpu=1.0 / cpu=0.8。</li>
+    <li><b>Speculative indexing</b>：路由后立即插入短期预测条目（TTL 2s），防止背靠背同前缀请求在 KVEvents 到达前亲和断裂。</li>
+    <li><b>多模态/LoRA</b>：multimodal hash、LoRA 名折进 block key，同文本不同图/不同 adapter 产生不同 key。</li>
+  </ul>
+  <span class="src">来源：<a href="https://llm-d.ai/docs/0.7/architecture/advanced/kv-management/kv-indexer" target="_blank">llm-d KV-Cache Indexer 文档</a>（事件类型/交付模式/Scorer/speculative indexing 均见该页）</span>
+</section>
+
+<section>
+  <h2>前缀缓存感知 —— approximate prefix（默认，两层中的粗层）</h2>
+  <p>llm-d 的 KV 感知分两层：默认的 <b>approximate prefix</b>（基于 prompt 文本的前缀树，不感知引擎真实缓存和驱逐），和上面的 KV-Cache Indexer（块级精确）。近似层用于简单场景，精确层用于多模态、hybrid-attention 等近似失效的场景。</p>
+  <span class="src">来源：<a href="https://github.com/llm-d/llm-d/blob/main/docs/architecture/advanced/kv-management/prefix-cache-aware-routing.md" target="_blank">prefix-cache-aware-routing.md</a></span>
+</section>
+
+<section>
+  <h2>Token 负载感知 —— sticky-until-saturated</h2>
+  <p>llm-d 的默认调度策略：<b>先认前缀缓存亲和，粘到饱和为止</b>——请求优先发给已缓存其前缀的端点，除非该端点负载超过经校准的阈值 τ 才改派。负载信号按瓶颈匹配：prefill 受限看"在途未缓存 token 数"，decode 受限看"活跃请求数"。τ 由硬件校准闭式推导：τ = R_peak × T_max（峰值 prefill 吞吐 × TTFT 容忍上限）。</p>
+  <span class="src">来源：<a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing" target="_blank">llm-d 博客：Sticky Until Saturated</a>（你已精读，阈值推导见 "Deriving τ"）</span>
+</section>
+
+<section>
+  <h2>在线学习路由（⚠️ 可选）—— latency-predictor</h2>
+  <p>llm-d 提供可选的 <b>latency-predictor</b> 流水线：用 XGBoost sidecar 在线训练，预测每个端点的 TTFT/TPOT，按 SLO 余量打分。作者明确说它适用于"瓶颈漂移、未表征"的流量，但有训练 + sidecar 部署开销，理解清楚的工作负载优先用匹配配置（sticky-until-saturated）。</p>
+  <span class="src">来源：同上博客（"latency-predictor" 分支的讨论）</span>
+</section>
+
+<section>
+  <h2>多实例 HA —— EPP 两种模式</h2>
+  <ul>
+    <li><b>Active-Passive（默认）</b>：leader 选举，一个 leader 服务，其余 warm standby（不增吞吐）。</li>
+    <li><b>Active-Active</b>：关 leader 选举，多副本并发（近线性：2→2.0x、3→2.7x、4→3.5x）。但只能用"动态查询后端"的插件；approximate prefix 插件因副本不共享内存会分区降命中——<b>用 KV-Cache Indexer 的 pod-discovery 模式可解决</b>（每副本独立订阅全量事件收敛到同一索引）。</li>
+  </ul>
+  <span class="src">来源：<a href="https://llm-d.ai/docs/operations/router" target="_blank">llm-d Router Operations 文档</a>（"High Availability & Scaling Modes"）</span>
+</section>
+
+<section>
+  <h2>多后端</h2>
+  <p>KV-Cache Indexer 明确支持 <b>vLLM 和 SGLang</b> 两类引擎（都发 ZMQ KVEvents）；整体跑在 K8s Gateway API InferencePool 之上。</p>
+  <span class="src">来源：<a href="https://llm-d.ai/docs/0.7/architecture/advanced/kv-management/kv-indexer" target="_blank">kv-indexer 文档</a>（"Model servers (vLLM and SGLang today)"）</span>
+</section>
+
+<section>
+  <h2>小结</h2>
+  <p>llm-d 是「K8s 原生 + 双层 KV 感知 + 阈值可推导」的组合：调度用 sticky-until-saturated（阈值 τ 闭式可得，是工业侧最贴合"同时均衡 cache hit 和负载"的实现），KV 感知用 approximate prefix（粗）+ KV-Cache Indexer（块级精确，订阅 vLLM/SGLang 事件）。</p>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="comparison.html">← 返回四维度对比</a>
+</div>
+
+</div>
+</body>
+</html>

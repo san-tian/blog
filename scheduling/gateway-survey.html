@@ -158,11 +158,24 @@
     <tr>
       <td><b><a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter</a></b><br><code>DeepLink-org/DLRouter</code></td>
       <td>—</td><td>新</td>
-      <td class="unk">?</td><td class="unk">?</td><td class="unk">?</td><td class="unk">?</td><td class="unk">?</td><td class="unk">?</td><td class="ok">✅</td>
+      <td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="unk">?</td><td class="no">✗</td><td class="ok">✅</td>
     </tr>
   </table>
   <p class="muted">图例：<b class="ok">✅</b> 支持 / <b class="part">⚠️</b> 部分·受限 / <b class="no">✗</b> 无 / <b class="unk">?</b> 未知。<br>
   能力术语：<b>块级 KV 感知</b>＝订阅引擎 KV 事件做块级精确 cache hit；<b>前缀缓存感知</b>＝radix 树 / 文本前缀近似；<b>Token 负载感知</b>＝prefill / decode token 级负载打分；<b>在线学习路由</b>＝ML 预测延迟 / 奖励；<b>多实例 HA 同步</b>＝跨副本路由状态同步；<b>SLA 自动扩缩</b>＝按 SLO 自动扩缩副本；<b>多后端</b>＝跨引擎 / 跨提供商。</p>
+
+  <h3>各 gateway 功能实现讲解（子页面）</h3>
+  <ul>
+    <li><a href="gateway-survey/dynamo.html">Dynamo</a> — 块级 KV 感知（KV indexer）、Token 负载（cache-credit）、HA 同步、Planner、多后端</li>
+    <li><a href="gateway-survey/llm-d.html">llm-d</a> — 双层 KV 感知（KV-Cache Indexer）、sticky-until-saturated、EPP 两种 HA 模式</li>
+    <li><a href="gateway-survey/smg.html">SMG</a> — cache-aware 前缀策略、SWIM+CRDT 最强多实例同步、多后端</li>
+    <li><a href="gateway-survey/sglang-router.html">SGLang Router</a> — cache_aware 策略、gRPC 流水线、radix tree 不同步的 HA 权衡</li>
+    <li><a href="gateway-survey/aibrix.html">AIBrix</a> — Envoy ext_proc 路由、PodAutoscaler、分布式 KV Cache</li>
+    <li><a href="gateway-survey/vllm-router.html">vLLM Router</a> — 5 种策略、PD 分离（NIXL/NCCL/Mooncake）、K8s 发现</li>
+    <li><a href="gateway-survey/ray-serve.html">Ray Serve LLM</a> — KVAwareRouter、cache-credit 打分、ingress 最终一致</li>
+    <li><a href="gateway-survey/lodestar.html">Lodestar</a> — MLP 预测 −TTFT、token 级特征、在线训练 two-pool</li>
+    <li><a href="gateway-survey/dlrouter.html">DLRouter</a> — 多后端 adapter、prefix_cache / 延迟估计策略、PD 分离</li>
+  </ul>
 
   <h3>AI API Gateway（相邻层，仅列名，不展开）</h3>
   <p class="muted"><a href="https://github.com/BerriAI/litellm" target="_blank">LiteLLM</a>、<a href="https://github.com/envoyproxy/ai-gateway" target="_blank">Envoy AI Gateway</a>、<a href="https://github.com/substratusai/kubeai" target="_blank">KubeAI</a>、<a href="https://github.com/alibaba/higress" target="_blank">Higress</a>、<a href="https://github.com/Kong/kong" target="_blank">Kong AI Gateway</a>、<a href="https://github.com/lm-sys/RouteLLM" target="_blank">RouteLLM</a>、<a href="https://github.com/agentgateway/agentgateway" target="_blank">Agent Gateway</a> —— 面向多模型/多提供商治理，与「引擎调度」目标不同。</p>

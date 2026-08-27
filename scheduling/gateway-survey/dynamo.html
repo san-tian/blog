@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NVIDIA Dynamo 功能实现讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  p { font-size:14.5px; margin-bottom:10px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .tag { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11px; font-weight:700; margin-right:4px; }
+  .tag.ok { background:#dcfce7; color:#15803d; }
+  .tag.no { background:#fee2e2; color:#b91c1c; }
+  .tag.part { background:#fef3c7; color:#b45309; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#f1f5f9; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>NVIDIA Dynamo 功能实现讲解</h1>
+  <p>数据中心级推理编排层（Rust）。能力标注：<span class="tag ok">✅ 块级KV感知</span><span class="tag ok">✅ Token负载感知</span><span class="tag ok">✅ 多实例HA</span><span class="tag ok">✅ SLA自动扩缩</span><span class="tag ok">✅ 多后端</span></p>
+</header>
+
+<section>
+  <h2>块级 KV 感知 —— KV indexer 怎么实现</h2>
+  <p>Dynamo 的 KV indexer（<code>python -m dynamo.indexer</code>）订阅 worker 的 <b>ZMQ PUB 事件流</b>，维护每 <code>(model_name, routing_group)</code> 一棵 radix 树，索引 <b>三层存储</b>：device（GPU）、host-pinned（CPU）、disk。</p>
+  <ul>
+    <li><b>事件来源</b>：引擎在 KV 块创建/驱逐时原生发 ZMQ 事件（vLLM 和 SGLang 都发，无需 Dynamo wrapper）。</li>
+    <li><b>分层语义</b>：<code>/query</code> 返回 <code>gpu ≤ cpu ≤ disk</code> 的<b>累积</b>分层重叠——cpu/disk 是 device 前缀的"延伸"，不是独立命中。这直接支撑了"GPU 全额、offload 打折"的 cache-credit。</li>
+    <li><b>容错</b>：P2P 恢复（新副本从 peer 拉 <code>/dump</code> 快照重放）+ gap 检测（ZMQ 有损，靠 seq 号检测丢包，有 <code>replay_endpoint</code> 时回放缺失 batch）。</li>
+  </ul>
+  <span class="src">来源：<a href="https://docs.nvidia.com/dynamo/knowledge-base/modular-components/router/standalone-indexer" target="_blank">standalone-indexer 文档</a>（分层语义见 "Per-instance tier breakdown"，容错见 "P2P Recovery"/"Gap Detection and Replay"）</span>
+</section>
+
+<section>
+  <h2>Token 负载感知 —— selection service 的 cache-credit 公式</h2>
+  <p>selection service（<code>python -m dynamo.select_service</code>）把 KV 重叠度<b>折算</b>成加权 prefill 负载：</p>
+  <ul>
+    <li><code>overlap</code>（gpu/cpu/disk 原始重叠）是"观测值"；</li>
+    <li><b><code>effective_prefill_tokens</code></b> 是"权威的加权 prefill 负载"，官方定义它 <i>"computed by the same cache-credit formula used for scheduler booking"</i>——即命中 GPU 块全额抵扣、offload 块打折抵扣后的"还欠多少 prefill"。</li>
+    <li>再叠加各 worker 的活跃 decode 负载（生命周期记账：prefill_complete / output_block / DELETE），合成 token 负载，选最低者。</li>
+    <li>打分权重 <code>DYN_ROUTER_*</code> 系列（<code>KV_OVERLAP_SCORE_CREDIT</code> 控制 cache-credit 系数，可归零=纯负载路由）。</li>
+  </ul>
+  <span class="src">来源：<a href="https://docs.nvidia.com/dynamo/knowledge-base/modular-components/router/standalone-selection" target="_blank">standalone-selection 文档</a>（effective_prefill_tokens 定义见 "Selection API"，权重见 "Tune the scoring weights"）</span>
+</section>
+
+<section>
+  <h2>多实例 HA / 状态同步 —— 最终一致的两条通道</h2>
+  <ul>
+    <li><b>Replica sync（ZMQ）</b>：selector 副本间共享 admission / prefill-complete / free 事件；<b>output-block 增长故意不同步</b>（高频更新，广播太费带宽，只本地记账）。</li>
+    <li><b>Indexer recovery（HTTP /dump）</b>：新副本启动时从 peer 拉快照重放 KV 事件。</li>
+    <li>一致性不变量明确写死：同步是 <i>"bounded and best-effort"</i>——延迟、重排、丢事件、临时分歧都可接受。</li>
+  </ul>
+  <span class="src">来源：<a href="https://docs.nvidia.com/dynamo/knowledge-base/modular-components/router/standalone-selection" target="_blank">standalone-selection 文档</a>（"Peer Planes" / "Consistency Invariants"）</span>
+</section>
+
+<section>
+  <h2>SLA 自动扩缩 —— Planner</h2>
+  <p>Planner 是 SLA 驱动的 autoscaler：对工作负载做 profiling，按延迟 SLO 以最小 TCO 自动调整 prefill/decode 池规模。</p>
+  <span class="src">来源：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo README</a>（"Planner — SLA-driven autoscaler"）</span>
+</section>
+
+<section>
+  <h2>多后端 —— 引擎无关</h2>
+  <p>Dynamo 是引擎之上的编排层，不替代引擎。通过 backend 接口接 vLLM / SGLang / TensorRT-LLM，三者均支持 disaggregated serving、KV-aware routing、Planner 等能力。</p>
+  <span class="src">来源：<a href="https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/feature-matrix.md" target="_blank">feature-matrix.md</a>（SGLang/vLLM/TRT-LLM 能力矩阵）</span>
+</section>
+
+<section>
+  <h2>小结：为什么块级 + 负载打分是它的核心</h2>
+  <p>Dynamo 把「KV 重叠度」定位为<b>负载估计的输入</b>而非路由目标——KV indexer 负责精确记住"谁缓存了什么块、在哪层"，selection service 用 cache-credit 公式把它折算成"还欠多少 prefill"，再加 decode 负载，选 token 负载最低的副本。这条"块级 KV 事件 → 全局 radix 树 → cache-credit 折算 → token 负载打分"的链路，正是 Anyscale 那篇博客（Ray Serve KVAwareRouter）复用的底层。</p>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="comparison.html">← 返回四维度对比</a>
+</div>
+
+</div>
+</body>
+</html>

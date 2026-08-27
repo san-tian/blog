@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lodestar 功能实现讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .tag { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11px; font-weight:700; margin-right:4px; }
+  .tag.ok { background:#dcfce7; color:#15803d; }
+  .tag.no { background:#fee2e2; color:#b91c1c; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Lodestar 功能实现讲解</h1>
+  <p>在线学习路由（Go gateway + Python 训练服务，构建在 AIBrix 上）。能力标注：<span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ Token负载感知</span><span class="tag ok">✅ 在线学习路由</span><span class="tag no">✗ 块级KV感知</span><span class="tag no">✗ 多实例HA</span></p>
+</header>
+
+<section>
+  <h2>在线学习路由 + Token 负载感知 —— MLP 预测 −TTFT</h2>
+  <p>核心是一个小 MLP（3 隐藏层 × 128 单元，ReLU，dropout 0.1，标量输出），对每个候选实例预测 <b>reward = −TTFT</b>，选 argmax（即预测 TTFT 最小）。</p>
+  <ul>
+    <li><b>请求特征</b>：input token length、期望 KV cache 命中率。</li>
+    <li><b>实例状态（token 级负载，关键设计）</b>：<b>inflight prefill tokens 和 inflight decode tokens 分开保留</b>——因为 prefill 是计算密集、decode 是内存带宽密集，合并会掩盖实例正逼近哪个瓶颈；再加 running/queued requests、GPU 型号、GPU 内存利用率。</li>
+    <li><b>参数跨实例共享，instance ID 从不作为输入</b>：实例数无关（弹性扩缩无需重训）+ 实例索引无关（避免"羊群效应"）。</li>
+    <li>故意排除 GPU utilization / SM activity（GPU utilization 只要任一 kernel 在任一 SM 上跑就报 100%，误导大；细粒度 profiler 开销与在线路由不兼容）。</li>
+  </ul>
+  <span class="src">来源：<a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar 论文（arXiv 2606.00946）</a>（§The reward predictor；特征选择）</span>
+</section>
+
+<section>
+  <h2>前缀缓存感知 —— KV cache tracker</h2>
+  <p>Stateful Gateway 的 KV cache tracker 把 prompt tokenize 后插入 <b>radix tree 前缀索引</b>，算"路由到该实例能命中多少已缓存前缀"——这是<b>前缀命中率</b>（非块级 KV 事件），作为 MLP 的输入特征之一。</p>
+  <span class="src">来源：<a href="https://github.com/gangmuk/Lodestar" target="_blank">Lodestar README</a>（"expected KV cache hit ratio"）</span>
+</section>
+
+<section>
+  <h2>在线训练 —— 解决"循环依赖"</h2>
+  <p>Lodestar 的核心设计选择是<b>在线学习</b>：离线训练的预测器不泛化，因为路由策略本身会重塑它要预测的负载分布（论文 §3.3 的"circular dependency"）。实现：</p>
+  <ul>
+    <li><b>触发</b>：每新增 θ=1000 个样本重训一次。</li>
+    <li><b>two-pool buffer</b>：FIFO（5000 最近样本，recency）+ replay（5000 样本，经 gradient-coreset 准则按激活/残差选最多样的，diversity）。</li>
+    <li><b>回退</b>：冷启动无模型、特征越界（OOD）、RPC 超时三种情况回退到启发式（pre-computed 选择，不增延迟）。</li>
+  </ul>
+  <span class="src">来源：<a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar 论文</a>（§Online learning loop）</span>
+</section>
+
+<section>
+  <h2>架构与部署</h2>
+  <ul>
+    <li><b>Stateful Gateway</b>（Go，~8K 行）：Envoy data plane 的 ext_proc 插件，拦截每个请求 → 采集群快照 → 问 Routing Service → 转发 → 记 TTFT/TPOT。</li>
+    <li><b>Routing Service</b>（Python，~4K 行）：持有 MLP + 训练循环，暴露 /infer（打分）和 /flush（批量日志 → 训练）。</li>
+    <li>构建在 <a href="aibrix.html">AIBrix</a> 上，复用其 Envoy ext_proc gateway、pod registry、vLLM 指标采集；跑在 K8s。</li>
+  </ul>
+  <span class="src">来源：<a href="https://github.com/gangmuk/Lodestar" target="_blank">Lodestar README</a>（"Architecture"）</span>
+</section>
+
+<section>
+  <h2>小结</h2>
+  <p>Lodestar 是「学习式路由」的代表：用 MLP 把 KV 命中率 + token 级负载（inflight prefill/decode 分开）+ 硬件状态一起学成 −TTFT 预测，在线训练应对分布漂移。它是单实例 gateway（无跨副本路由状态同步），这是相对 SMG/Dynamo 的短板；但"把 prefill/decode token 分开当特征"这个设计，正是"负载感知"的关键细节。</p>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="comparison.html">← 返回四维度对比</a>
+</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DLRouter 功能实现讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .tag { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11px; font-weight:700; margin-right:4px; }
+  .tag.ok { background:#dcfce7; color:#15803d; }
+  .tag.no { background:#fee2e2; color:#b91c1c; }
+  .tag.part { background:#fef3c7; color:#b45309; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>DLRouter 功能实现讲解</h1>
+  <p>OpenAI 兼容的多后端推理 gateway（Python，较新）。能力标注：<span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ 多后端</span><span class="tag no">✗ 块级KV感知</span><span class="tag no">✗ Token负载感知</span></p>
+</header>
+
+<section>
+  <h2>多后端 —— 可插拔 backend adapter</h2>
+  <p>DLRouter 通过<b>可插拔 backend adapter 接口</b>支持 LMDeploy、vLLM、SGLang、DLEngine 四类后端，每个后端有独立的 backend/config/definition 模块。统一 OpenAI 兼容 API（<code>/v1/models</code>、<code>/v1/chat/completions</code>、<code>/v1/completions</code>）。</p>
+  <span class="src">来源：<a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter README</a>（"Supported Backends"）；代码结构 <code>dlrouter/backends/{lmdeploy,vllm,sglang,dlengine}/</code></span>
+</section>
+
+<section>
+  <h2>前缀缓存感知 —— prefix_cache 策略</h2>
+  <p>路由策略之一 <code>prefix_cache</code>：按 KV cache 前缀局部性路由，把请求发给已缓存其前缀的节点以提高命中率。这是前缀级（非块级 KV 事件）。</p>
+  <span class="src">来源：<a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter README</a>（"Routing Strategies" 表，prefix_cache 行）；实现见 <code>dlrouter/routing/prefix_cache.py</code></span>
+</section>
+
+<section>
+  <h2>负载感知路由 —— 延迟估计（非 token 级）</h2>
+  <p>DLRouter 的负载感知是<b>延迟估计</b>而非 token 级负载：</p>
+  <ul>
+    <li><code>min_expected_latency</code>：选 <code>unfinished_requests / speed</code> 最小的节点（在途请求数 ÷ 节点速度）。</li>
+    <li><code>min_observed_latency</code>：选最近平均延迟最低的节点。</li>
+  </ul>
+  <p>注意：这没有 prefill/decode token 分离，所以不算"Token 负载感知"。</p>
+  <span class="src">来源：<a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter README</a>（"Routing Strategies" 表）</span>
+</section>
+
+<section>
+  <h2>完整路由策略清单（6 种）</h2>
+  <p><code>round_robin</code>（顺序轮转）、<code>random</code>（加权随机，速度高的节点收更多流量）、<code>consistent_hash</code>（同 key 同节点，亲和/缓存局部性）、<code>min_expected_latency</code>、<code>min_observed_latency</code>、<code>prefix_cache</code>。</p>
+  <span class="src">来源：<a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter README</a>（"Routing Strategies"）</span>
+</section>
+
+<section>
+  <h2>其他能力：PD 分离 + 动态节点管理</h2>
+  <ul>
+    <li><b>DistServe / PD 分离</b>：LMDeploy（RDMA 迁移）、vLLM（two-stage KV transfer + NIXL DP rank 路由 + heartbeat discovery）、SGLang（bootstrap dual dispatch）。</li>
+    <li><b>动态节点管理</b>：REST API 注册/移除/检查/终止后端节点；健康检查 + 连续失败自动摘除。</li>
+  </ul>
+  <span class="src">来源：<a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter README</a>（"Highlights" / "Dynamic node management"）</span>
+</section>
+
+<section>
+  <h2>小结</h2>
+  <p>DLRouter 定位是「多后端 OpenAI 兼容 gateway + PD 分离编排」：可插拔 backend（LMDeploy/vLLM/SGLang/DLEngine）+ 6 种路由策略（含 prefix_cache、延迟估计）。KV 感知是前缀级、负载感知是延迟估计级，没有块级 KV 事件和 token 级打分。项目较新（2026 年初），多实例同步机制未在文档中说明。</p>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="comparison.html">← 返回四维度对比</a>
+</div>
+
+</div>
+</body>
+</html>
