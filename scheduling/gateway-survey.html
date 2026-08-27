@@ -206,7 +206,7 @@
       <td><b>llm-d</b></td>
       <td><span class="yes">✅</span> Active-Passive（默认 leader 选举）/ Active-Active（近线性扩展）；KV indexer pod-discovery 每副本独立订阅全量事件</td>
       <td><span class="yes">✅ 块级</span> 两层：approximate prefix（默认）+ KV-Cache Indexer 订阅 vLLM / SGLang 的 KVEvents</td>
-      <td><span class="no">❌ 必须 K8s</span> Gateway API InferencePool</td>
+      <td><span class="part">⚠️ K8s 可选</span> 新增 EndpointDiscovery + file-discovery 插件，可无 K8s 运行（Slurm / Ray / 裸机）</td>
       <td>sticky-until-saturated（前缀亲和 + 饱和释放阈值 τ），瓶颈匹配（prefill 看 token / decode 看活跃请求）</td>
     </tr>
     <tr>
@@ -278,8 +278,9 @@
 
   <h3>③ K8s / Ray 依赖 —— 能否脱离编排框架独立跑</h3>
   <ul>
-    <li><b>零依赖（Dynamo / SMG / SGLang Router）</b>：引擎无关、纯进程内或独立二进制，K8s 只是可选。</li>
-    <li><b>强绑定 K8s（llm-d / AIBrix / Lodestar）</b>：依赖 Gateway API / K8s pod 模型，下游推理服务必须跑在 K8s pod。</li>
+    <li><b>零依赖（Dynamo / SMG / SGLang Router / DLRouter）</b>：引擎无关、纯进程内或独立二进制，K8s 只是可选。</li>
+    <li><b>K8s 可选（llm-d）</b>：新增 EndpointDiscovery + file-discovery，可无 K8s 运行（Slurm / Ray / 裸机），路由逻辑不变。</li>
+    <li><b>强绑定 K8s（AIBrix / Lodestar）</b>：依赖 K8s pod 模型，下游推理服务必须跑在 K8s pod。</li>
     <li><b>强绑定 Ray（Ray Serve LLM）</b>：路由和下游引擎都在 Ray Serve 部署模型内。</li>
   </ul>
 

@@ -33,7 +33,7 @@
 
 <header>
   <h1>llm-d 功能实现讲解</h1>
-  <p>Kubernetes 原生推理 Gateway（Go）。能力标注：<span class="tag ok">✅ 块级KV感知</span><span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ Token负载感知</span><span class="tag part">⚠️ 在线学习路由(可选)</span><span class="tag ok">✅ 多实例HA</span><span class="tag ok">✅ 多后端</span></p>
+  <p>推理 Gateway（Go），K8s 原生 + 新增无 K8s 的 file-discovery 模式。能力标注：<span class="tag ok">✅ 块级KV感知</span><span class="tag ok">✅ 前缀缓存感知</span><span class="tag ok">✅ Token负载感知</span><span class="tag part">⚠️ 在线学习路由(可选)</span><span class="tag ok">✅ 多实例HA</span><span class="tag ok">✅ 多后端</span></p>
 </header>
 
 <section>
@@ -77,13 +77,14 @@
 
 <section>
   <h2>多后端</h2>
-  <p>KV-Cache Indexer 明确支持 <b>vLLM 和 SGLang</b> 两类引擎（都发 ZMQ KVEvents）；整体跑在 K8s Gateway API InferencePool 之上。</p>
+  <p>KV-Cache Indexer 明确支持 <b>vLLM 和 SGLang</b> 两类引擎（都发 ZMQ KVEvents）。部署通过 <b>EndpointDiscovery 抽象</b>解耦平台：K8s InferencePool 或 file-discovery（无 K8s，可跑在 Slurm / Ray / 裸机）。</p>
+  <span class="src">来源：<a href="https://llm-d.ai/blog/running-llm-d-without-kubernetes" target="_blank">llm-d 博客：No Kubernetes? No Problem: llm-d Now Runs Anywhere</a></span>
   <span class="src">来源：<a href="https://llm-d.ai/docs/0.7/architecture/advanced/kv-management/kv-indexer" target="_blank">kv-indexer 文档</a>（"Model servers (vLLM and SGLang today)"）</span>
 </section>
 
 <section>
   <h2>小结</h2>
-  <p>llm-d 是「K8s 原生 + 双层 KV 感知 + 阈值可推导」的组合：调度用 sticky-until-saturated（阈值 τ 闭式可得，是工业侧最贴合"同时均衡 cache hit 和负载"的实现），KV 感知用 approximate prefix（粗）+ KV-Cache Indexer（块级精确，订阅 vLLM/SGLang 事件）。</p>
+  <p>llm-d 是「平台解耦 + 双层 KV 感知 + 阈值可推导」的组合：调度用 sticky-until-saturated（阈值 τ 闭式可得，是工业侧最贴合「同时均衡 cache hit 和负载」的实现），KV 感知用 approximate prefix（粗）+ KV-Cache Indexer（块级精确，订阅 vLLM/SGLang 事件）；部署通过 EndpointDiscovery 抽象解耦平台（K8s 或 file-discovery，路由逻辑不变）。</p>
 </section>
 
 <div class="foot">
