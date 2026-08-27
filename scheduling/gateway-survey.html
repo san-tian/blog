@@ -63,6 +63,10 @@
   .tag.ind { background: var(--ind); }
   .tag.aca { background: var(--aca); }
   .muted { color: var(--muted); font-size: 13px; }
+  .ok { color: #16a34a; font-weight: 700; text-align: center; white-space: nowrap; }
+  .no { color: #dc2626; text-align: center; white-space: nowrap; }
+  .part { color: #d97706; font-weight: 700; text-align: center; white-space: nowrap; }
+  .unk { color: #94a3b8; text-align: center; white-space: nowrap; }
   a { color: #0066ff; text-decoration: none; }
   a:hover { text-decoration: underline; }
 </style>
@@ -99,44 +103,66 @@
   <p>聚焦「路由 gateway」——决定请求发给哪个引擎实例的项目。</p>
 
   <table>
-    <tr><th>项目</th><th>语言 / License</th><th>⭐（约）</th><th>调度 / 负载感知核心能力</th></tr>
     <tr>
-      <td><b><a href="https://github.com/ai-dynamo/dynamo" target="_blank">NVIDIA Dynamo</a></b><br><code>ai-dynamo/dynamo</code></td><td>Rust / Apache 2.0</td><td>7800</td>
-      <td>块级 KV 感知（KV indexer + selection service）、token 负载打分（cache-credit 公式）、SLA 驱动 Planner 自动扩缩容</td>
+      <th style="min-width:116px">项目</th>
+      <th>语言 / License</th>
+      <th>⭐</th>
+      <th title="订阅引擎 KV 事件，块级精确 cache hit">块级<br>KV 感知</th>
+      <th title="radix 树 / 文本前缀近似匹配">前缀<br>缓存感知</th>
+      <th title="prefill / decode token 级负载打分">Token<br>负载感知</th>
+      <th title="ML 预测延迟 / 奖励">在线学习<br>路由</th>
+      <th title="跨副本路由状态同步">多实例<br>HA 同步</th>
+      <th title="按 SLO 自动扩缩副本">SLA<br>自动扩缩</th>
+      <th title="跨引擎 / 跨提供商后端">多后端</th>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a></b><br><code>llm-d/llm-d</code></td><td>Go / Apache 2.0</td><td>4100</td>
-      <td>sticky-until-saturated token-aware 路由、阈值可推导（τ = R_peak × T_max）、K8s Gateway API InferencePool、插件化 filter/scorer/picker</td>
+      <td><b><a href="https://github.com/ai-dynamo/dynamo" target="_blank">NVIDIA Dynamo</a></b><br><code>ai-dynamo/dynamo</code></td>
+      <td>Rust<br>Apache 2.0</td><td>7800</td>
+      <td class="ok">✅</td><td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="ok">✅</td><td class="ok">✅</td><td class="ok">✅</td>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/lightseekorg/smg" target="_blank">SMG（Shepherd Model Gateway）</a></b><br><code>lightseekorg/smg</code></td><td>Rust / Apache 2.0</td><td>—</td>
-      <td>cache-aware + 8 种路由策略（cache_aware、power_of_two、consistent_hashing、prefix_hash…）、亚毫秒路由决策、SWIM HA mesh</td>
+      <td><b><a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a></b><br><code>llm-d/llm-d</code></td>
+      <td>Go<br>Apache 2.0</td><td>4100</td>
+      <td class="ok">✅</td><td class="ok">✅</td><td class="ok">✅</td><td class="part">⚠️</td><td class="ok">✅</td><td class="no">✗</td><td class="ok">✅</td>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a></b><br><code>sgl-project/sglang</code> 内置</td><td>Rust</td><td>随 SGLang</td>
-      <td>cache-aware（近似 radix tree）+ 最短队列（带 balance threshold），缓存复用与负载均衡的折中</td>
+      <td><b><a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a></b><br><code>lightseekorg/smg</code></td>
+      <td>Rust<br>Apache 2.0</td><td>—</td>
+      <td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="ok">✅</td>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a></b><br><code>vllm-project/aibrix</code></td><td>Go</td><td>—</td>
-      <td>Envoy ext_proc gateway、前缀缓存感知路由、pod registry、vLLM 指标采集</td>
+      <td><b><a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a></b><br><code>sgl-project/sglang</code> 内置</td>
+      <td>Rust</td><td>随 SGLang</td>
+      <td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/vllm-project/router" target="_blank">vLLM Router</a></b><br><code>vllm-project/router</code></td><td>Go</td><td>—</td>
-      <td>负载均衡、响应缓存、语义路由、Anthropic/OpenAI 协议转换</td>
+      <td><b><a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a></b><br><code>vllm-project/aibrix</code></td>
+      <td>Go</td><td>—</td>
+      <td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="part">⚠️</td><td class="ok">✅</td><td class="no">✗</td>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/ray-project/ray" target="_blank">Ray Serve LLM</a></b><br><code>ray-project/ray</code></td><td>Python</td><td>—</td>
-      <td>KVAwareRouter：vLLM KV 块事件 + Dynamo radix 树 + token 负载感知（你已精读）</td>
+      <td><b><a href="https://github.com/vllm-project/router" target="_blank">vLLM Router</a></b><br><code>vllm-project/router</code></td>
+      <td>Go</td><td>—</td>
+      <td class="no">✗</td><td class="part">⚠️</td><td class="no">✗</td><td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/gangmuk/Lodestar" target="_blank">Lodestar</a></b><br><code>gangmuk/Lodestar</code></td><td>Go + Python</td><td>学术</td>
-      <td>在线学习路由（MLP 预测 −TTFT），构建在 AIBrix 的 Envoy ext_proc 上（你已精读）</td>
+      <td><b><a href="https://github.com/ray-project/ray" target="_blank">Ray Serve LLM</a></b><br><code>ray-project/ray</code></td>
+      <td>Python</td><td>—</td>
+      <td class="ok">✅</td><td class="ok">✅</td><td class="ok">✅</td><td class="no">✗</td><td class="ok">✅</td><td class="ok">✅</td><td class="part">⚠️</td>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter</a></b><br><code>DeepLink-org/DLRouter</code></td><td>—</td><td>新</td>
-      <td>OpenAI 兼容，跨 <a href="https://github.com/InternLM/lmdeploy" target="_blank">LMDeploy</a>/<a href="https://github.com/vllm-project/vllm" target="_blank">vLLM</a>/<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang</a> 实例，可插拔路由策略</td>
+      <td><b><a href="https://github.com/gangmuk/Lodestar" target="_blank">Lodestar</a></b><br><code>gangmuk/Lodestar</code></td>
+      <td>Go + Python</td><td>学术</td>
+      <td class="no">✗</td><td class="ok">✅</td><td class="ok">✅</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter</a></b><br><code>DeepLink-org/DLRouter</code></td>
+      <td>—</td><td>新</td>
+      <td class="unk">?</td><td class="unk">?</td><td class="unk">?</td><td class="unk">?</td><td class="unk">?</td><td class="unk">?</td><td class="ok">✅</td>
     </tr>
   </table>
+  <p class="muted">图例：<b class="ok">✅</b> 支持 / <b class="part">⚠️</b> 部分·受限 / <b class="no">✗</b> 无 / <b class="unk">?</b> 未知。<br>
+  能力术语：<b>块级 KV 感知</b>＝订阅引擎 KV 事件做块级精确 cache hit；<b>前缀缓存感知</b>＝radix 树 / 文本前缀近似；<b>Token 负载感知</b>＝prefill / decode token 级负载打分；<b>在线学习路由</b>＝ML 预测延迟 / 奖励；<b>多实例 HA 同步</b>＝跨副本路由状态同步；<b>SLA 自动扩缩</b>＝按 SLO 自动扩缩副本；<b>多后端</b>＝跨引擎 / 跨提供商。</p>
 
   <h3>AI API Gateway（相邻层，仅列名，不展开）</h3>
   <p class="muted"><a href="https://github.com/BerriAI/litellm" target="_blank">LiteLLM</a>、<a href="https://github.com/envoyproxy/ai-gateway" target="_blank">Envoy AI Gateway</a>、<a href="https://github.com/substratusai/kubeai" target="_blank">KubeAI</a>、<a href="https://github.com/alibaba/higress" target="_blank">Higress</a>、<a href="https://github.com/Kong/kong" target="_blank">Kong AI Gateway</a>、<a href="https://github.com/lm-sys/RouteLLM" target="_blank">RouteLLM</a>、<a href="https://github.com/agentgateway/agentgateway" target="_blank">Agent Gateway</a> —— 面向多模型/多提供商治理，与「引擎调度」目标不同。</p>
