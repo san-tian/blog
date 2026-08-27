@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>细粒度负载路由设计：逐请求 prefill 等待</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --aca:#8b20be; --core:#ea580c; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:900px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 55%,#8b20be); color:#fff; border-radius:14px; padding:26px 28px; margin-bottom:22px; }
+  header h1 { font-size:23px; margin-bottom:10px; line-height:1.4; }
+  header p { color:#e0e7ff; font-size:14px; }
+  .badge { display:inline-block; background:rgba(255,255,255,.16); border-radius:20px; padding:2px 12px; font-size:12px; margin-right:6px; margin-bottom:4px; }
+  section { background:var(--card); border-radius:14px; padding:22px 26px; margin-bottom:18px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:19px; margin-bottom:14px; padding-left:10px; border-left:4px solid var(--ind); }
+  h2.core { border-left-color:var(--core); }
+  h2.aca { border-left-color:var(--aca); }
+  h3 { font-size:15px; margin:18px 0 8px; }
+  p { margin-bottom:10px; font-size:14.5px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  pre { background:#1e293b; color:#e2e8f0; border-radius:10px; padding:14px 16px; overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:13px; margin:10px 0; line-height:1.6; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#f1f5f9; }
+  .callout { border-radius:10px; padding:14px 16px; margin:12px 0; font-size:14px; }
+  .callout.tip { background:#eff6ff; border:1px solid #93c5fd; }
+  .callout.core { background:#fff7ed; border:1px solid #fdba74; }
+  .callout.ac { background:#faf5ff; border:1px solid #d8b4fe; }
+  .callout.warn { background:#fef2f2; border:1px solid #fca5a5; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>细粒度负载路由设计：基于「逐请求 prefill 等待」</h1>
+  <p>
+    <span class="badge">insight</span>
+    <span class="badge">路由策略设计</span>
+    <span class="badge">队列组成盲区</span>
+  </p>
+  <p style="margin-top:10px">核心问题：计算负载时，现有方案用的都是<b>实例级聚合指标</b>（inflight token 总数、活跃请求数），看不到<b>实例队列内部每个请求各自的 prefill 等待量</b>。本文展开这个盲区，并设计一个基于逐请求细粒度负载的路由策略。</p>
+</header>
+
+<section>
+  <h2>你的 insight：聚合负载指标的「队列组成盲区」</h2>
+  <p>现有路由策略计算负载时，看到的都是聚合值：</p>
+  <table>
+    <tr><th>方案</th><th>负载指标</th><th>粒度</th></tr>
+    <tr><td>llm-d token-load</td><td>in-flight 未缓存 token 数</td><td>实例聚合</td></tr>
+    <tr><td>LMetric</td><td>batch size</td><td>实例聚合</td></tr>
+    <tr><td>Dynamo</td><td>token 负载（剩余 prefill + 活跃 decode）</td><td>实例聚合</td></tr>
+    <tr><td>Lodestar</td><td>inflight prefill/decode tokens、running/queued 数</td><td>实例聚合</td></tr>
+  </table>
+  <p>聚合值的致命盲区：<b>同样的聚合数字，队列组成可以完全不同，新请求的实际等待时间也完全不同</b>。</p>
+  <div class="callout core">
+    <b>一个反例</b>：两个实例，聚合 inflight prefill 都是 <b>100 token</b>，但——
+    <ul>
+      <li><b>实例 A</b>：1 个请求正在 prefill，剩余 100 token（一个"大块头"挡在前面）。</li>
+      <li><b>实例 B</b>：100 个请求，各剩余 1 token（prefill 都快完了，但 decode 队列很长、KV 满）。</li>
+    </ul>
+    聚合指标看两者"一样闲/一样忙"，但新请求路由过去：
+    <ul>
+      <li>到 A：要等那个 100-token 大块头 prefill 完（且它是计算密集，占满 GPU）；</li>
+      <li>到 B：prefill 瞬间就空出位置，但要挤进已经很满的 decode 批。</li>
+    </ul>
+    <b>「总共多少」掩盖了「谁挡在前面、挡了多久」</b>——这正是你要解决的盲区。
+  </div>
+</section>
+
+<section>
+  <h2 class="core">细粒度负载模型：把实例负载拆成「逐请求队列」</h2>
+  <p>把实例的负载从"一个聚合数"升级为"一个有序的逐请求队列"：</p>
+  <pre>Q_i = [ (r_1, c_1, s_1), (r_2, c_2, s_2), ..., (r_k, c_k, s_k) ]
+
+  c_j = 请求 j 的<b>剩余 prefill 成本</b>（token 数，考虑 KV 命中后还需新算的）
+  s_j = 请求 j 的状态（prefill 中 / 排队中 / decode 中）</pre>
+  <p>三个关键字段：</p>
+  <ul>
+    <li><b>c_j（剩余 prefill 成本）</b>：LMetric 已经证明该用"需新算的 prefill token 数"（而非命中率）——这里把它细化到<b>每个请求</b>。</li>
+    <li><b>逐请求而非聚合</b>：这样才知道"排在新请求前面的具体是哪些请求、各剩多少"，而不是只知道"总共还剩多少"。</li>
+    <li><b>动态更新</b>：c_j 随 prefill 推进递减，prefill 完成后请求转入 decode（对后续 prefill 不再构成阻塞）。</li>
+  </ul>
+</section>
+
+<section>
+  <h2 class="core">新路由策略：最小化「新请求的期望 TTFT」</h2>
+  <p>路由目标从"平衡聚合负载"改为<b>"最小化新请求的期望 TTFT"</b>——而期望 TTFT 由逐请求队列精确算出。</p>
+
+  <h3>打分公式</h3>
+  <pre>TTFT(r → i) ≈ ( W_i(r) + c_r ) / prefill_throughput_i
+
+W_i(r) = Σ c_j        # 所有「排在 r 前面」的请求的剩余 prefill 之和</pre>
+  <ul>
+    <li><b>c_r</b>：新请求自己的 prefill 成本（输入 token − 命中 KV 的 token）。</li>
+    <li><b>W_i(r)</b>：r 插进队列后，排在它前面的那些请求的剩余 prefill 之和——<b>这才是"r 实际要等多久"的精确度量</b>，也是聚合指标算不出来的部分。</li>
+    <li><b>路由决策</b>：选 TTFT 最小的实例。</li>
+  </ul>
+
+  <h3>「排在 r 前面」由队列重排策略决定——这是设计的核心自由度</h3>
+  <table>
+    <tr><th>重排策略</th><th>W_i(r) 的计算</th><th>效果</th></tr>
+    <tr><td><b>FIFO（不重排）</b></td><td>r 排队尾，W = 队列里全部剩余 prefill 之和</td><td>等价于聚合指标（退化为 llm-d 的 inflight token），无新增信息</td></tr>
+    <tr><td><b>SJF（短请求插队）</b></td><td>r 插到所有 c_j &lt; c_r 的请求前面，W = 所有 c_j &lt; c_r 的请求的 prefill 之和</td><td>短请求等待大幅缩短；长请求可能饿死，需 aging 兜底</td></tr>
+    <tr><td><b>分位感知（QUARTZ 式）</b></td><td>用每个请求的 prefill 分位（而非精确值）排序</td><td>对不确定性的鲁棒性更好</td></tr>
+  </table>
+  <p class="muted">关键：FIFO 下逐请求信息没有新增价值（退化成聚合）；<b>逐请求信息的价值在于支持队列重排（SJF/分位）</b>——而这正是 QUARTZ 在"准入层"已经做了、但"路由层"还没做的事。</p>
+</section>
+
+<section>
+  <h2 class="aca">和现有方案的关系：把 QUARTZ 的准入粒度提前到路由</h2>
+  <p>这个设计不是凭空发明，而是把几篇论文的边界往前推一步：</p>
+  <table>
+    <tr><th>方案</th><th>路由层（选实例）用什么</th><th>准入层（排顺序）用什么</th></tr>
+    <tr><td><b>LMetric</b></td><td>聚合 batch size × 新请求 prefill</td><td>无（交给引擎 FCFS）</td></tr>
+    <tr><td><b>llm-d</b></td><td>聚合 inflight token / 活跃请求</td><td>无（粘性 + 饱和释放）</td></tr>
+    <tr><td><b>QUARTZ</b></td><td>聚合 Ŵ + 新请求分位（K=2 候选）</td><td><b>逐请求</b>分位 + aging + 公平（SJF 类）</td></tr>
+    <tr><td><b>本设计</b></td><td><b>逐请求队列</b>（精确 W_i(r)）</td><td>同一套逐请求队列（路由 + 准入统一）</td></tr>
+  </table>
+  <div class="callout ac">
+    <b>一句话定位</b>：QUARTZ 已经证明「逐请求成本 + SJF + aging」在<b>准入层</b>能降尾延迟；本设计把它<b>提前到路由层</b>——路由决策直接看"插进这个实例的逐请求队列后，新请求要等多久"，而不是看聚合的 inflight 数。同时把 QUARTZ 的"分位预测"（有误差）升级为"逐请求精确队列"（无预测误差，代价是状态维护）。
+  </div>
+</section>
+
+<section>
+  <h2 class="core">打分公式的两种实现（精确 vs 分位）</h2>
+  <h3>实现 A：精确逐请求队列</h3>
+  <pre>TTFT(r → i) = ( Σ_{j: c_j < c_r} c_j  +  c_r ) / prefill_throughput_i
+
+# 假设 SJF 重排，r 插到所有比它短的请求前面</pre>
+  <p>优点：精确，无预测误差。缺点：需要实时维护每个实例的逐请求队列（成本动态递减、完成即移除），且多实例路由时这个状态的跨副本同步更难。</p>
+
+  <h3>实现 B：分位逐请求队列（QUARTZ 的细粒度版）</h3>
+  <pre>用 Q̂_prefill_α(r_j) 替代精确 c_j，其余不变</pre>
+  <p>优点：对成本估计误差更鲁棒。缺点：分位预测本身有误差（QUARTZ 用决策树 + pinball loss）。</p>
+</section>
+
+<section>
+  <h2 class="core">挑战与代价（诚实标注）</h2>
+  <ul>
+    <li><b>状态维护成本</b>：路由器要实时追踪每个实例里每个请求的剩余 prefill（c_j 动态递减），这比维护一个聚合计数器重得多。但好消息是：引擎（vLLM/SGLang）已经知道每个请求的剩余 token，只需把"逐请求进度"上报给路由器（而不是只上报聚合值）。</li>
+    <li><b>跨副本同步</b>：多实例路由（llm-d active-active、SMG mesh）下，逐请求队列的同步比聚合值更难——这是 llm-d active-active 下"前缀缓存分区"问题的放大版。可能需要接受"最终一致的逐请求队列"（短暂分歧可接受，像 Dynamo 那样）。</li>
+    <li><b>SJF 的公平性</b>：短请求插队会让长请求饿死，必须配 aging（QUARTZ 的 λ·a_r 项）——这个 QUARTZ 已经给了现成解法。</li>
+    <li><b>prefill 吞吐不是常数</b>：不同请求的 prefill 吞吐受 batch 组成影响，用常数 prefill_throughput_i 是近似。可以用离线 profile 的 lookup table（Libra 的做法）修正。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>待验证的开放问题</h2>
+  <ul>
+    <li><b>W_i(r) 的精确收益有多大？</b> 相比 llm-d 的聚合 inflight token，逐请求 W_i(r) 能再降多少 TTFT？需要实测——一个合理的预期是：在"长 prefill + 短请求混合"的负载下收益最大（因为聚合指标在这种负载下最误导）。</li>
+    <li><b>SJF 重排 vs FIFO</b>：路由层允许重排（SJF）的收益，是否足以抵消重排的公平性代价和实现复杂度？QUARTZ 在准入层的答案是"值得"，路由层是否同样成立待验证。</li>
+    <li><b>和 KV 命中的交互</b>：c_r 已经扣掉了 KV 命中（= 需新算的 token），但 KV 命中还会影响"队列里其他请求的成本"（如果新请求的 prefill 会改变 KV 状态）。这个二阶效应是否需要建模？</li>
+  </ul>
+</section>
+
+<section>
+  <h2>一句话总结</h2>
+  <div class="callout tip">
+    <b>你的 insight 本质是：负载感知要从「聚合计数」升级到「队列组成」。</b>
+    由此导出的路由策略是：<b>为每个实例维护逐请求的剩余 prefill 队列，路由时精确计算"新请求插进去后要等多久"（W_i(r) + c_r），选等待最短的实例；队列重排（SJF + aging）是让逐请求信息发挥价值的钥匙——而这一层 QUARTZ 已经在准入做了、路由层还没做。</b>
+  </div>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+</div>
+
+</div>
+</body>
+</html>

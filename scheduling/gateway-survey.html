@@ -397,6 +397,10 @@
   <div class="callout tip">
     <b>关键洞察：prefill / decode token 必须分开</b>。Lodestar 明确强调 inflight prefill tokens 和 inflight decode tokens 要<b>分开保留</b>——prefill 是计算密集、decode 是内存带宽密集，合并会掩盖实例正逼近哪个瓶颈。llm-d 的「瓶颈匹配」是同一条思路：prefill 受限看 in-flight 未缓存 token，decode 受限看活跃请求数。这是「负载感知」最容易被忽视、也最关键的细节。
   </div>
+
+  <div class="callout ac">
+    <b>延伸设计</b>：基于「逐请求 prefill 等待」的细粒度负载路由，见 <a href="gateway-survey/routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>——把负载从聚合计数升级到队列组成，路由时精确计算「新请求插进去要等多久」，选等待最短的实例。
+  </div>
 </section>
 
 <!-- ============ 结论 ============ -->
