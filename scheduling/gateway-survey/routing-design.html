@@ -115,6 +115,49 @@ W_i(r) = Σ c_j        # 所有「排在 r 前面」的请求的剩余 prefill �
 </section>
 
 <section>
+  <h2 class="aca">算法谱系与依据：这个设计基于哪些旧指标</h2>
+  <p>严格说，这个设计<b>没有发明新指标</b>——它是几个「已有旧指标/旧方法」的细粒度组合。逐组件追溯：</p>
+  <table>
+    <tr><th>本设计的组件</th><th>直接继承的旧指标/方法</th><th>来源</th></tr>
+    <tr>
+      <td><code>c_j / c_r</code>：逐请求的「剩余 prefill 成本（token 数）」</td>
+      <td>LMetric 的<b>「需新算的 prefill token 数」</b>（KV 指标，而非命中率）</td>
+      <td><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）</td>
+    </tr>
+    <tr>
+      <td><code>W_i(r)</code>：排在 r 前面的成本之和</td>
+      <td>llm-d / Lodestar 的<b>「inflight prefill token 总和」</b>，拆成「逐请求前缀和」</td>
+      <td><a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a> token-load；<a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></td>
+    </tr>
+    <tr>
+      <td>路由目标：最小化期望 TTFT</td>
+      <td>排队论 <b>JSQ</b>（join the shortest queue）的 LLM 化——把「最短队列」换成「最短剩余工作量」</td>
+      <td>经典排队论（见下）</td>
+    </tr>
+    <tr>
+      <td>队列重排：SJF + aging</td>
+      <td>QUARTZ 的<b>准入队列</b>（逐请求分位成本 + SJF + λ·a_r aging）</td>
+      <td><a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a>（ACL 26 findings）</td>
+    </tr>
+  </table>
+
+  <h3>更底层的理论锚点（可追溯的经典文献）</h3>
+  <ul>
+    <li><b>SRPT 最优性</b>：单机、已知处理时间下，<b>SRPT（最短剩余处理时间优先）最小化平均响应时间</b>——这是「短请求插队」的教科书级最优性依据，本设计的 SJF 重排直接继承此结论。来源：Schrage &amp; Miller, "The Queue M/G/1 with the Shortest Remaining Processing Time Discipline", Operations Research 14(4):670–684, 1966。 <a href="https://doi.org/10.1287/opre.14.4.670" target="_blank">DOI →</a></li>
+    <li><b>SPT（Smith 规则）</b>：<b>最短处理时间优先最小化平均等待时间</b>。来源：W. E. Smith, "Various Optimizers for Single-Stage Production", Naval Research Logistics Quarterly 3(1-2):59–66, 1956。 <a href="https://doi.org/10.1002/nav.3800030106" target="_blank">DOI →</a></li>
+    <li><b>Size-based dispatching</b>：按 job size 路由 + size-aware 排序，是 Harchol-Balter 等人的经典方向。本设计就是把 size-based dispatching 引入 LLM 推理 gateway，其中 size = 剩余 prefill token（KV 命中后）。来源：Harchol-Balter, Schroeder, Bansal, Agrawal, "Size-Based Scheduling to Improve Web Performance", ACM TOCS 21(2), 2003。 <a href="https://researchr.org/publication/Harchol-BalterSBA03" target="_blank">论文 →</a></li>
+  </ul>
+
+  <div class="callout core">
+    <b>一句话谱系</b>：<br>
+    <b>经典调度理论</b>（JSQ 路由目标 + SPT/SRPT 最优排序 + size-based dispatching）<br>
+    → <b>LLM 系统的旧指标</b>（LMetric 的需新算 prefill token、llm-d/Lodestar 的 inflight token 总和、QUARTZ 的逐请求准入队列）<br>
+    → <b>本设计</b>（把这些旧指标的粒度统一推进到「逐请求」，路由层直接算 W_i(r) 而非聚合值）。<br>
+    <b>所以它不发明新指标，真正的增量只有一处</b>：把「队列总成本」换成「排在 r 前面的成本之和」（逐请求前缀和），以及把 QUARTZ 的准入层逐请求机制提前到路由层。
+  </div>
+</section>
+
+<section>
   <h2 class="aca">和现有方案的关系：把 QUARTZ 的准入粒度提前到路由</h2>
   <p>这个设计不是凭空发明，而是把几篇论文的边界往前推一步：</p>
   <table>
