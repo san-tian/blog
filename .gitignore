@@ -2,3 +2,7 @@
 *.zip
 *.tar.gz
 *.bak
+
+# 本地工作草稿，不入仓库
+sync_workspace/
+xiaohongshu/
