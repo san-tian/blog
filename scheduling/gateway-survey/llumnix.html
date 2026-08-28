@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Llumnix（动态重调度）论文讲解</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --aca:#8b20be; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:880px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 60%,#8b20be); color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header h1 { font-size:22px; margin-bottom:8px; }
+  header p { color:#e0e7ff; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
+  h3 { font-size:15px; margin:14px 0 8px; }
+  p { font-size:14.5px; margin-bottom:10px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  pre { background:#1e293b; color:#e2e8f0; border-radius:10px; padding:12px 14px; overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:12.5px; margin:10px 0; line-height:1.5; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#f1f5f9; }
+  .callout { border-radius:10px; padding:13px 16px; margin:10px 0; font-size:14px; }
+  .callout.tip { background:#eff6ff; border:1px solid #93c5fd; }
+  .callout.ac { background:#faf5ff; border:1px solid #d8b4fe; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .src a { color:var(--muted); }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Llumnix（动态重调度）论文讲解</h1>
+  <p>OSDI 2024 · Dynamic Scheduling for Large Language Model Serving · Alibaba（开源 <a href="https://github.com/AlibabaPAI/llumnix" target="_blank" style="color:#fff">AlibabaPAI/llumnix</a>）</p>
+</header>
+
+<section>
+  <h2>一句话</h2>
+  <p>现有调度把「请求发给哪个实例」当成<b>一次性的、不可撤销的决定</b>；Llumnix 把它变成<b>可撤销的</b>——请求带着 KV cache 在实例间实时搬家（类比 OS 在 CPU 核间做上下文切换），停机仅 <b>~20–30ms 且与序列长度无关</b>。效果：P99 first-token 延迟最高改善一个数量级（15×），高优先级请求加速 1.5×，同等尾延迟下省 36% 成本。</p>
+  <span class="src">来源：<a href="https://arxiv.org/abs/2406.03243" target="_blank">arXiv 2406.03243</a>（Biao Sun、Ziming Huang 等，Alibaba Group；名字寓意 = serving LLMs as Unix）</span>
+</section>
+
+<section>
+  <h2>问题：LLM 服务是「多租户动态 OS」</h2>
+  <p>两个根源特性：<b>工作负载异构</b>（输入/输出长度、延迟要求差异巨大）+ <b>执行不可预测</b>（输出 token 数先验未知，KV 内存需求随生成动态增长）。由此产生三个 OS 式调度挑战：</p>
+  <table>
+    <tr><th>挑战</th><th>表现</th><th>论文实测证据</th></tr>
+    <tr><td><b>Isolation（隔离）</b></td><td>内存竞争 → 抢占与批内干扰</td><td>A10 + LLaMA-7B、平均内存负载仅 <b>62%</b> 时仍有 <b>8%</b> 请求被抢占；P99 per-token decode = <b>3.8×</b> P50，其中抢占损失占 70%（P99 请求被抢占两次、累计停顿 50s）</td></tr>
+    <tr><td><b>Fragmentation（碎片）</b></td><td>负载均衡把空闲内存摊碎在各实例；PagedAttention 只消除 decode 阶段的碎片，<b>prefill 要一次性要一大块</b></td><td>4 实例实验：集群总空闲内存够 3 个队头请求，但各实例都因本机空间不足而排队</td></tr>
+    <tr><td><b>Priorities（优先级）</b></td><td>所有请求一视同仁，交互型/付费高优被普通请求干扰</td><td>batch 内干扰：decode 单步耗时差距最高 <b>2.6×</b></td></tr>
+  </table>
+  <p><b>关键观察</b>：某个实例出问题时，集群整体往往仍有余量——但请求被绑定在首次派发的实例上，动不了。</p>
+</section>
+
+<section>
+  <h2>核心思想：从「派对了」到「能改派」</h2>
+  <table>
+    <tr><th></th><th>一次性派发（现有 gateway/调度器）</th><th>运行时重调度（Llumnix）</th></tr>
+    <tr><td><b>预测压力</b></td><td>必须在对请求一无所知时做对决策</td><td>初始派发可以错，跑歪了就搬</td></tr>
+    <tr><td><b>响应对象</b></td><td>到达时刻的负载快照</td><td>运行中的真实增长（输出长度、内存占用逐渐显形）</td></tr>
+    <tr><td><b>度量要求</b></td><td>越细/越预测式越好</td><td><b>实例级聚合即可 + 决策可逆</b></td></tr>
+  </table>
+  <p>四个重调度场景（论文 Figure 1）：<b>负载均衡</b>（减少抢占/干扰）、<b>去碎片</b>（腾出连续空间给长输入）、<b>优先级</b>（给高优动态腾出低负载环境，无需静态预留机器）、<b>伸缩</b>（排干待终止实例 / 快速填满新实例）。</p>
+</section>
+
+<section>
+  <h2>Live migration：为什么搬家只要 20–30ms</h2>
+  <ul>
+    <li><b>关键洞察：KV cache 是 append-only</b>——自回归生成只追加、不修改已有 KV → 可以<b>边继续解码、边拷贝历史块</b>。</li>
+    <li><b>多阶段流水线</b>：stage 0 拷历史块同时继续算新 token → stage 1 拷 stage 0 期间新增的（量很小）→ … → 只有最后一个迭代真正停机，拷的也只是一步的 KV。<b>停机时间 = 拷一个迭代的 KV ≈ 常数，与序列长度无关</b>（borrow 自 VM live migration 的 working-set 思想，且不需要 dirty page 追踪）。</li>
+    <li><b>handshake 协议</b>处理迁移中的异常：目标实例预分配并预留块；每阶段后检查请求是否已完成/被抢占；任何一侧失败即 abort 并释放——正确性不依赖运气。</li>
+  </ul>
+  <table>
+    <tr><th>迁移方式</th><th>停机时间</th></tr>
+    <tr><td><b>Llumnix 流水线迁移</b></td><td><b>~20–30ms 常数</b>（比一个 decode step 还短；实测最少两阶段即完成）</td></tr>
+    <tr><td>重算（recompute）</td><td>8k 序列 LLaMA-30B = 3.5s ≈ 54 个 decode step 的服务停顿</td></tr>
+    <tr><td>阻塞式拷贝</td><td>随序列长度增长，最高达迁移方式的 <b>111×</b></td></tr>
+  </table>
+  <ul>
+    <li>对同实例其他请求的开销 <b>≤1%</b>，且只在有迁移进行时存在（实测实例仅 ~10% 时间有迁移进行）。</li>
+    <li><b>工程细节</b>：KV 传输用 Gloo 而非 NCCL（NCCL 并发调用不安全，无法与推理并行；Gloo 需 GPU→CPU 拷贝，走独立 CUDA stream 不阻塞推理）；block fusion——vLLM 的小块（128KB/块，1k token = 4k 块）先融合成连续 CPU buffer 再整体发送。</li>
+    <li><b>诚实标注</b>：跨机迁移走网络（实验机 PCIe 64Gb/s）；论文假设现代 TP 部署限于单机内高速互联，跨机迁移不与 TP 通信争抢。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>架构：全局调度器只看实例，llumlet 管请求</h2>
+  <p><b>global scheduler + 每实例 llumlet</b>（local scheduler + migration coordinator）两级：</p>
+  <ul>
+    <li>全局调度器<b>不追踪具体请求</b>：只面向实例决策（看内存负载），迁移也只<b>配对 source/destination 实例</b>，由 llumlet 自己挑请求（偏好低优先级、短序列）并执行。</li>
+    <li>复杂度与集群规模解耦 → 可扩展性实测：64 实例压测下，中心化 baseline 每迭代调度停顿 40ms（1.7× 减速），Llumnix 近零。</li>
+    <li>实现：<b>3,300 行 Python</b>，非侵入式独立库；vLLM 后端；Ray actor 编排多实例 + OpenAI 风格 frontend（生成 token 经 frontend 转发，用户对迁移无感）；全局调度器故障时降级为直连派发（迁移暂停，服务不停）。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Virtual usage：一套规则统一四个场景</h2>
+  <p><b>核心观察</b>：四个场景其实只有两类——负载均衡，与「在某实例上制造空闲」（去碎片/优先级/排干）。后者可以统一进前者：给请求设「<b>虚拟用量</b>」让实例<b>虚拟过载</b>，负载均衡策略就会自然触发迁出。</p>
+  <table>
+    <tr><th>请求情形</th><th>virtual usage 规则</th><th>触发效果</th></tr>
+    <tr><td>普通运行中请求</td><td>物理内存占用</td><td>常规负载均衡</td></tr>
+    <tr><td>排队队头请求</td><td>其<b>真实内存需求</b>（物理占用为 0）</td><td>实例虚拟过载 → 迁走别的请求腾空间（= 去碎片）</td></tr>
+    <tr><td>高执行优先级请求</td><td>物理占用 + <b>headroom</b>（同实例多高优平分；headroom = profile 出的「保持理想 decode 速度」水位，实验取 1600 token 负载）</td><td>普通请求被迁走，高优获得动态「专属」余量</td></tr>
+    <tr><td>fake request（待终止实例）</td><td>∞</td><td>排干实例（autoscaling 缩容）</td></tr>
+  </table>
+  <p><b>freeness 公式</b>：<code>F = (M − ΣV) / B</code>（M 总内存、V 虚拟用量、B batch size）——除以 B 意味着「按当前消耗速度还能跑多少个 decode 迭代」，即把剩余容量<b>换算成剩余时间</b>；F 可为负（有排队/高优请求时）→ 自动视为过载。决策规则：派发 = 高调度优先级先、同级 FCFS、派给 F 最高的实例；迁移 = 周期触发，F 低于/高于阈值的实例配对（最低配最高）；autoscaling = 集群平均 F 维持在区间内（默认 [10, 60]）。</p>
+</section>
+
+<section>
+  <h2>效果</h2>
+  <table>
+    <tr><th>对比</th><th>指标</th><th>数字</th></tr>
+    <tr><td rowspan="3">vs Round-robin（ShareGPT/BurstGPT 真实 trace）</td><td>e2e mean / P99</td><td>最高 2× / 2.9×</td></tr>
+    <tr><td>prefill mean / P99</td><td>最高 26.6× / 34.4×（RR 会把新请求派到过载实例）</td></tr>
+    <tr><td>抢占损失</td><td>平均 −84%</td></tr>
+    <tr><td rowspan="3">vs INFaaS++（负载感知派发，长尾生成分布）</td><td>prefill P99 / mean</td><td>最高 14.8×（摘要口径 15×）/ 7.7×——<b>长输入场景收益最大（去碎片）</b></td></tr>
+    <tr><td>碎片内存占比</td><td>7.9% → 0.7%（−92%）；P99 decode 最高 2×，抢占损失平均 −70.4%</td></tr>
+    <tr><td>调度可扩展性（64 实例）</td><td>中心化 baseline 每迭代停顿 40ms，Llumnix 近零</td></tr>
+    <tr><td>优先级（10% 高优请求）</td><td>高优 mean / prefill P99 / normal 代价</td><td>1.2–1.5×；最高 10×；normal 请求 mean 仅 +4.5%（prefill +13%）</td></tr>
+    <tr><td>autoscaling</td><td>同等 P99 prefill（~5s）下的成本</td><td>省 36%</td></tr>
+  </table>
+  <p><b>评测环境（诚实标注）</b>：16×A10（4 台阿里云 VM，PCIe 互联）；LLaMA-7B（1 GPU）/ 30B（4 GPU TP）；vLLM 仅支持 2k 序列上限，更长序列由「架构相近的变体」代表；1 万请求/trace，ShareGPT/BurstGPT + power-law 生成分布（均值 128/256/512，最长 6k）。基线：Round-robin、INFaaS++（优化为按 GPU 内存负载 + 计入排队请求需求）、Llumnix-base（无优先级、有迁移）。</p>
+</section>
+
+<section>
+  <h2>为什么它重要（对照你的研究主线）</h2>
+  <div class="callout ac">
+    <ul>
+      <li><b>「度量粗 + 决策可逆」是队列组成盲区的另一条出路</b>：Llumnix 的全局度量也是<b>实例级聚合</b>（virtual usage / freeness）——它绕开盲区的方式不是把度量做细，而是把决策做<b>可逆</b>。与 <a href="../routing-design.html" target="_blank">routing-design 的细粒度准入排序</a>（事前算准）<b>正交、可组合</b>：迁移摊薄初始派发错误的代价，准入重排决定队列内次序。</li>
+      <li><b>但它不解决 TTFT 排队</b>：llumlet 挑迁移请求按「低优先级、短序列优先」，是负载均衡的执行细节；排队请求只以「队头 demand 计入虚拟用量」参与触发，路由层没有逐请求队列、没有 SJF——队列组成盲区依然存在。</li>
+      <li><b>freeness 除以 batch size（剩余迭代数）与 token 预算模型 steps×t_step 同族</b>：都是把「剩余容量」换算成「还能跑多久」，而非裸内存/裸 token 数。</li>
+      <li><b>对经典调度理论的修复</b>：SRPT/SPT 假设「抢占免费」在 LLM 里不成立（KV cache 丢失代价大）——Llumnix 用 live migration 把「搬走一个请求」压到 20–30ms 且与长度无关，<b>部分恢复了抢占式调度的设计空间</b>。</li>
+      <li><b>对长上下文时代尤其重要</b>：KV 随 128k+ 上下文膨胀，「迁移停机与序列长度无关」这条性质让重调度从理论选项变成工程可行的一等自由度——代价模型不再随 KV 变大而恶化。</li>
+    </ul>
+  </div>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+</div>
+
+</div>
+</body>
+</html>

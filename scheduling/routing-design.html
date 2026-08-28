@@ -255,7 +255,7 @@ TTFT(r → i)  ≈ steps(r → i) × t_step(d_i, kv_i)
     <b>这些经典结论在 LLM 推理场景下假设不成立，只能当「概念来源」、不能当「理论依据」</b>：
     <ul>
       <li><b>「处理时间已知」只对 prefill 成立</b>：SRPT/SPT 假设 job size 到达即知；LLM 里 decode 长度不可预测（用户随时停），只有 prefill 的「需新算 token」可估计。</li>
-      <li><b>「可抢占且无成本」不成立</b>：SRPT 依赖免费抢占；LLM 里抢占 = 丢弃/换出 KV cache，代价不小。</li>
+      <li><b>「可抢占且无成本」不成立</b>：SRPT 依赖免费抢占；LLM 里抢占 = 丢弃/换出 KV cache，代价不小。例外：Llumnix（OSDI 24）的 live migration 把「迁走一个请求」的代价压到 ~20–30ms 且与序列长度无关（KV append-only + 多阶段流水线），<b>部分恢复了抢占式调度的设计空间</b>——<a href="gateway-survey/llumnix.html" target="_blank">详解 →</a>。</li>
       <li><b>「服务时间外生」不成立</b>：经典模型里 job 处理时间与调度无关；LLM 里 batching 让处理时间内生（取决于和谁同批）。</li>
       <li><b>「size 不随服务器改变」不成立（最关键）</b>：经典 size-based 里同一 job 到处一样；LLM 里 size = KV 命中后需新算 token，因实例缓存状态而异——这正是 KV 感知路由存在的原因，也是经典结论失效的根源。</li>
       <li><b>「最小化平均」目标不匹配</b>：SRPT/SPT 优化平均响应时间；LLM 要的是尾延迟（P99 TTFT）和 SLO 达成率，SRPT 甚至会恶化长请求的尾延迟。</li>
