@@ -89,7 +89,7 @@
     <span class="badge">路由 / 负载均衡 / 调度</span>
   </p>
   <p style="margin-top:10px">
-    聚焦范围：<b>调度（scheduling）+ 负载感知（load-aware routing）</b>——即「请求发给谁、何时发、如何估计每台副本的负载」这一决策层。
+    聚焦范围：<b>调度（scheduling）+ 负载感知（load-aware routing）</b>——即「请求发给谁、何时发、如何估计每台实例的负载」这一决策层。
   </p>
 </header>
 
@@ -98,8 +98,8 @@
   <h2>0. 三层边界（聚焦第二层）</h2>
   <table>
     <tr><th>层</th><th>角色</th><th>代表项目</th><th>是否本调研目标</th></tr>
-    <tr><td><b>推理引擎</b></td><td>单副本内调度（continuous batching、prefix cache）</td><td><a href="https://github.com/vllm-project/vllm" target="_blank">vLLM</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang</a>、<a href="https://github.com/NVIDIA/TensorRT-LLM" target="_blank">TensorRT-LLM</a>、<a href="https://github.com/huggingface/text-generation-inference" target="_blank">TGI</a>、<a href="https://github.com/InternLM/lmdeploy" target="_blank">LMDeploy</a></td><td>❌ 引擎本身</td></tr>
-    <tr class="hl"><td><b>引擎级调度 Gateway</b></td><td>跨副本路由：KV 感知、负载感知、动态调度</td><td><a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve LLM</a>、<a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a>、<a href="https://github.com/vllm-project/router" target="_blank">vLLM Router</a>、<a href="https://github.com/gangmuk/Lodestar" target="_blank">Lodestar</a>、<a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter</a></td><td>✅ <b>核心</b></td></tr>
+    <tr><td><b>推理引擎</b></td><td>单实例内调度（continuous batching、prefix cache）</td><td><a href="https://github.com/vllm-project/vllm" target="_blank">vLLM</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang</a>、<a href="https://github.com/NVIDIA/TensorRT-LLM" target="_blank">TensorRT-LLM</a>、<a href="https://github.com/huggingface/text-generation-inference" target="_blank">TGI</a>、<a href="https://github.com/InternLM/lmdeploy" target="_blank">LMDeploy</a></td><td>❌ 引擎本身</td></tr>
+    <tr class="hl"><td><b>引擎级调度 Gateway</b></td><td>跨实例路由：KV 感知、负载感知、动态调度</td><td><a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve LLM</a>、<a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a>、<a href="https://github.com/vllm-project/router" target="_blank">vLLM Router</a>、<a href="https://github.com/gangmuk/Lodestar" target="_blank">Lodestar</a>、<a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter</a></td><td>✅ <b>核心</b></td></tr>
     <tr><td><b>AI API Gateway</b></td><td>多模型/多提供商治理（预算、鉴权、限流）</td><td><a href="https://github.com/BerriAI/litellm" target="_blank">LiteLLM</a>、<a href="https://github.com/envoyproxy/ai-gateway" target="_blank">Envoy AI Gateway</a>、<a href="https://github.com/alibaba/higress" target="_blank">Higress</a>、<a href="https://github.com/substratusai/kubeai" target="_blank">KubeAI</a>、<a href="https://github.com/Kong/kong" target="_blank">Kong</a></td><td>⚠️ 相邻，仅列名</td></tr>
   </table>
 </section>
@@ -112,7 +112,7 @@
     <tr><th>代际</th><th>负载估计方式</th><th>代表</th><th>留下的差距</th></tr>
     <tr><td><b>一代 · 前缀近似</b></td><td>radix 树 / 文本前缀匹配估 KV 命中 + 队列长度/请求数粗计数</td><td>SGLang Router、AIBrix、vLLM Router</td><td>命中是估计值，负载是粗计数</td></tr>
     <tr><td><b>二代 · 块级精确</b></td><td>订阅引擎 KV 事件（ZMQ），维护块级精确 cache 状态</td><td>Dynamo（KV indexer）、llm-d（KV-Cache Indexer）、SMG（精确镜像）</td><td>「能省多少 prefill」精确了，但「还要等多久」仍是聚合数</td></tr>
-    <tr><td><b>三代 · 统一负载度量</b></td><td>KV 重叠折算进 token 负载，乘法 / 阈值 / 学习式合成单一打分</td><td>LMetric（学术）、llm-d sticky-until-saturated、Anyscale KVAwareRouter</td><td>负载仍是<b>实例级聚合</b>——队列组成盲区（→ <a href="routing-design.html">细粒度设计</a>）</td></tr>
+    <tr><td><b>三代 · 统一负载度量</b></td><td>KV 命中折算进 token 负载，乘法 / 阈值 / 学习式合成单一打分</td><td>LMetric（学术）、llm-d sticky-until-saturated、Anyscale KVAwareRouter</td><td>负载仍是<b>实例级聚合</b>——队列组成盲区（→ <a href="routing-design.html">细粒度设计</a>）</td></tr>
   </table>
   <div class="callout tip">
     <b>读法</b>：一、二代解决「KV 命中怎么估」，三代解决「命中和负载怎么合成一个分数」；三代的分数全部建立在<b>实例级聚合负载</b>上——这是现有工作共同的边界，也是 <a href="routing-design.html">下一篇设计</a> 的出发点。
@@ -133,8 +133,8 @@
       <th title="radix 树 / 文本前缀近似匹配">前缀<br>缓存感知</th>
       <th title="prefill / decode token 级负载打分">Token<br>负载感知</th>
       <th title="ML 预测延迟 / 奖励">在线学习<br>路由</th>
-      <th title="跨副本路由状态同步">多实例<br>HA 同步</th>
-      <th title="按 SLO 自动扩缩副本">SLA<br>自动扩缩</th>
+      <th title="跨实例路由状态同步">多实例<br>HA 同步</th>
+      <th title="按 SLO 自动扩缩实例">SLA<br>自动扩缩</th>
       <th title="跨引擎 / 跨提供商后端">多后端</th>
     </tr>
     <tr>
@@ -184,9 +184,9 @@
     </tr>
   </table>
   <p class="muted">图例：<b class="ok">✅</b> 支持 / <b class="part">⚠️</b> 部分·受限 / <b class="no">✗</b> 无 / <b class="unk">?</b> 未知。<br>
-  能力术语：<b>块级 KV 感知</b>＝订阅引擎 KV 事件或精确镜像后端 KV cache，做块级精确 cache hit；<b>前缀缓存感知</b>＝radix 树 / 文本前缀近似；<b>Token 负载感知</b>＝prefill / decode token 级负载打分；<b>在线学习路由</b>＝ML 预测延迟 / 奖励；<b>多实例 HA 同步</b>＝跨副本路由状态同步；<b>SLA 自动扩缩</b>＝按 SLO 自动扩缩副本；<b>多后端</b>＝跨引擎 / 跨提供商。<br>
+  能力术语：<b>块级 KV 感知</b>＝订阅引擎 KV 事件或精确镜像后端 KV cache，做块级精确 cache hit；<b>前缀缓存感知</b>＝radix 树 / 文本前缀近似；<b>Token 负载感知</b>＝prefill / decode token 级负载打分；<b>在线学习路由</b>＝ML 预测延迟 / 奖励；<b>多实例 HA 同步</b>＝跨实例路由状态同步；<b>SLA 自动扩缩</b>＝按 SLO 自动扩缩实例；<b>多后端</b>＝跨引擎 / 跨提供商。<br>
   口径说明：本表只判功能「有无」，实现细节与判定依据见下方「四维度对比」与各子页面；⭐ 数与各格判定核实截至 2026-08。<br>
-  ⚠️ 格判定依据——llm-d「在线学习 ⚠️」：EPP 支持可插拔估计器，默认发布不带训练好的模型；SGLang Router「块级 ⚠️」：块级感知靠 external KV indexer（cache_aware_zmq），需额外部署，默认仍是本地 radix tree；AIBrix「HA ⚠️」：gateway 可多副本，但路由/KV 状态不跨副本同步；vLLM Router「前缀 ⚠️」：仅部分策略感知前缀；Ray Serve「多后端 ⚠️」：KV indexer 复用 Dynamo（vLLM/SGLang），其余引擎覆盖有限。</p>
+  ⚠️ 格判定依据——llm-d「在线学习 ⚠️」：EPP 支持可插拔估计器，默认发布不带训练好的模型；SGLang Router「块级 ⚠️」：块级感知靠 external KV indexer（cache_aware_zmq），需额外部署，默认仍是本地 radix tree；AIBrix「HA ⚠️」：gateway 可多实例，但路由/KV 状态不跨实例同步；vLLM Router「前缀 ⚠️」：仅部分策略感知前缀；Ray Serve「多后端 ⚠️」：KV indexer 复用 Dynamo（vLLM/SGLang），其余引擎覆盖有限。</p>
 
   <h3>各 gateway 功能实现讲解（子页面）</h3>
   <ul>
@@ -197,7 +197,7 @@
     <li><a href="gateway-survey/aibrix.html">AIBrix</a> — Envoy ext_proc 路由、PodAutoscaler、分布式 KV Cache</li>
     <li><a href="gateway-survey/vllm-router.html">vLLM Router</a> — 5 种策略、PD 分离（NIXL/NCCL/Mooncake）、K8s 发现</li>
     <li><a href="gateway-survey/ray-serve.html">Ray Serve LLM</a> — KVAwareRouter、cache-credit 打分、ingress 最终一致</li>
-    <li><a href="gateway-survey/lodestar.html">Lodestar</a> — MLP 预测 −TTFT、token 级特征、在线训练 two-pool</li>
+    <li><a href="gateway-survey/lodestar.html">Lodestar</a> — MLP 预测 TTFT、token 级特征、在线训练 two-pool</li>
     <li><a href="gateway-survey/dlrouter.html">DLRouter</a> — 多后端 adapter、prefix_cache / 延迟估计策略、PD 分离</li>
   </ul>
 
@@ -222,11 +222,11 @@
       <td><span class="yes">✅</span> selection service replica sync（ZMQ）+ KV indexer P2P 恢复 + 启动 /dump；output-block 故意不同步</td>
       <td><span class="yes">✅ 块级</span> KV indexer 订阅 vLLM / SGLang 的 ZMQ KV 事件</td>
       <td><span class="yes">✅ 无</span> 引擎无关，可独立部署（K8s 可选）</td>
-      <td>token 负载打分（cache-credit 公式：KV 重叠度折算剩余 prefill + decode 负载），选最低</td>
+      <td>token 负载打分（cache-credit 公式：命中缓存折算剩余 prefill + decode 负载），选最低</td>
     </tr>
     <tr>
       <td><b>llm-d</b></td>
-      <td><span class="yes">✅</span> Active-Passive（默认 leader 选举）/ Active-Active（近线性扩展）；KV indexer pod-discovery 每副本独立订阅全量事件</td>
+      <td><span class="yes">✅</span> Active-Passive（默认 leader 选举）/ Active-Active（近线性扩展）；KV indexer pod-discovery 每个实例独立订阅全量事件</td>
       <td><span class="yes">✅ 块级</span> 两层：approximate prefix（默认）+ KV-Cache Indexer 订阅 vLLM / SGLang 的 KVEvents</td>
       <td><span class="part">⚠️ K8s 可选</span> 新增 EndpointDiscovery + file-discovery 插件，可无 K8s 运行（Slurm / Ray / 裸机）</td>
       <td>sticky-until-saturated（前缀亲和 + 饱和释放阈值 τ），瓶颈匹配（prefill 看 token / decode 看活跃请求）</td>
@@ -247,7 +247,7 @@
     </tr>
     <tr>
       <td><b>AIBrix</b></td>
-      <td><span class="yes">✅</span> Envoy ext_proc gateway 多副本（K8s Deployment）</td>
+      <td><span class="yes">✅</span> Envoy ext_proc gateway 多实例（K8s Deployment）</td>
       <td><span class="part">⚠️ 前缀级</span> 前缀缓存（vLLM 指标采集，非 KV event）</td>
       <td><span class="no">❌ 必须 K8s</span></td>
       <td>前缀缓存感知路由（prefix-cache + load）</td>
@@ -261,7 +261,7 @@
     </tr>
     <tr>
       <td><b>Ray Serve LLM</b></td>
-      <td><span class="yes">✅</span> ingress 副本复制 + 异步 token 负载同步（最终一致）</td>
+      <td><span class="yes">✅</span> ingress 多实例 + 异步 token 负载同步（最终一致）</td>
       <td><span class="part">⚠️ vLLM-native</span> KV 事件是 vLLM-native；SGLang 引擎支持早期（server_cls）</td>
       <td><span class="no">❌ 必须 Ray</span></td>
       <td>KVAwareRouter（token 负载感知，DYN_* 权重可调）</td>
@@ -271,7 +271,7 @@
       <td><span class="part">⚠️ 单实例</span> Stateful Gateway（Go，构建在 AIBrix 上）</td>
       <td><span class="part">⚠️ 前缀命中率</span> KV cache tracker（radix tree 前缀索引，非 KV event）</td>
       <td><span class="no">❌ 必须 K8s</span>（基于 AIBrix）</td>
-      <td>在线学习（MLP 预测 −TTFT，特征含 KV 命中率 + inflight prefill/decode token）</td>
+      <td>在线学习（MLP 预测 TTFT，特征含 KV 命中率 + inflight prefill/decode token）</td>
     </tr>
     <tr>
       <td><b>DLRouter</b></td>
@@ -286,7 +286,7 @@
   <p>核心矛盾：<b>KV cache 状态是路由决策的输入，但多实例路由时每个实例看到的状态必须一致</b>，否则会做出冲突决策。各家分三档：</p>
   <ul>
     <li><b>最强（SMG）</b>：SWIM gossip + CRDT 同步了<b>包括 cache-aware routing tree 在内的全量路由状态</b>——唯一把「KV 路由树」纳入跨实例同步的方案，3/5 节点容忍 1/2 节点故障。</li>
-    <li><b>事件驱动收敛（Dynamo / llm-d / Ray Serve）</b>：Dynamo 的 selection service 用 ZMQ 同步 admission/prefill-complete（output-block 故意不同步）；llm-d 的 KV indexer pod-discovery 模式<b>每副本独立订阅全量 KV 事件各自收敛</b>；Ray Serve ingress 异步同步 token 负载。三者都是「最终一致」。</li>
+    <li><b>事件驱动收敛（Dynamo / llm-d / Ray Serve）</b>：Dynamo 的 selection service 用 ZMQ 同步 admission/prefill-complete（output-block 故意不同步）；llm-d 的 KV indexer pod-discovery 模式<b>每个实例独立订阅全量 KV 事件各自收敛</b>；Ray Serve ingress 异步同步 token 负载。三者都是「最终一致」。</li>
     <li><b>有限（SGLang Router / Lodestar）</b>：引擎内嵌或单实例 gateway，无跨实例路由状态同步——多实例时 cache 命中退化。</li>
   </ul>
 
@@ -313,7 +313,7 @@
     <tr><td><b>阈值过滤 + 择优</b></td><td>llm-d sticky-until-saturated</td><td>先过滤过载实例，再选缓存最优；阈值 τ 可推导</td><td class="ok">✅ τ = 峰值 prefill 吞吐 × TTFT 容忍上限 闭式</td></tr>
     <tr><td><b>乘法路由</b></td><td>LMetric（学术）</td><td>score = KV 感知指标 × 负载指标，超参约去</td><td class="ok">✅ 零调参</td></tr>
     <tr><td><b>分位感知</b></td><td>QUARTZ（ACL 26 findings）</td><td>保守分位预测 + K=2 候选 + 三成分打分；准入队列逐请求 SJF + aging</td><td class="ok">✅ 分位水平可定（默认 0.95）</td></tr>
-    <tr><td><b>学习式</b></td><td>Lodestar</td><td>MLP 预测 −TTFT，特征含 KV 命中率 + 负载，在线训练</td><td class="part">⚠️ 免手工规则，需在线训练</td></tr>
+    <tr><td><b>学习式</b></td><td>Lodestar</td><td>MLP 预测 TTFT，特征含 KV 命中率 + 负载，在线训练</td><td class="part">⚠️ 免手工规则，需在线训练</td></tr>
   </table>
 </section>
 
@@ -328,7 +328,7 @@
     <tr><th style="min-width:130px">论文</th><th>会议</th><th>调度 / 路由策略</th><th>核心机制（含名词解释）</th></tr>
     <tr><td><b><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">Simple is Better</a></b>（LMetric） <a href="gateway-survey/lmetric.html" target="_blank" class="detail-link">详解 →</a></td><td class="conf">OSDI 2026</td><td>乘法路由</td><td><b>score = KV 感知指标（需新算的 prefill token）× 负载指标（batch size）</b>，乘法替代加权和，超参跨实例约去，零调参</td></tr>
     <tr><td><b><a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a></b> <a href="gateway-survey/quartz.html" target="_blank" class="detail-link">详解 →</a></td><td class="conf">ACL 2026 Findings</td><td>分位感知路由 + 排队</td><td><b>分位感知</b>＝用分位数（非点估计）预测 prefill 服务时间，对齐尾部 SLO；K=2 候选 + 三成分打分选 worker（实例间），准入队列按 成本+aging+token公平 派发（实例内）</td></tr>
-    <tr><td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b> <a href="gateway-survey/lodestar.html" target="_blank" class="detail-link">详解 →</a></td><td class="conf arx">arXiv</td><td>在线学习路由</td><td>MLP 预测 <b>−TTFT</b> 选最大；特征含 KV 命中率、inflight prefill/decode token（分开保留）；参数跨实例共享；<b>在线训练</b>应对分布漂移</td></tr>
+    <tr><td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b> <a href="gateway-survey/lodestar.html" target="_blank" class="detail-link">详解 →</a></td><td class="conf arx">arXiv</td><td>在线学习路由</td><td>MLP 预测 <b>TTFT</b> 选最短；特征含 KV 命中率、inflight prefill/decode token（分开保留）；参数跨实例共享；<b>在线训练</b>应对分布漂移</td></tr>
     <tr><td><b><a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a></b> <a href="gateway-survey/llumnix.html" target="_blank" class="detail-link">详解 →</a></td><td class="conf">OSDI 2024</td><td>动态调度 + 重调度</td><td>运行时感知实例状态，<b>请求可在实例间迁移（重调度）</b>——把「派错了」变成「能改派」，缓解调度抖动</td></tr>
     <tr><td><b><a href="https://arxiv.org/abs/2408.13510" target="_blank">Intelligent Router</a></b></td><td class="conf arx">arXiv</td><td>workload-aware 负载均衡</td><td>按工作负载特征做负载均衡（未中顶会）</td></tr>
   </table>
@@ -378,7 +378,7 @@
 <!-- ============ 交叉对照 ============ -->
 <section>
   <h2>交叉对照：工业项目 ↔ 学术论文</h2>
-  <p>核心观察：<b>「KV 重叠度是负载估计的代理、不是路由目标」已成为工业界与学术界的共同结论</b>。</p>
+  <p>核心观察：<b>「命中缓存是负载估计的代理、不是路由目标」已成为工业界与学术界的共同结论</b>。</p>
   <table>
     <tr><th>调度 / 负载感知理念</th><th>工业实现</th><th>学术对应</th></tr>
     <tr><td>块级 KV 感知 + token 负载打分</td><td><a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a> / <a href="https://github.com/ray-project/ray" target="_blank">Ray Serve KVAwareRouter</a></td><td><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）</td></tr>
@@ -400,7 +400,7 @@
     <tr><td><b>加权求和</b></td><td>Dynamo（cache-credit）、llm-d 旧默认、AIBrix</td><td>score = α·KV 指标 + β·负载指标</td><td class="part">⚠️ 逐负载调参（LMetric 指出其缺点）</td></tr>
     <tr><td><b>阈值过滤 + 择优</b></td><td>llm-d sticky-until-saturated</td><td>先过滤过载实例，再在剩余里选 KV 最优</td><td class="ok">✅ τ = 峰值 prefill 吞吐 × TTFT 容忍上限 闭式可推导</td></tr>
     <tr><td><b>乘法路由</b></td><td>LMetric（OSDI 26）</td><td>score = KV 指标 × 负载指标</td><td class="ok">✅ 零调参（超参跨实例约去）</td></tr>
-    <tr><td><b>学习式</b></td><td>Lodestar</td><td>MLP 预测 −TTFT，特征含各指标</td><td class="part">⚠️ 免手工规则，需在线训练</td></tr>
+    <tr><td><b>学习式</b></td><td>Lodestar</td><td>MLP 预测 TTFT，特征含各指标</td><td class="part">⚠️ 免手工规则，需在线训练</td></tr>
     <tr><td><b>分位感知</b></td><td>QUARTZ</td><td>保守分位预测 + K=2 候选 + 三成分打分</td><td class="ok">✅ 分位水平 α 可定（默认 0.95）</td></tr>
   </table>
 
@@ -410,12 +410,12 @@
     <tr><td rowspan="4"><b>KV 感知<br>（cache hit）</b></td><td>KV cache 命中率</td><td>实例聚合</td><td>比例；LMetric 指出不能反映绝对计算量</td></tr>
     <tr><td>需新算的 prefill token 数</td><td>实例聚合</td><td>LMetric 推荐（考虑 KV 命中后的绝对量）</td></tr>
     <tr><td>前缀匹配长度（LPM）</td><td>实例聚合</td><td>QUARTZ 用；反映前缀局部性</td></tr>
-    <tr><td>块级重叠（gpu/cpu/disk 分层）</td><td>实例聚合</td><td>Dynamo/llm-d/SMG 块级感知</td></tr>
+    <tr><td>块级命中（gpu/cpu/disk 分层）</td><td>实例聚合</td><td>Dynamo/llm-d/SMG 块级感知</td></tr>
     <tr><td rowspan="8"><b>负载<br>（load）</b></td><td>batch size</td><td>实例聚合</td><td>LMetric 负载指标</td></tr>
     <tr><td>queued requests（队列深度）</td><td>实例聚合</td><td>Lodestar、QUARTZ</td></tr>
     <tr><td>running requests（活跃请求数）</td><td>实例聚合</td><td>Lodestar；llm-d decode 瓶颈信号</td></tr>
-    <tr><td>inflight prefill tokens</td><td>实例聚合</td><td>Lodestar；llm-d prefill 瓶颈信号</td></tr>
-    <tr><td>inflight decode tokens</td><td>实例聚合</td><td>Lodestar</td></tr>
+    <tr><td>inflight prefill tokens（在途 prefill token）</td><td>实例聚合</td><td>Lodestar；llm-d prefill 瓶颈信号</td></tr>
+    <tr><td>inflight decode tokens（在途 decode token）</td><td>实例聚合</td><td>Lodestar</td></tr>
     <tr><td>KV cache 利用率</td><td>实例聚合</td><td>通用</td></tr>
     <tr><td>GPU 内存利用率 / 型号</td><td>实例聚合</td><td>Lodestar（异构集群）</td></tr>
     <tr><td>延迟估计（unfinished_requests / speed）</td><td>实例聚合</td><td>DLRouter</td></tr>
@@ -423,7 +423,7 @@
   </table>
 
   <div class="callout tip">
-    <b>关键洞察：prefill / decode token 必须分开</b>。Lodestar 明确强调 inflight prefill tokens 和 inflight decode tokens 要<b>分开保留</b>——prefill 是计算密集、decode 是内存带宽密集，合并会掩盖实例正逼近哪个瓶颈。llm-d 的「瓶颈匹配」是同一条思路：prefill 受限看 in-flight 未缓存 token，decode 受限看活跃请求数。这是「负载感知」最容易被忽视、也最关键的细节。
+    <b>关键洞察：prefill / decode token 必须分开</b>。Lodestar 明确强调 inflight prefill tokens 和 inflight decode tokens 要<b>分开保留</b>——prefill 是计算密集、decode 是内存带宽密集，合并会掩盖实例正逼近哪个瓶颈。llm-d 的「瓶颈匹配」是同一条思路：prefill 吃紧看在途未缓存 token，decode 吃紧看活跃请求数。这是「负载感知」最容易被忽视、也最关键的细节。
   </div>
 
   <div class="callout ac">
@@ -438,7 +438,7 @@
   <h3>第一部分：工业级 gateway 选型</h3>
   <div class="callout core">
     <b>结论：只有 Dynamo、llm-d、SMG 三家</b>——同时满足「块级 KV 感知 + Token 负载感知 + 多实例 HA 同步 + 引擎无关」四个条件的，目前只有这三家。选型从这三家出发即可，其余项目都是冗余选项（见下方备查行，不再展开）。<br>
-    注意「四个条件」是<b>多实例生产部署</b>的严格口径，不是唯一权重集：2–4 副本的实验/小规模场景可把 HA 同步降权（SGLang Router 单实例、零编排依赖，反而最省事）；跨引擎多后端优先则 Dynamo/SMG 升权。把上面的矩阵当<b>打分表按需加权</b>——「三家」是默认权重下的答案，不是唯一答案。
+    注意「四个条件」是<b>多实例生产部署</b>的严格口径，不是唯一权重集：2–4 实例的实验/小规模场景可把 HA 同步降权（SGLang Router 单实例、零编排依赖，反而最省事）；跨引擎多后端优先则 Dynamo/SMG 升权。把上面的矩阵当<b>打分表按需加权</b>——「三家」是默认权重下的答案，不是唯一答案。
   </div>
   <p class="muted" style="margin-top:8px"><b>其余六家（冗余备查）</b>：SGLang Router（块级靠外部 indexer 可选，单实例无 HA）· AIBrix（前缀级 + 必须 K8s）· vLLM Router（前缀级 + vLLM 专用）· Ray Serve LLM（块级 KV 与 token 负载已具备，但 KV indexer 复用 Dynamo、且绑定 Ray 编排）· Lodestar（学术，单实例，学习式部署重）· DLRouter（新项目，前缀级）。</p>
   <div class="callout tip">
@@ -477,13 +477,13 @@
 <h3>开放问题：现有工作的公共边界（下一步设计的入口）</h3>
   <ul>
     <li><b>负载度量全是实例级聚合</b>：token 总和 / 请求数 / batch size，看不到队列组成与预算稀释——「逐请求」一栏在上表空缺（→ <a href="routing-design.html">细粒度设计 →</a>）。</li>
-    <li><b>逐请求状态的跨副本同步无先例</b>：连聚合 token 负载都只有最终一致（Dynamo 对 output-block 故意不同步），逐请求队列的同步成本更高。</li>
+    <li><b>逐请求状态的跨实例同步无先例</b>：连聚合 token 负载都只有最终一致（Dynamo 对 output-block 故意不同步），逐请求队列的同步成本更高。</li>
     <li><b>prefill 成本被当成裸 token 数线性可加</b>：未建模实测中的分段成本（45→93 μs/token）与 cache 折扣的交互。</li>
     <li><b>路由层与准入层割裂</b>：只有 QUARTZ 在准入层做逐请求排序，路由层全部把次序交给引擎 FCFS——两层共享同一套逐请求状态的设计不存在。</li>
   </ul>
 
   <div class="callout ac">
-    <b>贯穿性共识</b>：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve</a>（KVAwareRouter，KV indexer 复用 Dynamo）、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a> 多个工业实现，加上 <a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）、<a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a>（OSDI 24）两篇顶会论文，以及 <a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale 官方博客的明确表述</a>——「KV cache affinity is a proxy for load estimation, not the routing objective itself」——在「负载感知路由」上殊途同归：<b>KV 重叠度只是负载估计的输入，真正的路由目标是让 token 负载均衡</b>。
+    <b>贯穿性共识</b>：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve</a>（KVAwareRouter，KV indexer 复用 Dynamo）、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a> 多个工业实现，加上 <a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）、<a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a>（OSDI 24）两篇顶会论文，以及 <a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale 官方博客的明确表述</a>——「KV cache affinity is a proxy for load estimation, not the routing objective itself」——在「负载感知路由」上殊途同归：<b>命中缓存只是负载估计的输入，真正的路由目标是让 token 负载均衡</b>。
   </div>
 
   <ul>
