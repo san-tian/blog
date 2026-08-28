@@ -60,22 +60,22 @@
     <li>症状：1 个长 prefill 大块头 vs 100 个短请求，聚合值一样，新请求的实际等待天差地别。</li>
   </ul>
 
-  <h3>缺陷 2：瓶颈表达太粗（标量 → 向量）</h3>
+  <h3>缺陷 2：瓶颈被当作「二选一」，而非「统一度量」</h3>
   <ul>
-    <li>现状：路由打分把 <b>prefill（计算密集）</b> 和 <b>decode（内存带宽密集）</b> 两个维度的饱和度压成<b>一个标量 score</b>。</li>
-    <li>缺陷：一个标量无法同时表达「计算快满了」和「内存快满了」两种状态。</li>
-    <li><b>修正</b>：llm-d 的「瓶颈匹配」和 Lodestar 的「inflight prefill/decode tokens 分开」<b>已经在度量层分开了信号</b>——真正的缺陷是，它们在<b>路由决策这一步又把两个信号合成了一个标量</b>，信息在最后一步丢失。</li>
+    <li><b>llm-d 已经说对了一半</b>：prefill-heavy（长 prompt，计算受限）和 decode-heavy（长输出，slot 受限）是<b>两种性质不同的任务</b>，该用不同的 load metric——prefill 看「在途未缓存 token」，decode 看「活跃请求数」（llm-d 称之为「瓶颈匹配」）。<a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing" target="_blank">出处 →</a></li>
+    <li><b>但它的解法是二选一</b>：operator 先判定 workload 属于哪种瓶颈，再部署对应配置。llm-d 自己承认「<b>没有一个配置能同时覆盖三种 workload</b>」——瓶颈动态变化的混合负载下二选一失效，只能退回 latency-predictor（带训练开销）。</li>
+    <li><b>缺陷的本质</b>：把 prefill 和 decode 当成<b>两个独立配置去切换</b>，而不是<b>综合成同一个 metric</b>——一个能同时表达「计算维度和内存维度各自饱和度」的统一度量。这正是本文要做的。</li>
   </ul>
 
   <div class="callout core">
-    <b>一句话 gap</b>：现有路由策略在「<b>度量维度</b>」和「<b>瓶颈维度</b>」上双重粗粒度——度量上要逐请求（看队列组成），瓶颈上要分维（prefill/decode 各看饱和度）。两者叠加，导致长 prefill + 长 decode 混合负载下路由失准。
+    <b>一句话 gap</b>：现有路由策略在「<b>度量</b>」和「<b>瓶颈</b>」两个维度都太粗——度量上只有聚合值（看不到队列组成），瓶颈上只有二选一或标量（无法同时表达 prefill/decode 两个维度的饱和度）。两者叠加，导致「长 prefill + 长 decode」混合负载下路由失准。解法：<b>度量逐请求 + 瓶颈综合成同一个 metric</b>。
   </div>
 
   <h3>两个缺陷的对应解方向</h3>
   <table>
     <tr><th>缺陷</th><th>解方向</th><th>本页对应</th></tr>
-    <tr><td>度量太粗</td><td>逐请求队列 W_i(r)</td><td>「细粒度负载模型」+「新路由策略」</td></tr>
-    <tr><td>瓶颈太粗</td><td>瓶颈向量 (P_i, D_i) × 冲击向量 (c_r, m_r)</td><td>「瓶颈向量路由」</td></tr>
+    <tr><td>度量太粗（聚合）</td><td>逐请求队列 W_i(r)</td><td>「细粒度负载模型」+「新路由策略」</td></tr>
+    <tr><td>瓶颈二选一 / 压标量</td><td>综合成同一个 metric：瓶颈向量 (P_i, D_i)</td><td>「瓶颈向量路由」</td></tr>
   </table>
 </section>
 
@@ -145,8 +145,8 @@ W_i(r) = Σ c_j        # 所有「排在 r 前面」的请求的剩余 prefill �
 </section>
 
 <section>
-  <h2 class="core">瓶颈向量路由：把负载从标量升级到二维（缺陷 2 的解）</h2>
-  <p>缺陷 2 的解方向：实例状态和新请求冲击都用<b>二维向量</b>表示，而不是压成一个标量。</p>
+  <h2 class="core">瓶颈向量路由：把 prefill/decode 综合成同一个 metric（缺陷 2 的解）</h2>
+  <p>缺陷 2 的解方向：把 prefill 和 decode 两个维度<b>综合成同一个 metric</b>——用二维向量 (P_i, D_i) 表达，而不是二选一或压成标量。</p>
 
   <h3>实例状态 = 瓶颈向量</h3>
   <pre>实例 i 的状态 = (P_i, D_i)
@@ -274,8 +274,8 @@ W_i(r) = Σ c_j        # 所有「排在 r 前面」的请求的剩余 prefill �
 <section>
   <h2>一句话总结</h2>
   <div class="callout tip">
-    <b>完整的 gap 是「双重粗粒度」</b>：度量层面用聚合值（看不到队列组成），决策层面用标量（丢失 prefill/decode 两个瓶颈各自的饱和度）。<br>
-    对应的解是两半：<b>① 度量细粒度</b>——逐请求队列 W_i(r)，选等待最短的实例（SJF + aging 是钥匙，QUARTZ 已在准入做了、路由层还没做）；<b>② 维度细粒度</b>——瓶颈向量 (P_i, D_i) × 冲击向量 (c_r, m_r)，选在两个维度上都最有余量的实例。
+    <b>完整的 gap 是「双重粗粒度」</b>：度量层面只有聚合值（看不到队列组成），瓶颈层面只有二选一或标量（无法同时表达 prefill/decode 两个维度的饱和度）。<br>
+    对应的解是两半：<b>① 度量细粒度</b>——逐请求队列 W_i(r)，选等待最短的实例（SJF + aging 是钥匙，QUARTZ 已在准入做了、路由层还没做）；<b>② 瓶颈统一度量</b>——把 prefill/decode 综合成同一个 metric：瓶颈向量 (P_i, D_i) × 冲击向量 (c_r, m_r)，选在两个维度上都最有余量的实例。
   </div>
 </section>
 
