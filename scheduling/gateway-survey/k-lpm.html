@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>k-LPM 论文讲解：前缀复用 + 延迟约束下的 LLM 查询调度</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --aca:#8b20be; --core:#ea580c; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:900px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 55%,#8b20be); color:#fff; border-radius:14px; padding:26px 28px; margin-bottom:22px; }
+  header h1 { font-size:22px; margin-bottom:10px; line-height:1.4; }
+  header p { color:#e0e7ff; font-size:14px; }
+  .badge { display:inline-block; background:rgba(255,255,255,.16); border-radius:20px; padding:2px 12px; font-size:12px; margin-right:6px; margin-bottom:4px; }
+  section { background:var(--card); border-radius:14px; padding:22px 26px; margin-bottom:18px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:19px; margin-bottom:14px; padding-left:10px; border-left:4px solid var(--ind); }
+  h2.core { border-left-color:var(--core); }
+  h2.aca { border-left-color:var(--aca); }
+  h3 { font-size:15px; margin:18px 0 8px; }
+  p { margin-bottom:10px; font-size:14.5px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  pre { background:#1e293b; color:#e2e8f0; border-radius:10px; padding:14px 16px; overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:13px; margin:10px 0; line-height:1.6; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#f1f5f9; }
+  .callout { border-radius:10px; padding:14px 16px; margin:12px 0; font-size:14px; }
+  .callout.tip { background:#eff6ff; border:1px solid #93c5fd; }
+  .callout.core { background:#fff7ed; border:1px solid #fdba74; }
+  .callout.ac { background:#faf5ff; border:1px solid #d8b4fe; }
+  .callout.warn { background:#fef2f2; border:1px solid #fca5a5; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>k-LPM：前缀复用 + 延迟约束下的 LLM 查询调度</h1>
+  <p>
+    <span class="badge">NeurIPS 2025</span>
+    <span class="badge">理论</span>
+    <span class="badge">NP-hard</span>
+    <span class="badge">实例内调度</span>
+  </p>
+  <p style="margin-top:10px">论文：Dexter et al., <b>"LLM Query Scheduling with Prefix Reuse and Latency Constraints"</b>。<a href="https://arxiv.org/abs/2502.04677" target="_blank" style="color:#bcd0ff">arXiv:2502.04677</a>。这是目前少有的<b>从理论上研究「前缀复用 + 排队调度」</b>的工作——它证明了这个调度问题是 NP-Hard，并给出一个用单参数 k 在「复用」和「公平」之间插值的算法。</p>
+</header>
+
+<section>
+  <h2>背景：RadixAttention 下，调度顺序决定性能</h2>
+  <p>RadixAttention（SGLang 的前缀复用机制）用 radix tree 存 KV cache，自动复用新请求与已缓存请求的共享前缀，LRU 淘汰。它「开箱即用」地省 prefill 计算，但<b>性能高度依赖 query 的处理顺序（schedule）</b>。</p>
+  <p>两种主流调度策略，各有致命缺陷：</p>
+  <table>
+    <tr><th>策略</th><th>默认于</th><th>做法</th><th>缺陷</th></tr>
+    <tr><td><b>FCFS</b></td><td>vLLM v0.6.6</td><td>按到达顺序处理</td><td>完全忽略前缀复用，高负载（burst）下 TTFT 尖峰</td></tr>
+    <tr><td><b>LPM</b></td><td>SGLang v0.4.1</td><td>每步贪心选「和当前缓存前缀重叠最大」的 query</td><td>离线（所有 query 已知）时最优（Zheng et al. 2024 Thm 3.1）；但<b>在线 + TTFT 约束</b>下会<b>饿死前缀重叠不够高的 query</b>——它们永远排不上</td></tr>
+  </table>
+  <div class="callout core">
+    <b>核心张力</b>：LPM 偏向「复用」（省计算但饿死不匹配的请求），FCFS 偏向「公平」（无人饿死但放弃复用）。这正是「复用 vs 公平」在<b>单实例队列排序</b>这一层的体现。
+  </div>
+</section>
+
+<section>
+  <h2 class="core">形式化模型：让理论分析成为可能</h2>
+  <p>论文先建立两个定义，把 RadixAttention 调度问题形式化：</p>
+  <h3>Definition 1：query stream</h3>
+  <pre>Q = { (x_i, t_i) }  i=1..n
+  x_i = prompt（token 串），t_i = 到达时间</pre>
+  <h3>Definition 2：LLM 实例计算模型</h3>
+  <p>单实例、连续 batching，按顺序 x_j1..x_jn 处理。第 j_k 个 query 的处理成本：</p>
+  <pre>R(j_k) = max{R(j_{k-1}), t_{jk}} + (1 + c_attn·|x_jk|)·(|x_jk| − Overlap(x_jk, x_jk−1))</pre>
+  <ul>
+    <li>处理成本 ∝ <b>prompt 长度 − 与上一个 query 的前缀重叠</b>（复用省掉的量）。</li>
+    <li>注意力项（二次）由 c_attn 捕获；MLP 项线性。</li>
+    <li>简化假设：只缓存「上一个」query（而非固定内存池），避免引入额外超参。</li>
+    <li>模型聚焦 <b>prefill-dominant</b>（长 prompt 短输出）场景——正是 RadixAttention 收益最大的场景。</li>
+  </ul>
+</section>
+
+<section>
+  <h2 class="core">核心贡献 1：问题 NP-Hard</h2>
+  <p>把「判断是否存在满足 TTFT 约束 T 的调度」归约到 <b>3-PARTITION</b>，证明（Theorem 1）：</p>
+  <div class="callout ac">
+    <b>在 RadixAttention（前缀复用）下，判断一个 query stream 能否满足 TTFT 约束是 NP-Hard。</b>
+  </div>
+  <p>证明直觉：前缀复用 + 非均匀到达时间，可以构造「必须在特定时刻处理」的 query 对（x 在 t 到达、y 在 t+T 到达且 x、y 同 prompt——要复用就必须 x 恰好在 t+T 处理完、y 立刻接上），从而把「m 个时间窗口各填满长度 H」的约束强加给调度，而这正是 3-PARTITION。</p>
+  <div class="callout tip">
+    <b>难在「三者叠加」</b>：<b>无前缀复用</b>时 FCFS 平凡最优；<b>均匀到达（离线）</b>时 LPM 最优。只有「前缀复用 + 在线到达 + TTFT 约束」三者同时出现，问题才变难——而这正是真实在线 serving 的场景。
+  </div>
+</section>
+
+<section>
+  <h2 class="core">核心贡献 2：k-LPM 算法（复用 ↔ 公平的插值）</h2>
+  <pre>每处理 k 个请求，其中：
+  1 个：处理「等待最久」的 query          （FCFS 的兜底，防饿死）
+  k−1 个：贪心选「前缀命中率最大」的 query  （LPM 的复用）
+
+k = 1  → 退化为 FCFS（纯公平）
+k = ∞  → 退化为 LPM（纯复用）</pre>
+  <p>直觉：<b>每 k 步强制处理一次最老的 query</b>，给「前缀不匹配」的请求兜底，堵住 LPM 的饿死漏洞；其余 k−1 步仍贪心复用，保留 LPM 省计算的优势。<b>k 就是「复用 vs 公平」的旋钮</b>。</p>
+  <p class="src">注意：论文正文的直觉描述（"先 k 步 LPM 再处理最老"）与伪代码（先最老再 k−1 步 LPM）顺序略有差异，但净效果一致——每 k 个请求里 1 个兜底、k−1 个复用。</p>
+</section>
+
+<section>
+  <h2 class="core">核心贡献 3：理论保证（Theorem 2）</h2>
+  <p>在「<b>Regular Arrival Shuffled Queue</b>」数据生成模型下证明最优性：</p>
+  <ul>
+    <li>树形 prompt：每个 query = (user)(doc)，user 子串（长度 u）被恰好 k 个 query 共享，doc（长度 d）每 query 唯一。</li>
+    <li>到达：均匀随机排列，到达间隔 s。</li>
+    <li>这是「捕获真实流量关键性质的最简模型」——树形前缀 + 随机到达。</li>
+  </ul>
+  <table>
+    <tr><th>算法</th><th>最大 TTFT 界</th><th>性质</th></tr>
+    <tr><td>LPM</td><td>≥ T + (1−ε)·n·(u/k + d)</td><td>下界（高概率）</td></tr>
+    <tr><td>FCFS</td><td>≥ T + (1−ε)·n·(u + d − s)</td><td>下界（高概率）</td></tr>
+    <tr><td><b>k-LPM</b></td><td><b>≤ T + n·(u/k + d − s/k)</b></td><td>上界（确定性）</td></tr>
+  </table>
+  <div class="callout core">
+    <b>Corollary 3</b>：当 0 &lt; s &lt; u 且 k &gt; 1（中间负载）时，k-LPM 的上界<b>严格低于</b> FCFS 和 LPM 的下界——即 k-LPM 同时优于两者。<br>
+    直觉：低负载（s 大）FCFS 好（复用不重要）；高负载（s 小）LPM 好（复用省计算）；<b>中间负载 k-LPM 最优</b>——它随负载自动处于正确的位置。
+  </div>
+  <p>此外还有近似算法（Theorem 4）：对 (1−p) 分位 TTFT ≤ T 的调度，要么证明无解、要么返回可行调度，时间 O(n·exp(1/p · log 1/p))。</p>
+</section>
+
+<section>
+  <h2 class="core">实验：k=2 就够</h2>
+  <ul>
+    <li>Llama-3.1-8B-Instruct + 8×A100（TP）+ SGLang v0.4.1，360Brew 的 8k-context prompt（Instruction / Member Profile / Past Interactions 为共享前缀，仅 Question 变化），2000 prompts。</li>
+    <li><b>k=2 就足够</b>：在广泛 request rate 下 P99 TTFT 最低；大 k（如 1000）退化为 LPM。</li>
+    <li>FCFS 低负载好、LPM 高负载好、k-LPM 全负载稳健——与理论预测一致。</li>
+    <li>即使真实 prompt 只是"近似树形"、k 与真实副本数不符（真实 4 副本、k=2/3），k-LPM 仍显著改善 P99 TTFT。</li>
+  </ul>
+</section>
+
+<section>
+  <h2 class="aca">和你的研究的关系</h2>
+  <div class="callout ac">
+    <b>三个直接相关的点</b>：
+    <ul>
+      <li><b>「复用 vs 公平」的张力在实例间路由同样成立</b>：把请求全路由到「KV 命中最多的实例」就是实例间版的 LPM，会饿死前缀不匹配的实例（负载不均）。你的细粒度路由要解决的正是这个。</li>
+      <li><b>k-LPM 的「k 步贪心 + 1 步兜底」是一种「阈值过滤 + 择优」</b>——和 llm-d 的 sticky-until-saturated（粘性复用 + 饱和释放）是同一思想的两个层次：llm-d 在实例间做，k-LPM 在实例内做。</li>
+      <li><b>它给了「复用 vs 公平」一个理论底座</b>：NP-Hard 证明说明这不是工程技巧，而是本质困难——这为你的「细粒度负载路由」提供了 motivation 的权威背书（问题足够难，值得做）。</li>
+    </ul>
+  </div>
+  <p>更详细的「复用 vs 公平」跨层次对照，见 <a href="kv-prefix-scheduling.html" target="_blank">KV 前缀复用 + 排队调度专题页</a>。</p>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="kv-prefix-scheduling.html">KV 前缀复用专题</a>
+  <a href="routing-design.html">细粒度路由设计</a>
+</div>
+
+</div>
+</body>
+</html>

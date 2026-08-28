@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Preble 论文讲解：分布式 LLM 推理的 prompt sharing 调度</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --aca:#8b20be; --core:#ea580c; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
+  .wrap { max-width:900px; margin:0 auto; }
+  header { background:linear-gradient(135deg,#0b1f4b,#0066ff 55%,#8b20be); color:#fff; border-radius:14px; padding:26px 28px; margin-bottom:22px; }
+  header h1 { font-size:22px; margin-bottom:10px; line-height:1.4; }
+  header p { color:#e0e7ff; font-size:14px; }
+  .badge { display:inline-block; background:rgba(255,255,255,.16); border-radius:20px; padding:2px 12px; font-size:12px; margin-right:6px; margin-bottom:4px; }
+  section { background:var(--card); border-radius:14px; padding:22px 26px; margin-bottom:18px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  h2 { font-size:19px; margin-bottom:14px; padding-left:10px; border-left:4px solid var(--ind); }
+  h2.core { border-left-color:var(--core); }
+  h2.aca { border-left-color:var(--aca); }
+  h3 { font-size:15px; margin:18px 0 8px; }
+  p { margin-bottom:10px; font-size:14.5px; }
+  ul { padding-left:20px; margin:8px 0; }
+  li { font-size:14px; margin-bottom:5px; }
+  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  pre { background:#1e293b; color:#e2e8f0; border-radius:10px; padding:14px 16px; overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:13px; margin:10px 0; line-height:1.6; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#f1f5f9; }
+  .callout { border-radius:10px; padding:14px 16px; margin:12px 0; font-size:14px; }
+  .callout.tip { background:#eff6ff; border:1px solid #93c5fd; }
+  .callout.core { background:#fff7ed; border:1px solid #fdba74; }
+  .callout.ac { background:#faf5ff; border:1px solid #d8b4fe; }
+  .callout.warn { background:#fef2f2; border:1px solid #fca5a5; }
+  .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .foot { margin-top:16px; padding-top:16px; border-top:1px solid var(--line); }
+  .foot a { color:var(--muted); font-size:13px; margin-right:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Preble：分布式 LLM 推理的 prompt sharing 调度</h1>
+  <p>
+    <span class="badge">NSDI 2024</span>
+    <span class="badge">系统</span>
+    <span class="badge">分布式 KV 复用</span>
+    <span class="badge">E2 算法</span>
+  </p>
+  <p style="margin-top:10px">论文：Zijian He, Reyna Abhyankar, Dongming Li, Yiying Zhang (UCSD), <b>"Preble: Efficient Distributed Prompt Scheduling for LLM Serving"</b>。<a href="https://arxiv.org/abs/2407.00023" target="_blank" style="color:#bcd0ff">arXiv:2407.00023</a>。<b>第一个把 KV 前缀复用从单 GPU 扩展到分布式集群的 serving 平台</b>，也是后来 Dynamo / llm-d / SMG「全局路由 + 本地调度」架构的学术前身。</p>
+</header>
+
+<section>
+  <h2>背景：长 prompt + 共享 prompt，但复用只在单 GPU</h2>
+  <p>LLM 的 prompt 用法在 2023 年后出现两个新特征：</p>
+  <ul>
+    <li><b>prompt 远长于输出</b>：文档 QA、视频 QA、工具调用、长指令——prompt 是输出的 <b>37×–2494×</b>。prefill 阶段主导，优化 prefill 是关键。</li>
+    <li><b>prompt 高度共享</b>：同一文档被多次提问、同一工具说明被反复引用、CoT 逐步调用复用上下文——<b>85%–97%</b> 的 prompt token 与其他请求共享。</li>
+  </ul>
+  <p>这正适合 KV cache 复用。但现有复用（SGLang RadixAttention 等）<b>都局限在单 GPU</b>，而生产系统是<b>分布式</b>的。</p>
+</section>
+
+<section>
+  <h2 class="core">它解决的两难：分布式下复用 vs 负载均衡</h2>
+  <p>分布式系统里，如果调度器不感知 prompt 共享，会出现死结：</p>
+  <table>
+    <tr><th>做法</th><th>结果</th></tr>
+    <tr><td>均匀分流（负载均衡，不感知前缀）</td><td>共享前缀的请求被打散到不同 GPU，<b>每个 GPU 都重复算同样的 KV</b>——浪费</td></tr>
+    <tr><td>总把共享前缀的请求发到同一 GPU</td><td>「热门前缀」聚集海量请求，<b>那台 GPU 过载</b>，其余闲置</td></tr>
+  </table>
+  <p>Preble 的核心：<b>在「复用前缀」和「均衡负载」之间做动态权衡</b>——这正是「复用 vs 公平」张力在分布式路由层的落地。</p>
+</section>
+
+<section>
+  <h2 class="core">核心算法：E2（Exploitation + Exploration）</h2>
+  <p>每个请求到来时，先在前缀树里匹配它的 prompt，然后二选一：</p>
+  <pre>匹配前缀长度 > 剩余未匹配长度？
+  ├─ 是 → Exploitation（复用）：发到缓存了最长匹配前缀的 GPU
+  └─ 否 → Exploration（探索）：发到「负载最轻」的 GPU</pre>
+  <p>直觉：<b>复用省下的计算 > 新计算时，才值得复用</b>（否则复用带来的负载集中不划算）；否则去探索，把负载摊开。</p>
+
+  <h3>「负载最轻」= prompt-aware load（三部分成本）</h3>
+  <p>探索时，不是简单数请求数，而是算每个 GPU 的三种成本（都折算成 GPU 计算时间，靠离线回归函数从 token 数估算）：</p>
+  <table>
+    <tr><th>成本</th><th>含义</th></tr>
+    <tr><td><b>L_i</b>：窗口计算负载</td><td>时间窗口 H（默认 3 分钟）内，GPU 上所有请求的 prefill+decode 时间之和；<b>可复用的前缀算零成本</b>（prompt-aware 的关键）</td></tr>
+    <tr><td><b>M_i</b>：驱逐成本</td><td>为新请求腾内存需驱逐的 KV 节点，其「重算时间 × 命中率」——把<b>缓存淘汰的机会成本</b>纳入路由</td></tr>
+    <tr><td><b>P_i</b>：新请求运行成本</td><td>新请求未命中 token 的 prefill 时间（decode 时间各 GPU 相同，不计）</td></tr>
+  </table>
+  <p>选三者之和最低的 GPU。这个定义比「数 token / 数请求」精细得多——它同时考虑了<b>历史负载、缓存淘汰代价、新请求成本</b>三个维度。</p>
+</section>
+
+<section>
+  <h2>架构：全局 + 局部两层调度</h2>
+  <ul>
+    <li><b>全局调度器</b>（request-level）：维护<b>全局前缀树</b>（radix tree，记录每个节点：token 数、缓存它的 GPU 集合、历史窗口内共享它的请求数）+ 集群负载视图，做 E2 决策。</li>
+    <li><b>局部调度器</b>（per-GPU，iteration-level）：组批、本地前缀树、优先级队列、chunked prefill、LRU 驱逐。</li>
+    <li>设计理由：全局集中一处维护「集群负载 + 前缀缓存」的全局视图（E2 必需）；request-level 粗粒度让单个全局调度器能扩展到数百 GPU；iteration-level 细粒度让局部调度器快速适应资源变化。</li>
+  </ul>
+  <div class="callout ac">
+    <b>谱系地位</b>：这个「全局路由 + 本地组批」分层架构，正是后来 <b>Dynamo / llm-d / SMG</b> 的共同架构雏形。Preble（2024 年 5 月）是这批工业 KV 感知 gateway 的学术前身之一。
+  </div>
+</section>
+
+<section>
+  <h2 class="core">三个补充设计</h2>
+  <h3>① 负载动态调整 + 前缀 autoscale</h3>
+  <ul>
+    <li><b>负载转移</b>：最重 GPU 负载 &gt; 最轻 GPU 的 Th_bal 倍时，把未来本该复用重 GPU 的请求重定向到轻 GPU。</li>
+    <li><b>前缀 autoscale</b>：某热门前缀的负载仍过高（队列时间翻倍）时，<b>把前缀复制到多个 GPU</b>（按负载拆分其子树）——「前缀缓存分区」的早期版本。</li>
+  </ul>
+
+  <h3>② prefill/decode 平衡的新思路</h3>
+  <div class="callout tip">
+    洞察：<b>命中缓存前缀的请求 ≈ decode 单元</b>（只做 decode），<b>长未缓存 prompt + 短输出 ≈ prefill 单元</b>。于是可以用<b>路由混合这两类请求</b>来平衡 prefill/decode 计算——而不是 chunked prefill 或 PD 分离。这是「用 KV 命中状态反推 prefill/decode 负载」的早期思想，与 Lodestar 的「inflight prefill/decode tokens 分开」同源。
+  </div>
+
+  <h3>③ 优先级队列保公平（局部调度）</h3>
+  <ul>
+    <li>现有：FCFS（忽略复用，多算）vs 前缀共享优先（忽略公平，饿死）。</li>
+    <li>Preble：按「缓存 token 百分比」分 P 个优先级组，按比例从各组选请求（高优先级组多选）——兼顾前缀复用与公平。</li>
+    <li>这与 k-LPM 的「k 步贪心 + 1 步兜底」、QUARTZ 的「成本 + aging」是同一思想的不同实现。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>效果与实现</h2>
+  <ul>
+    <li>实现：vLLM / SGLang 之上的独立调度层（两个后端都支持，仅微改）。</li>
+    <li>评测：Mistral 7B + Llama-3 70B，4×A6000 集群 + 8×H100 服务器，五个真实 workload（工具调用、具身 agent、代码生成、视频 QA、长文档 QA）+ Azure trace。</li>
+    <li>结果：vs SGLang/vLLM，平均延迟 <b>1.5×–14.5×</b>，P99 延迟 <b>2×–10×</b>。</li>
+    <li>无共享 prompt 的负载下，性能与 vLLM 持平（不引入额外开销）。</li>
+  </ul>
+</section>
+
+<section>
+  <h2 class="aca">和你的研究的关系</h2>
+  <ul>
+    <li><b>它是「KV 感知路由」的早期完整实现</b>：E2 的 exploitation（路由到缓存前缀的 GPU）+ prompt-aware load（三成本）＝「KV 指标 × 负载指标」的雏形——LMetric 后来用乘法把它公式化了。</li>
+    <li><b>M_i（驱逐成本）这个维度很超前</b>：把「缓存淘汰会导致未来哪些请求重算」纳入路由，后来 llm-d/SMG 在块级 KV 管理里才做得更细。</li>
+    <li><b>全局前缀树 + 命中率记录</b>＝后来「块级 KV 感知」的前身：Dynamo/llm-d/SMG 订阅引擎 KV 事件、精确镜像 KV cache，是 Preble 前缀树思想的精细化。</li>
+  </ul>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="kv-prefix-scheduling.html">KV 前缀复用专题</a>
+  <a href="routing-design.html">细粒度路由设计</a>
+</div>
+
+</div>
+</body>
+</html>
