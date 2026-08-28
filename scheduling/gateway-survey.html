@@ -461,12 +461,12 @@
       <td>命中直接折扣工作量：命中越多 → 需新算的 token 越少 → 等效负载越低</td>
     </tr>
     <tr>
-      <td><b><a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing" target="_blank">llm-d</a></b><br><span class="muted">sticky-until-saturated · 工业</span></td>
+      <td><b><a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing" target="_blank">llm-d</a></b><br><span class="muted">sticky-until-saturated · 工业</span> <a href="gateway-survey/llm-d-sticky.html" target="_blank" class="detail-link">详解 →</a></td>
       <td><b>亲和 + 饱和释放</b>：优先把请求粘在 KV 前缀命中的实例；负载超过校准阈值 τ（= peakPrefillThroughput × maxTTFTPenaltyMs）后释放亲和，按「瓶颈匹配」的 token 负载选实例——prefill-bound 看在途未缓存 token，decode-bound 看活跃请求数。</td>
       <td>KV 亲和是默认项，token 负载是饱和后的接管者</td>
     </tr>
     <tr>
-      <td><b><a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale / Ray Serve</a></b><br><span class="muted">KVAwareRouter · 工业</span></td>
+      <td><b><a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale / Ray Serve</a></b><br><span class="muted">KVAwareRouter · 工业</span> <a href="gateway-survey/anyscale-kvaware.html" target="_blank" class="detail-link">详解 →</a></td>
       <td><b>统一 token-load 打分</b>：订阅引擎 KV 块级事件构建全局 radix tree（复用 Dynamo KV indexer），用 overlap 估计「能省多少 prefill」、折算成剩余 prefill 负载，加上活跃 decode 请求的 KV 足迹，<b>合成单一 token load 指标</b>加权打分选实例；按请求生命周期（admitted → first token → decode → 完成）持续更新负载。</td>
       <td>KV overlap 是「负载估计的代理」，不是路由目标本身（博客原文）</td>
     </tr>

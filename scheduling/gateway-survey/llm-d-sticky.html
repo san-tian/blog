@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sticky Until Saturated：llm-d 三个场景如何应用路由模式</title>
+<style>
+  :root {
+    --bg: #fafbfe;
+    --card: #ffffff;
+    --rule: #002bff;      /* 规则信号 / prefill 瓶颈 */
+    --ml: #16a34a;        /* decode 槽位 */
+    --warn: #ea580c;      /* 饱和阈值 τ */
+    --ink: #1e293b;
+    --muted: #64748b;
+    --line: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.7;
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  header {
+    background: linear-gradient(180deg,#f4f7ff,#ffffff); border:1px solid #dbe4f6; border-top:3px solid #002bff;;
+    color:#0f172a; border-radius: 14px; padding: 28px 28px 24px; margin-bottom: 22px;
+  }
+  header h1 { font-size: 24px; margin-bottom: 8px; line-height: 1.4; }
+  header p { color:#64748b; font-size: 14px; }
+  header a { color: #93c5fd; }
+  .badge { display: inline-block; background:#dae3ff; color:#0030c9;; border-radius: 20px; padding: 2px 12px; font-size: 12px; margin-right: 6px; }
+  section {
+    background: var(--card); border-radius: 14px; padding: 22px 24px; margin-bottom: 18px;
+    border: 1px solid #e8eef8;
+  }
+  h2 { font-size: 19px; margin-bottom: 14px; padding-left: 10px; border-left: 4px solid var(--rule); }
+  h2.ml { border-left-color: var(--ml); }
+  h2.warn { border-left-color: var(--warn); }
+  h2.gray { border-left-color: #94a3b8; }
+  h3 { font-size: 15px; margin: 18px 0 8px; }
+  p { margin-bottom: 10px; font-size: 15px; }
+  code {
+    background: #eef2f7; padding: 1px 6px; border-radius: 5px;
+    font-family: "SF Mono", Consolas, monospace; font-size: 13px; color: #0f172a;
+  }
+  pre {
+    background: #1e293b; color: #e2e8f0; border-radius: 10px; padding: 14px 16px;
+    overflow-x: auto; font-family: "SF Mono", Consolas, monospace; font-size: 13px;
+    margin: 8px 0 12px; line-height: 1.55;
+  }
+  pre .c { color: #64748b; }
+  pre .k { color: #7dd3fc; }
+  pre .n { color: #fbbf24; }
+
+  .scene-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .scene-num {
+    flex: 0 0 34px; height: 34px; border-radius: 50%; color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px;
+  }
+  .scene-num.gray { background: #94a3b8; }
+  .scene-num.rule { background: var(--rule); }
+  .scene-num.ml { background: var(--ml); }
+  .scene-num.warn { background: var(--warn); }
+  .scene-head h2 { margin: 0; border-left: none; padding-left: 0; }
+  .pipeline {
+    background: #f8fafc; border: 1px dashed var(--line); border-radius: 10px;
+    padding: 10px 14px; font-family: "SF Mono", Consolas, monospace; font-size: 13px;
+    margin: 8px 0 12px; color: #0f172a;
+  }
+
+  .flow { display: flex; flex-direction: column; gap: 0; }
+  .step {
+    display: flex; align-items: center; gap: 14px;
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px;
+  }
+  .step .num {
+    flex: 0 0 30px; height: 30px; border-radius: 50%; background: var(--rule); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;
+  }
+  .step.warn .num { background: var(--warn); }
+  .step b { font-size: 15px; display: block; }
+  .step span { font-size: 13px; color: var(--muted); }
+  .arrow { text-align: center; color: var(--muted); font-size: 18px; line-height: 1.2; padding: 2px 0; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h4 { font-size: 14px; margin-bottom: 6px; color: var(--rule); }
+  .card.ml h4 { color: var(--ml); }
+  .card.warn h4 { color: var(--warn); }
+  .card .formula {
+    background: #f1f5f9; border-radius: 8px; padding: 8px 10px;
+    font-family: "SF Mono", Consolas, monospace; font-size: 12px; margin-bottom: 6px;
+    white-space: pre-wrap; color: #0f172a;
+  }
+  .card p { font-size: 13px; color: var(--muted); margin: 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 10px 0; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; font-weight: 600; }
+  td.mono { font-family: Consolas, monospace; font-size: 12px; }
+  .win { background: #dcfce7; font-weight: 700; }
+  .hl { background: #fef3c7; }
+
+  .callout { border-radius: 10px; padding: 14px 16px; margin-top: 12px; font-size: 14px; }
+  .callout.warn { background: #fff7ed; border: 1px solid #fdba74; }
+  .callout.tip { background: #eff6ff; border: 1px solid #93c5fd; }
+  .callout.ml { background: #f0fdf4; border: 1px solid #86efac; }
+
+  ul, ol { padding-left: 22px; margin: 8px 0; }
+  li { font-size: 14px; margin-bottom: 5px; }
+  .tag { font-size: 12px; border-radius: 4px; padding: 1px 7px; color: #fff; }
+  .tag.rule { background: var(--rule); }
+  .tag.ml { background: var(--ml); }
+  .tag.warn { background: var(--warn); }
+  .tag.gray { background: #94a3b8; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .newmark {
+    display: inline-block; background: #db2777; color: #fff; font-size: 11px;
+    border-radius: 4px; padding: 1px 8px; margin-right: 6px; font-weight: 600;
+  }
+.foot { margin-top:18px; padding-top:16px; border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:6px 18px; }
+.foot a { color:var(--muted); font-size:13px; text-decoration:none; }
+.foot a:hover { color:#002bff; text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Sticky Until Saturated：llm-d 的 Token 感知路由</h1>
+  <p>
+    <span class="badge">3 个场景（工作负载）</span>
+    <span class="badge">2 个瓶颈</span>
+    <span class="badge">2 个匹配配置</span>
+  </p>
+  <p style="margin-top:12px">
+    原文：<a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing">llm-d.ai/blog/sticky-until-saturated-token-aware-routing</a>
+  </p>
+  <p style="margin-top:8px">
+    一句话：<b>路由派活时先「认缓存」（快），但别让一台机器累死——忙到阈值 τ 就果断改派；
+    阈值靠一次硬件校准算出来，不靠拍脑袋。</b>
+  </p>
+  <p style="margin-top:8px; color:#94a3b8">
+    博客真正的「场景」是<b>三个工作负载</b>（code-generation / reasoning / b2b-saas），只用<b>两个匹配配置</b>来路由。
+    本文按三个场景逐一讲解各自应用哪个配置、怎么路由；每个计算<b>第一次出现时详细展开</b>。
+  </p>
+</header>
+
+<!-- 前置地图 -->
+<section>
+  <h2 class="gray">前置：三个场景怎么落到「两个配置」</h2>
+  <p>三个场景都在回答「请求来了发哪台机器」，但瓶颈不同 → 用的配置不同。先交代两个背景。</p>
+
+  <h3>地图一：路由器的三段式流水线（配置的骨架）</h3>
+  <div class="flow">
+    <div class="step">
+      <div class="num">1</div>
+      <div><b>Filter 过滤器</b><span>硬性筛掉一部分端点，得到候选集（管「缓存亲和性」）</span></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="num">2</div>
+      <div><b>Scorer 评分器</b><span>给候选集每个端点打分（管「负载」，分数越低越优先）</span></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step warn">
+      <div class="num">3</div>
+      <div><b>Picker 选择器</b><span>按分数挑出最终目的地</span></div>
+    </div>
+  </div>
+  <p style="margin-top:10px">两个匹配配置都套这个骨架，区别只在<b>第二步的 scorer</b>：场景 1、3 用 token-load-scorer，场景 2 用 active-request-scorer。</p>
+
+  <h3>地图二：两个瓶颈 → 决定用哪个 scorer</h3>
+  <table>
+    <tr><th>阶段</th><th>干什么</th><th>受什么限制</th><th>对应场景</th></tr>
+    <tr><td><b>Prefill</b></td><td>读 prompt，算成 KV 缓存</td><td>GPU 算力（注意力 O(n²)）</td><td>场景 1、3</td></tr>
+    <tr><td><b>Decode</b></td><td>逐个吐输出 token</td><td>KV-cache 内存 + decode 槽位</td><td>场景 2</td></tr>
+  </table>
+  <p>判据：<b>prompt 与输出 token 的比例</b>。prompt 长输出短 → prefill 受限（用 token-load）；prompt 短输出长 → decode 受限（用 active-request）。</p>
+</section>
+
+<!-- 为什么需要两个策略 -->
+<section>
+  <h2 class="gray">为什么三个场景需要不同的路由策略（信号要匹配瓶颈）</h2>
+  <p>三个场景用到的其实是<b>两个</b>策略：code-gen 和 b2b-saas 共用 token-load，只有 reasoning 换 active-request。为什么要分两个？因为<b>瓶颈不同，「负载」的度量单位就不同</b>——调度器要「把请求发给最不忙的端点」，但「忙」在两种瓶颈下是两回事。</p>
+
+  <h3>根源：两个瓶颈的物理本质不同</h3>
+  <table>
+    <tr><th></th><th>prefill（算输入）</th><th>decode（吐字）</th></tr>
+    <tr><td><b>受限类型</b></td><td>compute-bound（GPU 算力）</td><td>memory/slot-bound（KV-cache 内存 + 槽位）</td></tr>
+    <tr><td><b>每步干什么</b></td><td>一次迭代处理一个 chunk（8192 token），token 越多算得越久</td><td>每步每个请求只吐 1 个 token，但要读整个 KV cache</td></tr>
+    <tr><td><b>压力随什么增长</b></td><td>token 数（prompt 越长越忙）</td><td>请求数（并发流越多越忙）</td></tr>
+    <tr><td><b>「忙」的正确单位</b></td><td><b>token</b>（未缓存的）</td><td><b>请求 / 流</b>（活跃的）</td></tr>
+  </table>
+
+  <h3>实验结果：信号匹配瓶颈的配置才赢</h3>
+  <p>三个场景的实测结果一致指向同一个结论——<b>信号对上路，配置才赢</b>：</p>
+  <table>
+    <tr><th>场景</th><th>瓶颈（单位）</th><th>胜出的信号</th><th>实测结果</th></tr>
+    <tr><td class="mono">code-generation</td><td>prefill（token）</td><td>token-load（在途未缓存 token 数）</td><td>TTFT-p90 最低、输入吞吐最高（46k vs k8 16k in_t/s，2.9×）；k8 和 legacy blend 在多个并发点悬崖式失效</td></tr>
+    <tr><td class="mono">reasoning</td><td>decode（请求数）</td><td>active-request（活跃请求数）</td><td>TPOT-p90 最低、输出吞吐最高；token-load 有竞争力但<b>未超过</b>它；legacy blend 的前缀加权在 50 以上每个并发都受损</td></tr>
+    <tr><td class="mono">b2b-saas</td><td>prefill（token）</td><td>token-load（同 code-gen）</td><td>维持高命中率（90–95%）与高吞吐（90k vs k8 45k，2.0×）；印证瓶颈相同则配置共用</td></tr>
+  </table>
+  <p>注意 reasoning 这一行的对照：<b>同样是 token-load 配置，在 prefill 场景（code-gen）赢，在 decode 场景（reasoning）却没能超过 active-request</b>——这正是「信号必须匹配瓶颈」最直接的实验证据。</p>
+
+  <h3>为什么 code-gen 和 b2b-saas 能共用 token-load</h3>
+  <p>因为<b>瓶颈相同</b>——两者都是 prefill 受限，「忙」的单位都是「未缓存 token」。区别只在缓存动态（b2b-saas 是固定小语料反复循环的病态缓存），但度量单位没变，所以同一套 token-load 直接复用、参数都不改。</p>
+
+  <div class="callout tip">
+    <b>一句话总结</b>：瓶颈决定「负载用什么单位度量」——prefill 受限用 token、decode 受限用请求。三个场景的实测结果都印证了这一点：信号对上路、配置才赢——不是策略越多越好，而是信号要匹配瓶颈。
+  </div>
+</section>
+
+<!-- 场景 1 -->
+<section>
+  <div class="scene-head">
+    <div class="scene-num rule">1</div>
+    <h2>场景 1：code-generation —— 应用 token-load 配置 <span class="tag rule">prefill 受限</span></h2>
+  </div>
+  <div class="pipeline">prefix-cache-affinity-filter (0.8, τ=286720) → token-load-scorer → max-score-picker</div>
+  <p><b>工作负载特征</b>：长 prompt（均值 70k token，随对话轮次增长）、中等输出（均值 800）、无跨请求前缀重叠（每个对话的 prompt 唯一，缓存命中只来自对话内部的轮次连续性）。瓶颈 = <b>每端点 prefill 计算</b>。</p>
+  <p><b>应用逻辑</b>：因为瓶颈在「算输入」，所以 scorer 用「在途未缓存 token 数」这个信号。下面逐个展开这个配置里<b>第一次出现</b>的计算。</p>
+
+  <h3><span class="newmark">首次出现</span>亲和性分数（affinity score）——过滤器怎么筛端点</h3>
+  <pre><span class="k">affinity</span>(endpoint) = 已缓存在该端点的 prompt token 数 / prompt 总 token 数</pre>
+  <p>即「前缀缓存命中率」的逐请求版本。例：10000-token prompt，9000 token 的 KV 已缓存在端点 A → affinity(A) = 0.9。</p>
+
+  <h3><span class="newmark">首次出现</span>过滤规则：0.8 阈值</h3>
+  <ul>
+    <li>affinity ≥ 0.8 的端点 → 进候选集（「缓存已预热」）；</li>
+    <li>若<b>没有任何</b>端点达标 → <b>全部放行</b>，评分器在全集上挑（不卡死）；</li>
+    <li>0.8 在所有用该过滤器的配置里都一样，<b>跨场景不重新配置</b>。</li>
+  </ul>
+
+  <h3><span class="newmark">首次出现</span>饱和覆盖 τ —— 粘性什么时候打破</h3>
+  <p>过滤器默认「粘缓存」：亲和性够高就优先发它。但粘过头会形成热点，于是有<b>饱和释放</b>机制：</p>
+  <pre><span class="k">maxTokensInFlightPenalty</span> = τ</pre>
+  <p>规则：若某<b>非预热端点</b>的「在途未缓存 token 数」比热端点<b>少至少 τ</b>，就把它也加回候选集——「热端点已多积压 τ 个 token 了，放个冷端点分担」。</p>
+
+  <h3><span class="newmark">首次出现</span>τ 的推导（从硬件算出来）</h3>
+  <pre><span class="k">R_peak</span> = B / T(B)          <span class="c"># 峰值 prefill 吞吐</span>
+<span class="k">τ_sat</span>  = R_peak × T_max    <span class="c"># = (B × T_max) / T(B)</span></pre>
+  <ul>
+    <li><code>B = max-num-batched-tokens</code> = 8192（vLLM 配置：一个 prefill chunk 的容量）；</li>
+    <li><code>T(B)</code> = <b>实测</b> prefill 一个满载 chunk 的墙钟时间（一次校准测量）；</li>
+    <li><code>T_max</code> = 运维自定的 TTFT 退化容忍上限（本文 14s）。</li>
+  </ul>
+  <p>代入实测：<code>T(8192)=0.40s</code> → <code>R_peak = 8192/0.40 = 20480 tok/s</code> → <code>τ = 20480 × 14 = 286720</code>。</p>
+  <pre><span class="k">τ</span> = 286720 / 8192 = <span class="n">35</span> 个 chunk   <span class="c"># 等价于 35 × 0.40s = 14s 排队时间</span></pre>
+  <div class="callout warn">
+    <b>τ 不能移植</b>：R_peak 是<b>完整服务路径的属性，不是加速器的属性</b>（gpt-oss-120B 39k、Qwen3-32B/H100 20k、Qwen3-VL/H200 15.7k tok/s）。同是 H100：286720 挪到 gpt-oss-120B 会偏低 1.9 倍（阀过早触发、白丢缓存），挪到 Qwen3-VL/H200 会偏高 1.3 倍（阀迟到、排队超 SLO）。<b>公式可移植，常量不可移植，换硬件必须重测。</b>
+  </div>
+
+  <h3><span class="newmark">首次出现</span>lookahead 评分公式 —— token-load-scorer 怎么打分</h3>
+  <pre><span class="k">score</span>(endpoint) = <span class="k">current_uncached_in_flight</span>(endpoint)
+                + <span class="k">prompt_tokens</span> × (1 − <span class="k">hit_rate</span>(endpoint))</pre>
+  <table>
+    <tr><th>项</th><th>含义</th><th>例子（新请求 prompt=10000）</th></tr>
+    <tr><td class="mono">current_uncached_in_flight</td><td>端点<b>当前积压的、还没 prefill 完的、没命中缓存的</b> token 总数</td><td>端点 A 积压 50000</td></tr>
+    <tr><td class="mono">hit_rate(endpoint)</td><td>新请求 prompt 里<b>已缓存</b>的比例（= affinity）</td><td>端点 A 命中 90%</td></tr>
+    <tr><td class="mono">prompt_tokens × (1−hit_rate)</td><td>该请求若发过去会<b>新增</b>的未缓存工作量</td><td>10000 × 0.1 = 1000</td></tr>
+  </table>
+  <p>于是 <code>score(A) = 50000 + 1000 = 51000</code>。取 score 最小 = 「发过去后总 prefill 积压最少的端点」。<b>只算「未缓存」</b>是因为已缓存的 token 直接读 KV cache、不用重算。</p>
+
+  <h3><span class="newmark">首次出现</span>in-flight 记账</h3>
+  <p>流式下（<code>addEstimatedOutputTokens=false</code>），请求 token 在<b>第一个 chunk 返回时即释放</b>——prefill 一完成就不再占 prefill 算力。所以计数器精确反映「还有多少 prefill 活儿在排队」。</p>
+
+  <div class="callout tip">
+    <b>场景 1 完整走一遍</b>：请求进来 → ① 算各端点亲和性，≥0.8 进候选集；② 检查饱和：某冷端点比热端点少积压 ≥ τ=286720 就也加入；③ token-load-scorer 打分（积压 + 新增）；④ max-score-picker 选分数最小。<b>没饱和就粘缓存白赚加速，饱和了就果断改派冷端点。</b>
+  </div>
+</section>
+
+<!-- 场景 2 -->
+<section>
+  <div class="scene-head">
+    <div class="scene-num ml">2</div>
+    <h2>场景 2：reasoning —— 应用 active-request 配置 <span class="tag ml">decode 受限</span></h2>
+  </div>
+  <div class="pipeline">prefix-cache-affinity-filter (0.8, τ=286720) → active-request-scorer → max-score-picker</div>
+  <p><b>工作负载特征</b>：短 prompt（均值 1000 token）、长输出（均值 8000，最大 32k）、250-token 共享系统 prompt。瓶颈 = <b>decode 槽位</b>（并发流数把 KV-cache 撑满）。</p>
+  <p><b>应用逻辑</b>：瓶颈从「算输入」变成「吐字」，所以把 scorer 换成 active-request-scorer，<b>过滤器完全复用场景 1 的</b>。</p>
+
+  <h3><span class="newmark">首次出现</span>active-request-scorer —— 活跃请求数信号</h3>
+  <pre><span class="k">score</span>(endpoint) = 该端点当前活跃请求（流）数</pre>
+  <p>取<b>最少的</b>。为什么用「个数」不用「token 数」？decode 是内存/槽位受限：每个活跃请求都占一块 KV-cache 空间和一个 decode 槽位，<b>压力随并发请求数增长，而非请求规模</b>。</p>
+
+  <h3><span class="newmark">首次出现</span>亲和性过滤器在这里是「空操作」</h3>
+  <p>场景 2 前缀太短（250-token 系统 prompt 对 1000-token 用户 prompt，亲和性最多 0.25），永远到不了 0.8 → 过滤器把<b>所有端点放行</b>，评分器在全集上挑活跃流最少的。所以这个场景<b>实际等价于「纯按活跃请求数均衡」</b>，但代码里仍挂着同一个过滤器、无需改配置。</p>
+
+  <div class="callout ml">
+    <b>场景 2 完整走一遍</b>：请求进来 → ① 亲和性过滤（空操作，全放行）→ ② active-request-scorer 数各端点活跃流 → ③ max-score-picker 选最少的。信号直指 decode 瓶颈，所以在这个负载上它最优。
+  </div>
+</section>
+
+<!-- 场景 3 -->
+<section>
+  <div class="scene-head">
+    <div class="scene-num warn">3</div>
+    <h2>场景 3：b2b-saas —— 复用 token-load 配置 <span class="tag warn">prefill 受限（病态缓存）</span></h2>
+  </div>
+  <div class="pipeline">prefix-cache-affinity-filter (0.8, τ=286720) → token-load-scorer → max-score-picker（与场景 1 相同）</div>
+  <p><b>工作负载特征</b>：7200-token prompt（6000 系统 + 1200 问题）、1000-token 输出、固定 150 个系统 prompt × 5 变体反复循环。瓶颈同样是 <b>prefill 计算</b>，但多了一个<b>病态缓存动态</b>——聚合可缓存内容（约 900k token）超过集群总 KV 容量。</p>
+  <p><b>应用逻辑</b>：瓶颈和场景 1 一样（prefill），所以<b>直接复用 token-load 配置，参数都不改</b>。这印证了博客的主张——「同一配置覆盖典型（code-gen）和病态（b2b-saas）两种 prefill 受限情形」。</p>
+
+  <h3><span class="newmark">首次出现</span>缓存分区 / 双稳态（这个场景特有的现象）</h3>
+  <p>集群会随 τ 收敛到<b>两种截然不同的稳态</b>：</p>
+  <ul>
+    <li><b>稳定分区</b>：每个端点拥有 150 个前缀的一个子集，重复请求本地命中，命中率 ~90–95%；</li>
+    <li><b>驱逐抖动</b>：每个端点都试图缓存所有前缀，互相驱逐，命中率崩盘。</li>
+  </ul>
+  <p>两者之间<b>无平滑过渡</b>，τ 的微小变化可能让集群从一个状态翻转到另一个。所以作者明确：<b>不用 b2b-saas 来声称精确最优 τ</b>（τ 靠场景 1 的公式算），它只是用来验证 τ 作为「饱和阀」起作用。</p>
+
+  <div class="callout warn">
+    <b>场景 3 完整走一遍</b>：和场景 1 完全相同——粘缓存直到热端点积压比冷端点多 ≥ τ=286720 才放手。区别在于：QPS 50+ 时热端点积压足够大、饱和阀频繁触发，命中率短暂从 96% 掉到 70%——这正是 τ 在「重新分配流量」的证据（而 legacy blend 没有这个阀，命中率一直死撑 96% 却让热点更严重）。
+  </div>
+</section>
+
+<!-- 为什么剩下三个没用 -->
+<section>
+  <h2 class="gray">为什么剩下三个配置没被采用</h2>
+  <p>五个配置里只有两个匹配配置被应用，剩下三个不是「忘了用」，而是各有定位——<b>本文三个场景都是「单一、已知瓶颈」的负载，匹配配置正是为「单一瓶颈」设计的</b>：</p>
+  <table>
+    <tr><th>配置</th><th>定位</th><th>为什么没被选为这三个场景的匹配配置</th></tr>
+    <tr><td class="mono">k8</td><td>无调度器基线</td><td>根本不做路由决策（纯轮询），只是「最差参照物」，让 2~3 倍提升有对比对象</td></tr>
+    <tr><td class="mono">legacy blend</td><td>旧默认（四信号加权）</td><td>难预测、难调优，code-gen 上悬崖式失效；唯一赢处（b2b-saas）靠的是「为重复语料聊天流量专门调优」的权重，不是通用能力</td></tr>
+    <tr><td class="mono">latency-predictor</td><td>通用替代（预测 TTFT）</td><td>对付的是「瓶颈漂移」，三个场景都坐落在单一瓶颈、用不上；且有 sidecar 开销、实测也未超过匹配配置</td></tr>
+  </table>
+
+  <h3>① k8：不是路由策略，是基线</h3>
+  <p>它只是 Kubernetes 轮询、完全绕过路由器，<b>压根不做路由决策</b>。存在意义就是当「最差情况」的标尺——匹配配置在 prefill 场景的 2~3 倍吞吐，正是相对它算出来的。</p>
+
+  <h3>② legacy blend：被替换，因为「不可预测」</h3>
+  <p>文章开头点出它两个致命问题：四信号加权混合的<b>涌现行为难预测、更难调优</b>；没有硬性过滤器 = 没有「什么时候放弃缓存」的开关，<b>在 code-gen 上出现悬崖式失效</b>。它唯一赢的地方（b2b-saas 的 TTFT-p90 最低）恰恰暴露了问题——那是权重<b>专门为「重复语料聊天流量」调优</b>的结果：赢了它自己设计的目标负载，换个负载就不行。token-load 取代它，要的是「跨负载可预测、可推导」，而不是「单一负载的最佳」。</p>
+
+  <h3>③ latency-predictor：为「瓶颈漂移」准备的，三个场景用不上</h3>
+  <p>它预测每个端点 TTFT、理论上无需「识别瓶颈」。但它有额外开销（预测器训练 + sidecar 部署），而且<b>本文三个场景各自坐落在单一瓶颈机制</b>（code-gen / b2b-saas 纯 prefill、reasoning 纯 decode），根本没有「瓶颈漂移」需要它来应对。实测也没超过匹配配置：code-gen 上比 token-load 差约 10s TTFT，reasoning 饱和时才持平，b2b-saas 达不到。作者明确<b>保留</b>它——在混合/高方差、瓶颈动态漂移的生产流量上它可能占优，只是本文未测。</p>
+
+  <div class="callout tip">
+    <b>这背后是文章的取舍</b>：legacy blend = 「为单一负载定制调优」（自己负载上最好，但不可移植）；latency-predictor = 「通用但昂贵」（适合瓶颈漂移，但有 sidecar 开销）；匹配配置 = 「可预测 + 可推导 + 可移植」的折中。三个基准场景都是单一瓶颈 → 匹配配置正好够用且最优 → 所以只需要两个匹配配置，其余三个要么是基线、要么是为别的场景准备的。
+  </div>
+</section>
+
+<!-- 映射总结 -->
+<section>
+  <h2 class="gray">一张表看全「怎么应用」</h2>
+  <table>
+    <tr><th>场景</th><th>瓶颈</th><th>应用的配置</th><th>吞吐（vs k8）</th></tr>
+    <tr><td class="mono">code-generation</td><td>prefill 计算（典型）</td><td class="mono">token-load（affinity + token-load-scorer）</td><td class="win">2.9×（46k vs 16k in_t/s）</td></tr>
+    <tr><td class="mono">reasoning</td><td>decode 槽位</td><td class="mono">active-request（affinity + active-request-scorer）</td><td>≈持平（7.0k vs 6.8k out_t/s）</td></tr>
+    <tr><td class="mono">b2b-saas</td><td>prefill 计算（病态缓存）</td><td class="mono">token-load（同场景 1，参数不变）</td><td class="win">2.0×（90k vs 45k in_t/s）</td></tr>
+  </table>
+  <div class="callout tip">
+    <b>核心规律</b>：3 个场景 → 2 个瓶颈 → 2 个匹配配置。code-gen 和 b2b-saas 瓶颈相同（prefill）所以<b>共用 token-load</b>；只有 reasoning 换 active-request。<b>部署哪个配置，完全由「识别瓶颈」这一步决定</b>，无需按工作负载重新调参。
+  </div>
+</section>
+
+<!-- infra -->
+<section>
+  <h2>具体 infra 实现</h2>
+  <p class="muted">blog 给的是<b>架构粒度</b>；具体 configmap / workload YAML / 完整结果表都在附录 GitHub 链接里（feature 分支），不在正文。</p>
+
+  <h3>硬件与服务栈</h3>
+  <ul>
+    <li>模型服务器：<b>10× Qwen3-32B</b>（b2b-saas 压测用 8×），引擎 <b>vLLM</b>。</li>
+    <li>并行：每台 <b>TP=2</b>，跑在<b>专用 GKE 节点</b>的 <b>2× H100 GPU</b> 上。</li>
+    <li>vLLM 关键配置：<code>max-num-batched-tokens=8192</code> + <b>continuous batching</b>。</li>
+  </ul>
+
+  <h3>Kubernetes 编排层</h3>
+  <ul>
+    <li>每个模型服务器 = 一个 <b>pod</b>；前端是 <b>Gateway API 的 <code>InferencePool</code></b>，把流量汇入路由器再分发。</li>
+    <li>「端点 endpoint」是<b>逻辑概念</b>：本文部署里 = 一个 pod，多节点部署可横跨多个 pod。</li>
+  </ul>
+
+  <h3>路由器插件清单（正文提到的）</h3>
+  <ul>
+    <li><b>Filter</b>：<code>prefix-cache-affinity-filter</code></li>
+    <li><b>Scorer</b>：<code>token-load</code>、<code>active-request</code>、<code>latency</code>、<code>prefix-cache</code>、<code>queue</code>、<code>kv-cache-utilization</code>、<code>no-hit-lru</code></li>
+    <li><b>Picker</b>：<code>max-score-picker</code>、<code>weighted-random-picker</code></li>
+    <li><b>辅助</b>：in-flight load producer、多模态 <code>token-producer</code>（按分辨率估图像 token）</li>
+  </ul>
+
+  <h3>负载生成、指标与校准</h3>
+  <ul>
+    <li>负载生成：<code>inference-perf</code>（kubernetes-sigs 标准化压测工具）。</li>
+    <li>指标：TTFT、TPOT、端到端延迟、吞吐、成功率、队列深度、KV 利用率、前缀命中率 → 导出 <b>GCS JSON</b> 聚合分析。</li>
+    <li>校准：<code>calibrate.sh</code> 报告 <code>peakPrefillThroughput = CHUNK_SIZE / median(TTFT)</code>；<code>configuration-matrix.md</code> 记录按 (模型, 加速器, 引擎) 的<b>实测</b> R_peak。</li>
+  </ul>
+
+  <h3>生产部署形态</h3>
+  <ul>
+    <li>已在 <b>Vertex AI / Red Hat / Mistral</b> 生产集群运行。</li>
+    <li>各指南：<b>optimized-baseline</b>（token-load 为默认）、<b>agentic-serving</b>（prefill 匹配配置）、<b>multimodal-serving</b>（affinityThreshold 0.8→0.6、T_max 18s→36s）、<b>P/D-disaggregation</b>（prefill 池用 token-load + decode 池用 active-request）。</li>
+  </ul>
+</section>
+
+<!-- 坐标 -->
+<section>
+  <h2>放到「相关工作精读」的坐标系里看</h2>
+  <table>
+    <tr><th>工作</th><th>思路</th><th>与本文的关系</th></tr>
+    <tr><td><b>Lodestar</b>（在线学习路由）</td><td>请求特征 + 反馈在线学习端点延迟</td><td>latency-predictor 正是「预测式」路线；作者承认它在高方差/瓶颈漂移流量可能占优，但代价是 sidecar</td></tr>
+    <tr><td><b>LMetric</b>（Simple is Better）</td><td>简单度量（队列长度）就够用</td><td>同哲学：<b>一个正确信号 &gt; 一堆加权信号</b>，但要先识别瓶颈</td></tr>
+    <tr><td><b>QUARTZ</b>（TTFT SLO 分位数路由）</td><td>面向 TTFT SLO 的分位数感知路由 + 排队</td><td>本文 <code>maxTTFTPenaltyMs</code> 本质是同一 SLO 驱动思想，简化为单一时间阈值</td></tr>
+  </table>
+  <p>本文独特贡献：<b>把阈值从调参问题变成推导问题</b>（一次校准 + 一个 SLO 闭式得出）；<b>瓶颈二分法 + 可组合过滤器</b>；<b>诚实的边界</b>。</p>
+</section>
+
+<!-- 评价 -->
+<section>
+  <h2>值得借鉴与存疑</h2>
+  <div class="grid">
+    <div class="card">
+      <h4>值得借鉴</h4>
+      <ul style="margin:0">
+        <li>「一个正确信号 + 一个校准阈值」&gt;「一堆加权信号」</li>
+        <li>阈值可推导，以硬件可测量为锚</li>
+        <li>组合性设计：filter/scorer 解耦，配置空间极小</li>
+        <li>诚实区分「结构性配置」与「经验调参」</li>
+      </ul>
+    </div>
+    <div class="card warn">
+      <h4>存疑 / 未覆盖</h4>
+      <ul style="margin:0">
+        <li>瓶颈漂移的混合流量未实测</li>
+        <li>匹配配置常量也会随负载漂移（多模态 0.8→0.6）</li>
+        <li>T_max 仍是主观选择（14s/18s 无严格依据）</li>
+        <li>单次运行、b2b 双模态导致绝对数值不稳</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 总结 -->
+<section>
+  <h2>一句话总结</h2>
+  <div class="callout tip">
+    <b>三个场景、两个瓶颈、两个匹配配置：识别瓶颈 → 部署对应配置 → 先粘缓存、饱和即放；阈值 τ = 峰值 prefill 吞吐 × TTFT 容忍上限，由一次硬件校准闭式得出——公式可移植，常量必须重测。</b>
+  </div>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="llm-d.html">llm-d 功能实现</a>
+  <a href="llm-d-routing.html">路由策略讲解 →</a>
+</div>
+
+</div>
+</body>
+</html>

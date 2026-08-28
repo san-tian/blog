@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llm-d 路由策略讲解</title>
+<style>
+  :root {
+    --bg: #fafbfe;
+    --card: #ffffff;
+    --rule: #002bff;      /* 规则信号 */
+    --ml: #16a34a;        /* ML 预测 */
+    --warn: #ea580c;      /* gap */
+    --ink: #1e293b;
+    --muted: #64748b;
+    --line: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.7;
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  header {
+    background: linear-gradient(180deg,#f4f7ff,#ffffff); border:1px solid #dbe4f6; border-top:3px solid #002bff;;
+    color:#0f172a; border-radius: 14px; padding: 28px 28px 24px; margin-bottom: 22px;
+  }
+  header h1 { font-size: 26px; margin-bottom: 8px; }
+  header p { color:#64748b; font-size: 14px; }
+  .badge { display: inline-block; background:#dae3ff; color:#0030c9;; border-radius: 20px; padding: 2px 12px; font-size: 12px; margin-right: 6px; }
+  section {
+    background: var(--card); border-radius: 14px; padding: 22px 24px; margin-bottom: 18px;
+    border: 1px solid #e8eef8;
+  }
+  h2 { font-size: 19px; margin-bottom: 14px; padding-left: 10px; border-left: 4px solid var(--rule); }
+  h2.ml { border-left-color: var(--ml); }
+  h2.warn { border-left-color: var(--warn); }
+  h3 { font-size: 15px; margin: 16px 0 8px; }
+  p { margin-bottom: 10px; font-size: 15px; }
+  code {
+    background: #eef2f7; padding: 1px 6px; border-radius: 5px;
+    font-family: "SF Mono", Consolas, monospace; font-size: 13px; color: #0f172a;
+  }
+  pre {
+    background: #1e293b; color: #e2e8f0; border-radius: 10px; padding: 14px 16px;
+    overflow-x: auto; font-family: "SF Mono", Consolas, monospace; font-size: 13px;
+    margin: 8px 0 12px; line-height: 1.55;
+  }
+  pre .c { color: #64748b; }   /* 注释 */
+  pre .k { color: #7dd3fc; }   /* 关键字/公式名 */
+  /* 流程图 */
+  .flow { display: flex; flex-direction: column; gap: 0; }
+  .step {
+    display: flex; align-items: center; gap: 14px;
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px;
+  }
+  .step .num {
+    flex: 0 0 30px; height: 30px; border-radius: 50%; background: var(--rule); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;
+  }
+  .step.ml .num { background: var(--ml); }
+  .step b { font-size: 15px; display: block; }
+  .step span { font-size: 13px; color: var(--muted); }
+  .arrow { text-align: center; color: var(--muted); font-size: 18px; line-height: 1.2; padding: 2px 0; }
+  /* 卡片 grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h4 { font-size: 14px; margin-bottom: 6px; color: var(--rule); }
+  .card .formula {
+    background: #f1f5f9; border-radius: 8px; padding: 8px 10px;
+    font-family: "SF Mono", Consolas, monospace; font-size: 12px; margin-bottom: 6px;
+    white-space: pre-wrap;
+  }
+  .card p { font-size: 13px; color: var(--muted); margin: 0; }
+  /* 表格 */
+  table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 10px 0; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; }
+  th { background: #f1f5f9; font-weight: 600; }
+  td.mono { font-family: Consolas, monospace; font-size: 13px; }
+  .win { background: #dcfce7; font-weight: 700; }
+  .hl { background: #fef3c7; }
+  /* 结论框 */
+  .callout {
+    border-radius: 10px; padding: 14px 16px; margin-top: 12px; font-size: 14px;
+  }
+  .callout.gap { background: #fff7ed; border: 1px solid #fdba74; }
+  .callout.tip { background: #eff6ff; border: 1px solid #93c5fd; }
+  ul { padding-left: 20px; margin: 8px 0; }
+  li { font-size: 14px; margin-bottom: 4px; }
+  .tag { font-size: 12px; border-radius: 4px; padding: 1px 7px; color: #fff; }
+  .tag.rule { background: var(--rule); }
+  .tag.ml { background: var(--ml); }
+.foot { margin-top:18px; padding-top:16px; border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:6px 18px; }
+.foot a { color:var(--muted); font-size:13px; text-decoration:none; }
+.foot a:hover { color:#002bff; text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>llm-d 路由策略讲解</h1>
+  <p>
+    <span class="badge">Endpoint Picker（EPP）</span>
+    <span class="badge">插件化打分器</span>
+    <span class="badge">Kubernetes Gateway API</span>
+  </p>
+  <p style="margin-top:12px">
+    一句话：llm-d 的路由就是「<b>给每个候选 pod 打分，选总分最高的那个</b>」。
+    它有两套打分方式：一套是<b>手写规则</b>（看前缀命中、排队、KV 占用），
+    一套是<b>机器学习预测延迟</b>（XGBoost 预测 TTFT/TPOT）。
+  </p>
+</header>
+
+<!-- 总览 -->
+<section>
+  <h2>总览：一个请求进来，走 5 步</h2>
+  <div class="flow">
+    <div class="step">
+      <div class="num">1</div>
+      <div><b>Request Control</b><span>处理 header、流控准入、定位候选 pod、全局强制过滤</span></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="num">2</div>
+      <div><b>Data Producers</b><span>准备数据：分词、前缀缓存匹配、采集负载、预测延迟</span></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="num">3</div>
+      <div><b>Filter</b><span>过滤掉不合适的 pod（模型不兼容、资源不足、SLO headroom 不够）</span></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="num">4</div>
+      <div><b>Score（核心）</b><span>多个 scorer 各自打分，按权重加权求和</span></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step">
+      <div class="num">5</div>
+      <div><b>Pick</b><span>选总分最高的 pod（max-score-picker）</span></div>
+    </div>
+  </div>
+
+  <h3>核心公式：加权求和</h3>
+  <pre><span class="k">total_score</span>(pod) = Σ <span class="k">scoreᵢ</span>(pod) × <span class="k">weightᵢ</span></pre>
+  <p>每个 scorer 输出 0~1 的分数，乘上一个权重（默认都是 1.0），累加得到总分。权重只有<b>相对比例</b>有意义。</p>
+</section>
+
+<!-- 方式一 -->
+<section>
+  <h2>方式一：规则式打分 <span class="tag rule">默认</span></h2>
+  <p>手写规则，不学习。每个 scorer 的公式如下（都输出 0~1，分数越高越优先）：</p>
+
+  <h3>1. 前缀缓存命中（prefix-cache-scorer）</h3>
+  <p>把 prompt 切成固定大小的块，逐块查 pod 的缓存索引，看命中多少块：</p>
+  <pre><span class="k">matchRatio</span>  = 命中块数 / 总块数          <span class="c"># 命中比例</span>
+<span class="k">score</span> = 命中比例   <span class="c"># 默认只看命中比例，命中越多分越高</span></pre>
+  <p>命中多 = prefill 省 = 分高。这是把请求送到「已经算过相同前缀」的 pod。</p>
+
+  <h3>2. 负载类 scorer（负载越低，分越高）</h3>
+  <div class="grid">
+    <div class="card">
+      <h4>load-aware（排队长度）</h4>
+      <div class="formula">等待 0 个 → 0.5
+否则 → 0.5 × (1 − 等待/128)</div>
+      <p>排队越少分越高，阈值 128。</p>
+    </div>
+    <div class="card">
+      <h4>queue-depth（排队深度）</h4>
+      <div class="formula">min-max 归一化</div>
+      <p>在所有候选 pod 里比较，排队最短的最高分。</p>
+    </div>
+    <div class="card">
+      <h4>active-request（活跃请求）</h4>
+      <div class="formula">空闲 → 1.0（满分）
+忙 → (max−count)/max × maxBusyScore</div>
+      <p>空闲 pod 直接满分。</p>
+    </div>
+    <div class="card">
+      <h4>token-load（token 负载）</h4>
+      <div class="formula">score = 1 − tokenLoad/阈值
+tokenLoad = inflight + 未命中投影</div>
+      <p>inflight token 越多分越低。</p>
+    </div>
+    <div class="card">
+      <h4>kv-utilization（KV 占用）</h4>
+      <div class="formula">score = 1 − KV利用率</div>
+      <p>KV 占用越低分越高。</p>
+    </div>
+    <div class="card">
+      <h4>running-requests</h4>
+      <div class="formula">min-max 归一化</div>
+      <p>运行中请求数越少分越高。</p>
+    </div>
+  </div>
+
+  <h3>3. 亲和类 scorer</h3>
+  <p><code>lora-affinity</code>（LoRA 适配器已加载）、<code>session-affinity</code>（会话亲和）、<code>context-length-aware</code>（上下文长度感知）。</p>
+</section>
+
+<!-- 方式二 -->
+<section>
+  <h2 class="ml">方式二：预测延迟路由 <span class="tag ml">XGBoost</span></h2>
+  <p>把「规则信号」换成「ML 预测的延迟」，再用 SLO 余量打分。</p>
+
+  <div class="flow">
+    <div class="step ml">
+      <div class="num">1</div>
+      <div><b>sidecar 在线训练 XGBoost</b><span>从真实请求持续学习，预测每个 pod 的 TTFT / TPOT</span></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step ml">
+      <div class="num">2</div>
+      <div><b>算 SLO 余量</b><span>headroom = SLO − 预测延迟</span></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="step ml">
+      <div class="num">3</div>
+      <div><b>latency-scorer 打分</b><span>score = 0.8×headroom(TTFT) + 0.2×headroom(TPOT)</span></div>
+    </div>
+  </div>
+  <pre><span class="k">headroom</span> = SLO − predicted_latency
+<span class="k">score</span> = 0.8 × headroom_ttft + 0.2 × headroom_tpot</pre>
+  <p>两种策略：<b>least</b>（默认，选余量最接近 SLO 的，省资源）或 <b>most</b>（选余量最大的，最保守）。</p>
+  <p>sidecar 挂掉时，回退到「KV + queue + prefix」三个规则信号加权（即退回方式一）。</p>
+</section>
+
+<!-- 对比 -->
+<section>
+  <h2>两套方式对比</h2>
+  <table>
+    <tr><th></th><th>方式一 · 规则打分</th><th>方式二 · 预测延迟</th></tr>
+    <tr><td>打分依据</td><td>前缀命中、排队、KV 占用等聚合信号</td><td>ML 预测的 TTFT/TPOT</td></tr>
+    <tr><td>模型</td><td>无</td><td>XGBoost / Bayesian Ridge / LightGBM</td></tr>
+    <tr><td>训练</td><td>不需要</td><td>在线持续训练</td></tr>
+    <tr><td>SLO 概念</td><td>无</td><td>headroom = SLO − 预测</td></tr>
+    <tr><td>失败兜底</td><td>—</td><td>回退到规则</td></tr>
+  </table>
+  <p style="color:var(--muted); font-size:13px">两者共享同一个骨架（打分 → 加权 → 选最高分），区别只在「打分的依据」。这也解释了为什么 Lodestar 论文说它是 rule-based、LMetric 论文说它是 simulation-based——各看到一面。</p>
+</section>
+
+<!-- 具体例子 -->
+<section>
+  <h2>完整例子：一个请求怎么被打分、选 pod</h2>
+  <p>来了一个 <b>2000 token 的请求 r</b>，有 3 个候选 pod。假设只启用 3 个 scorer（权重全 1.0）。</p>
+
+  <h3>第 0 步：三个 pod 的当前状态</h3>
+  <table>
+    <tr><th>pod</th><th>缓存了 r 的前缀</th><th>排队请求数</th><th>inflight token</th></tr>
+    <tr><td>P1</td><td class="mono">1500 / 2000</td><td class="mono">10</td><td class="mono">5,000</td></tr>
+    <tr><td>P2</td><td class="mono">0（冷实例）</td><td class="mono">0</td><td class="mono">0</td></tr>
+    <tr><td>P3</td><td class="mono">2000 / 2000（全命中）</td><td class="mono">100</td><td class="mono">20,000</td></tr>
+  </table>
+
+  <h3>第 1 步：三个 scorer 各自打分</h3>
+  <table>
+    <tr><th>scorer</th><th>P1</th><th>P2</th><th>P3</th></tr>
+    <tr><td>prefix（命中比例）</td><td class="mono">1500/2000 = <b>0.75</b></td><td class="mono"><b>0</b></td><td class="mono">2000/2000 = <b>1.0</b></td></tr>
+    <tr><td>load-aware（阈值128）</td><td class="mono">0.5×(1−10/128) = <b>0.46</b></td><td class="mono"><b>0.5</b></td><td class="mono">0.5×(1−100/128) = <b>0.11</b></td></tr>
+    <tr><td>token-load（阈值50000）</td><td class="mono">1−5000/50000 = <b>0.9</b></td><td class="mono"><b>1.0</b></td><td class="mono">1−20000/50000 = <b>0.6</b></td></tr>
+  </table>
+
+  <h3>第 2 步：加权求和（权重全 1.0）</h3>
+  <table>
+    <tr><th>pod</th><th>prefix</th><th>load</th><th>token</th><th>总分</th></tr>
+    <tr class="win"><td>P1</td><td class="mono">0.75</td><td class="mono">0.46</td><td class="mono">0.9</td><td class="mono"><b>2.11 ✓ 选中</b></td></tr>
+    <tr><td>P2</td><td class="mono">0</td><td class="mono">0.5</td><td class="mono">1.0</td><td class="mono">1.50</td></tr>
+    <tr><td>P3</td><td class="mono">1.0</td><td class="mono">0.11</td><td class="mono">0.6</td><td class="mono">1.71</td></tr>
+  </table>
+
+  <div class="callout tip">
+    <b>看懂这个例子就懂了 llm-d：</b>
+    <ul>
+      <li>P3 前缀<b>全命中</b>（1.0），但它排队 100 个、负载很重，被 load 和 token 两项拖下去。</li>
+      <li>P2 完全冷（前缀 0 分），但它空闲，靠 load 和 token 两项拉回来。</li>
+      <li>P1 是「命中不错 + 负载适中」的折中，三项都中上，<b>总分最高，胜出</b>。</li>
+    </ul>
+    这就是「前缀亲和」和「负载均衡」两个目标，通过加权求和做 trade-off 的过程。
+  </div>
+</section>
+
+<!-- gap -->
+<section>
+  <h2 class="warn">关键：它缺了什么</h2>
+  <p>无论方式一还是方式二，llm-d 看到的都是<b>聚合信号</b>：</p>
+  <ul>
+    <li>方式一：前缀命中比例、排队数、KV 占用、inflight token 总量 —— 都是「一共多少」</li>
+    <li>方式二：预测的一个延迟标量 —— 也是「一个数」</li>
+  </ul>
+  <div class="callout gap">
+    <b>它看不到「队列里每个请求分别还剩多少 prefill、谁排在前面」。</b>
+    一个正跑着 50 万 token 长 prefill 的 pod，在它的眼里可能只是「排队 0 个、inflight 1 个」，看起来还很闲——这正是你要解决的「队列组成」盲区。
+  </div>
+</section>
+
+<div class="foot">
+  <a href="../gateway-survey.html">← 返回全景调研</a>
+  <a href="llm-d.html">llm-d 功能实现</a>
+  <a href="llm-d-sticky.html">Sticky 讲解 →</a>
+</div>
+
+</div>
+</body>
+</html>
