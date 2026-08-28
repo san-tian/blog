@@ -320,6 +320,7 @@
     <tr><td><b><a href="https://www.usenix.org/system/files/conference/nsdi26/nsdi26spring_wu-bingyang_prepub.pdf" target="_blank">FastServe</a></b></td><td class="conf">NSDI 2026</td><td>迭代级抢占</td><td><b>迭代级抢占</b>＝利用自回归模式，在「一次迭代」粒度上抢占/切换请求（任意迭代边界可暂停），优化尾延迟</td></tr>
     <tr><td><b><a href="https://www.usenix.org/conference/osdi24/presentation/agrawal" target="_blank">Sarathi-Serve</a></b></td><td class="conf">OSDI 2024</td><td>chunked prefill</td><td><b>chunked prefill</b>＝把 prefill 切成多个 chunk 分批处理，避免长 prefill 阻塞 decode；更底层的基础设施</td></tr>
     <tr><td><b><a href="https://arxiv.org/abs/2406.13511" target="_blank">Slice-Level Scheduling</a></b></td><td class="conf arx">arXiv</td><td>切片级调度</td><td>把请求切成 slice 调度，高吞吐负载均衡</td></tr>
+    <tr><td><b><a href="https://arxiv.org/abs/2502.04677" target="_blank">k-LPM</a></b></td><td class="conf">NeurIPS 2025</td><td>前缀复用感知调度</td><td><b>k-LPM</b>＝每 k 步里 k−1 步 LPM（贪心复用）+ 1 步 FCFS（处理最老），平衡复用与公平；证明「前缀复用 + TTFT 约束」调度是 NP-hard（实例内队列排序）</td></tr>
   </table>
 
   <h3>C. 其他方向（次要，非实例间调度）</h3>
@@ -331,7 +332,7 @@
     <tr><td><b><a href="https://dl.acm.org/doi/10.1145/3600006.3613175" target="_blank">Sia</a></b></td><td class="conf">SOSP 2023</td><td>异构集群调度</td><td>异构 GPU 集群的资源调度（goodput 优化）；偏集群资源分配</td></tr>
     <tr><td><b><a href="https://proceedings.mlr.press/v235/duan24a.html" target="_blank">MuxServe</a></b></td><td class="conf">ICML 2024</td><td>多模型时空复用</td><td><b>时空复用</b>＝多模型在空间（GPU 分区）和时间（时分）维度复用；偏多模型复用</td></tr>
     <tr><td><b><a href="https://www.usenix.org/system/files/nsdi26-ruan-libra.pdf" target="_blank">Libra</a></b> <a href="gateway-survey/libra.html" target="_blank" class="detail-link">详解 →</a></td><td class="conf">NSDI 2026</td><td>灵活请求切分（FPS）</td><td><b>FPS</b>＝在任意 token 边界把请求切成 micro-request（prefill 节点可多扛 decode、decode 节点可多扛 prefill），动态平衡两阶段负载；本质是 PD 分离的泛化，非「哪个实例缓存了前缀」</td></tr>
-    <tr><td><b><a href="https://arxiv.org/abs/2407.00023" target="_blank">Preble</a></b></td><td class="conf">NSDI 2024</td><td>分布式 prompt 调度</td><td><b>分布式 prompt 调度</b>＝把 prompt 的 prefill 计算分布到多个实例并行处理，加速长 prompt；偏 prompt 处理基础设施</td></tr>
+    <tr><td><b><a href="https://arxiv.org/abs/2407.00023" target="_blank">Preble</a></b></td><td class="conf">NSDI 2024</td><td>分布式 prompt sharing</td><td><b>分布式 prompt sharing</b>＝第一个跨实例复用 KV cache 的分布式平台，联合优化 KV 复用 + 计算负载均衡（分层调度：全局路由 + 局部组批）</td></tr>
   </table>
 
   <div class="callout bg">
@@ -345,6 +346,10 @@
     LMetric 系统性否定了「加权求和」（需逐负载调参）和「filter 策略」（偏向负载、无法充分利用缓存），提出乘法路由零调参解；
     llm-d 的 sticky-until-saturated 用「阈值可推导」实现类似目标；Lodestar 用在线学习绕开手工规则。
     三者殊途同归：<b>都在解决「如何同时均衡 cache hit 和负载」这同一个问题</b>。
+  </div>
+
+  <div class="callout ac">
+    <b>专题：KV 前缀复用 + 排队调度</b>——k-LPM（理论 NP-hard）、LMetric（乘法启发式）、Preble（分布式系统）三篇从三个层次攻克「复用 vs 公平」的张力，见 <a href="gateway-survey/kv-prefix-scheduling.html" target="_blank" class="detail-link">KV 前缀复用 + 排队调度 →</a>。
   </div>
 </section>
 
