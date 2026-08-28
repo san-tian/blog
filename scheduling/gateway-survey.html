@@ -310,7 +310,7 @@
   <table>
     <tr><th>范式</th><th>代表</th><th>机制</th><th>是否需要调参</th></tr>
     <tr><td><b>加权求和</b></td><td>Dynamo（cache-credit）、llm-d 旧默认、AIBrix、vLLM Router</td><td>score = α·KV 命中 + β·负载，权重手调</td><td class="part">⚠️ 需逐负载调参</td></tr>
-    <tr><td><b>阈值过滤 + 择优</b></td><td>llm-d sticky-until-saturated</td><td>先过滤过载实例，再选缓存最优；阈值 τ 可推导</td><td class="ok">✅ τ = R_peak × T_max 闭式</td></tr>
+    <tr><td><b>阈值过滤 + 择优</b></td><td>llm-d sticky-until-saturated</td><td>先过滤过载实例，再选缓存最优；阈值 τ 可推导</td><td class="ok">✅ τ = 峰值 prefill 吞吐 × TTFT 容忍上限 闭式</td></tr>
     <tr><td><b>乘法路由</b></td><td>LMetric（学术）</td><td>score = KV 感知指标 × 负载指标，超参约去</td><td class="ok">✅ 零调参</td></tr>
     <tr><td><b>分位感知</b></td><td>QUARTZ（ACL 26 findings）</td><td>保守分位预测 + K=2 候选 + 三成分打分；准入队列逐请求 SJF + aging</td><td class="ok">✅ 分位水平可定（默认 0.95）</td></tr>
     <tr><td><b>学习式</b></td><td>Lodestar</td><td>MLP 预测 −TTFT，特征含 KV 命中率 + 负载，在线训练</td><td class="part">⚠️ 免手工规则，需在线训练</td></tr>
@@ -398,7 +398,7 @@
   <table>
     <tr><th>范式</th><th>代表</th><th>机制</th><th>调参成本</th></tr>
     <tr><td><b>加权求和</b></td><td>Dynamo（cache-credit）、llm-d 旧默认、AIBrix</td><td>score = α·KV 指标 + β·负载指标</td><td class="part">⚠️ 逐负载调参（LMetric 指出其缺点）</td></tr>
-    <tr><td><b>阈值过滤 + 择优</b></td><td>llm-d sticky-until-saturated</td><td>先过滤过载实例，再在剩余里选 KV 最优</td><td class="ok">✅ τ = R_peak × T_max 闭式可推导</td></tr>
+    <tr><td><b>阈值过滤 + 择优</b></td><td>llm-d sticky-until-saturated</td><td>先过滤过载实例，再在剩余里选 KV 最优</td><td class="ok">✅ τ = 峰值 prefill 吞吐 × TTFT 容忍上限 闭式可推导</td></tr>
     <tr><td><b>乘法路由</b></td><td>LMetric（OSDI 26）</td><td>score = KV 指标 × 负载指标</td><td class="ok">✅ 零调参（超参跨实例约去）</td></tr>
     <tr><td><b>学习式</b></td><td>Lodestar</td><td>MLP 预测 −TTFT，特征含各指标</td><td class="part">⚠️ 免手工规则，需在线训练</td></tr>
     <tr><td><b>分位感知</b></td><td>QUARTZ</td><td>保守分位预测 + K=2 候选 + 三成分打分</td><td class="ok">✅ 分位水平 α 可定（默认 0.95）</td></tr>
@@ -457,19 +457,19 @@
     <tr><th>方案</th><th>怎么决定（公式 + 一句话）</th></tr>
     <tr>
       <td><b><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a></b><br><span class="muted">OSDI 26 · 学术</span> <a href="gateway-survey/lmetric.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>乘法路由</b>：<code>score = 需新算的 prefill token × batch size</code>，选最小。<br>命中缓存 → 需新算的 token 少；实例忙 → batch 大。两者相乘自动平衡，<b>零调参</b>。</td>
+      <td><b>乘法路由</b>：<code>分数 = 需新算的 prefill token × batch size</code>，选最小。<br>命中缓存 → 需新算的 token 少；实例忙 → batch 大。两者相乘自动平衡，<b>零调参</b>。</td>
     </tr>
     <tr>
       <td><b><a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing" target="_blank">llm-d</a></b><br><span class="muted">sticky-until-saturated · 工业</span> <a href="gateway-survey/llm-d-sticky.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>先粘后放</b>：命中前缀 → 粘住；<code>负载 &gt; τ = R_peak × T_max</code> 才释放。<br>默认发缓存了前缀的实例；超阈值后按<b>瓶颈匹配</b>选——prefill 吃紧看「在途未缓存 token」，decode 吃紧看「活跃请求数」。</td>
+      <td><b>先粘后放</b>：命中前缀 → 粘住；<code>负载 &gt; 阈值 τ（τ = 峰值 prefill 吞吐 × TTFT 容忍上限）</code> 才释放。<br>默认发缓存了前缀的实例；超阈值后按<b>瓶颈匹配</b>选——prefill 吃紧看「在途未缓存 token」，decode 吃紧看「活跃请求数」。</td>
     </tr>
     <tr>
       <td><b><a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale / Ray Serve</a></b><br><span class="muted">KVAwareRouter · 工业</span> <a href="gateway-survey/anyscale-kvaware.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>算总欠账</b>：<code>token_load = PREFILL_LOAD_SCALE × prefill_load + decode_load</code>，选最小。<br><code>prefill_load = 未算完的 prefill − KV 重叠抵扣</code>；<code>decode_load = 活跃 decode 的 KV 块</code>。命中只抵扣、不决定，比的是<b>谁欠的活少</b>。</td>
+      <td><b>算总欠账</b>：<code>token 负载 = prefill 权重 × prefill 负载 + decode 负载</code>，选最小。<br><code>prefill 负载 = 未算完的 prefill − KV 重叠抵扣</code>；<code>decode 负载 = 活跃 decode 的 KV 块</code>。命中只抵扣、不决定，比的是<b>谁欠的活少</b>。</td>
     </tr>
     <tr>
       <td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b><br><span class="muted">arXiv · 学术</span> <a href="gateway-survey/lodestar.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>让模型学</b>：MLP 在线训练，<code>选 argmax(−TTFT 预测值)</code>。<br>特征 = KV 命中率 + prefill/decode token 数（分开保留）。不手写公式，模型从线上反馈学「该发谁」。</td>
+      <td><b>让模型学</b>：MLP 在线训练，<code>选「预测 TTFT 最短」的实例</code>。<br>特征 = KV 命中率 + prefill/decode token 数（分开保留）。不手写公式，模型从线上反馈学「该发谁」。</td>
     </tr>
   </table>
   <p class="muted">共同的结论只有一句：<b>命中缓存只是「估计负载」的输入，不是路由的目标；目标始终是「把活分匀」</b>。前三种是手写规则，区别只在把「命中」和「负载」捏合的方式（乘法 / 阈值 / 加权求和）；Lodestar 干脆不捏合，交给模型学。递进看，Anyscale 已经比 llm-d 更进一步——把 prefill 和 decode 合成一个总分数，而不是「二选一」；但这个总分数仍是一个<b>标量</b>，prefill 和 decode 两个维度的「饱和程度」被压成了一个数。把它拆成两个维度、各自建模的设计见 <a href="routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>。</p>
