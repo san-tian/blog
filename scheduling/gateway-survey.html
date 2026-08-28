@@ -73,6 +73,9 @@
   .detail-link:hover { background: #002bff; color: #fff; }
   a { color: #002bff; text-decoration: none; }
   a:hover { text-decoration: underline; }
+  .foot { margin-top:18px; padding-top:16px; border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:6px 18px; }
+  .foot a { color:var(--muted); font-size:13px; text-decoration:none; }
+  .foot a:hover { color:var(--ind); text-decoration:none; }
 </style>
 </head>
 <body>
@@ -499,6 +502,12 @@
     Intelligent Router、Lodestar、Slice-Level Scheduling 为 arXiv；本节「三种路由方式」的表述来源为 LMetric 论文、llm-d sticky-until-saturated 博客、Anyscale KVAwareRouter 博客，均已核对原文。全部核实截至 2026-08。
   </p>
 </section>
+
+<div class="foot">
+  <a href="index.html">← 调度系列目录</a>
+  <a href="glm52-prefill-experiment.html">GLM-5.2 实测报告 →</a>
+  <a href="routing-design.html">细粒度路由设计 →</a>
+</div>
 
 </div>
 </body>
