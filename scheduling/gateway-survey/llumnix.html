@@ -41,36 +41,43 @@
 </header>
 
 <section>
-  <h2>一句话</h2>
-  <p>现有调度把「请求发给哪个实例」当成<b>一次性的、不可撤销的决定</b>；Llumnix 把它变成<b>可撤销的</b>——请求带着 KV cache 在实例间实时搬家（类比 OS 在 CPU 核间做上下文切换），停机仅 <b>~20–30ms 且与序列长度无关</b>。效果：P99 first-token 延迟最高改善一个数量级（15×），高优先级请求加速 1.5×，同等尾延迟下省 36% 成本。</p>
-  <span class="src">来源：<a href="https://arxiv.org/abs/2406.03243" target="_blank">arXiv 2406.03243</a>（Biao Sun、Ziming Huang 等，Alibaba Group；名字寓意 = serving LLMs as Unix）</span>
+  <h2>主线：一条因果链</h2>
+  <p>一句话：现有调度把「请求发给哪个实例」当成<b>一次性的、不可撤销的决定</b>；Llumnix 把它变成<b>可撤销的</b>——请求带着 KV cache 在实例间实时搬家（类比 OS 在 CPU 核间做上下文切换），停机仅 <b>~20–30ms 且与序列长度无关</b>，换来 P99 first-token 最高 15×、高优请求 1.5×、同等尾延迟省 36% 成本。</p>
+  <div class="callout ac">
+    <b>主线</b>：<b>派发不可逆</b>（问题）→ 用<b>改派</b>让它可逆（手段）→ 但改派必须足够便宜，否则是空话——靠 append-only KV + 多阶段流水线把停机压成常数（使手段可用）→ 有了便宜的可逆，再解决「何时迁、迁谁」的规模化（决策）。<br>
+    记住一句：<b>改派是手段，不是问题本身</b>。就像 OS 的上下文切换是手段，多租户调度才是问题。
+  </div>
+  <p>论文标题「serving LLMs as Unix」就是这个类比：现代 OS 的上下文切换之所以成立，一半靠「有切换这个机制」，一半靠「硬件让切换变快」。Llumnix 照搬了这个结构——它的技术贡献<b>一半是引入迁移这个自由度，一半是让迁移便宜到可用</b>，剩下一小半是「何时迁移」的调度策略。读的顺序：先看问题为什么必须可逆（§问题），再看可逆为什么不能是空头支票（§手段里的 3.5s 对照），最后看便宜的可逆解锁了什么（§规模化、§效果）。</p>
+  <span class="src">来源：<a href="https://arxiv.org/abs/2406.03243" target="_blank">arXiv 2406.03243</a>（Biao Sun、Ziming Huang 等，Alibaba Group）</span>
 </section>
 
 <section>
-  <h2>问题：LLM 服务是「多租户动态 OS」</h2>
-  <p>两个根源特性：<b>工作负载异构</b>（输入/输出长度、延迟要求差异巨大）+ <b>执行不可预测</b>（输出 token 数先验未知，KV 内存需求随生成动态增长）。由此产生三个 OS 式调度挑战：</p>
+  <h2>问题：不可逆的派发，遇上最糟糕的决策时机</h2>
+  <p>LLM 服务本质是「多租户动态 OS」：两个根源特性——<b>工作负载异构</b>（输入/输出长度、延迟要求差异巨大）+ <b>执行不可预测</b>（输出 token 数先验未知，KV 内存需求随生成动态增长）。而派发发生在<b>信息最匮乏的时刻</b>：请求刚到达时，没人知道它会生成多长、占多少内存。于是初始决策必然随时间变错，错误表现为三族尾延迟病：</p>
   <table>
-    <tr><th>挑战</th><th>表现</th><th>论文实测证据</th></tr>
-    <tr><td><b>Isolation（隔离）</b></td><td>内存竞争 → 抢占与批内干扰</td><td>A10 + LLaMA-7B、平均内存负载仅 <b>62%</b> 时仍有 <b>8%</b> 请求被抢占；P99 per-token decode = <b>3.8×</b> P50，其中抢占损失占 70%（P99 请求被抢占两次、累计停顿 50s）</td></tr>
-    <tr><td><b>Fragmentation（碎片）</b></td><td>负载均衡把空闲内存摊碎在各实例；PagedAttention 只消除 decode 阶段的碎片，<b>prefill 要一次性要一大块</b></td><td>4 实例实验：集群总空闲内存够 3 个队头请求，但各实例都因本机空间不足而排队</td></tr>
-    <tr><td><b>Priorities（优先级）</b></td><td>所有请求一视同仁，交互型/付费高优被普通请求干扰</td><td>batch 内干扰：decode 单步耗时差距最高 <b>2.6×</b></td></tr>
+    <tr><th>病</th><th>表现</th><th>论文实测证据</th></tr>
+    <tr><td><b>抢占停顿（Isolation）</b></td><td>内存竞争 → 抢占与批内干扰</td><td>A10 + LLaMA-7B、平均内存负载仅 <b>62%</b> 时仍有 <b>8%</b> 请求被抢占；P99 per-token decode = <b>3.8×</b> P50，其中抢占损失占 70%（P99 请求被抢占两次、累计停顿 50s）</td></tr>
+    <tr><td><b>碎片排队（Fragmentation）</b></td><td>负载均衡把空闲内存摊碎在各实例；PagedAttention 只消除 decode 阶段碎片，<b>prefill 要一次性要一大块</b></td><td>4 实例实验：集群总空闲内存够 3 个队头请求，但各实例都因本机空间不足而排队</td></tr>
+    <tr><td><b>优先级干扰（Priorities）</b></td><td>所有请求一视同仁，交互型/付费高优被普通请求干扰</td><td>batch 内干扰：decode 单步耗时差距最高 <b>2.6×</b></td></tr>
   </table>
-  <p><b>关键观察</b>：某个实例出问题时，集群整体往往仍有余量——但请求被绑定在首次派发的实例上，动不了。</p>
+  <p><b>关键观察</b>：某个实例出问题时，集群整体往往仍有余量——但请求被绑定在首次派发的实例上，<b>动不了</b>。这就是「不可逆」三字要付出的代价。</p>
 </section>
 
 <section>
-  <h2>核心思想：从「派对了」到「能改派」</h2>
+  <h2>手段：把派发变成可逆的（改派）</h2>
+  <p>解法不是「派得更准」（那要预测，而预测在异构+不可预测下必然失手），而是<b>把派发从不可撤销改成可撤销</b>——请求可以在实例间迁移。派错了就搬，不必在到达时刻赌对。</p>
   <table>
     <tr><th></th><th>一次性派发（现有 gateway/调度器）</th><th>运行时重调度（Llumnix）</th></tr>
     <tr><td><b>预测压力</b></td><td>必须在对请求一无所知时做对决策</td><td>初始派发可以错，跑歪了就搬</td></tr>
     <tr><td><b>响应对象</b></td><td>到达时刻的负载快照</td><td>运行中的真实增长（输出长度、内存占用逐渐显形）</td></tr>
     <tr><td><b>度量要求</b></td><td>越细/越预测式越好</td><td><b>实例级聚合即可 + 决策可逆</b></td></tr>
   </table>
-  <p>四个重调度场景（论文 Figure 1）：<b>负载均衡</b>（减少抢占/干扰）、<b>去碎片</b>（腾出连续空间给长输入）、<b>优先级</b>（给高优动态腾出低负载环境，无需静态预留机器）、<b>伸缩</b>（排干待终止实例 / 快速填满新实例）。</p>
+  <p>改派落到四个场景（论文 Figure 1）：<b>负载均衡</b>（减少抢占/干扰）、<b>去碎片</b>（腾出连续空间给长输入）、<b>优先级</b>（给高优动态腾出低负载环境，无需静态预留机器）、<b>伸缩</b>（排干待终止实例 / 快速填满新实例）。</p>
 </section>
 
 <section>
-  <h2>Live migration：为什么搬家只要 20–30ms</h2>
+  <h2>使手段可用：把改派成本压成常数</h2>
+  <p>改派谁都会提，但直接搬一个 decode 中的请求 = 把它的 KV cache 整个重算或拷贝——8k 序列要 3.5s，<b>这个成本会让改派永远停在纸面上</b>。Llumnix 的关键贡献是把迁移成本压到常数，方法是一个洞察 + 一个机制：</p>
   <ul>
     <li><b>关键洞察：KV cache 是 append-only</b>——自回归生成只追加、不修改已有 KV → 可以<b>边继续解码、边拷贝历史块</b>。</li>
     <li><b>多阶段流水线</b>：stage 0 拷历史块同时继续算新 token → stage 1 拷 stage 0 期间新增的（量很小）→ … → 只有最后一个迭代真正停机，拷的也只是一步的 KV。<b>停机时间 = 拷一个迭代的 KV ≈ 常数，与序列长度无关</b>（borrow 自 VM live migration 的 working-set 思想，且不需要 dirty page 追踪）。</li>
@@ -90,17 +97,15 @@
 </section>
 
 <section>
-  <h2>架构：全局调度器只看实例，llumlet 管请求</h2>
-  <p><b>global scheduler + 每实例 llumlet</b>（local scheduler + migration coordinator）两级：</p>
+  <h2>规模化：何时迁、迁谁</h2>
+  <p>便宜的可逆只是「能做」，还得解决「什么时候做、对谁做」。Llumnix 用<b>两级架构 + 一个统一策略</b>回答：</p>
+  <h3>① 两级架构：全局调度器只看实例，llumlet 管请求</h3>
   <ul>
-    <li>全局调度器<b>不追踪具体请求</b>：只面向实例决策（看内存负载），迁移也只<b>配对 source/destination 实例</b>，由 llumlet 自己挑请求（偏好低优先级、短序列）并执行。</li>
+    <li><b>global scheduler + 每实例 llumlet</b>（local scheduler + migration coordinator）：全局调度器<b>不追踪具体请求</b>，只面向实例决策（看内存负载），迁移也只<b>配对 source/destination 实例</b>，由 llumlet 自己挑请求（偏好低优先级、短序列）并执行。</li>
     <li>复杂度与集群规模解耦 → 可扩展性实测：64 实例压测下，中心化 baseline 每迭代调度停顿 40ms（1.7× 减速），Llumnix 近零。</li>
     <li>实现：<b>3,300 行 Python</b>，非侵入式独立库；vLLM 后端；Ray actor 编排多实例 + OpenAI 风格 frontend（生成 token 经 frontend 转发，用户对迁移无感）；全局调度器故障时降级为直连派发（迁移暂停，服务不停）。</li>
   </ul>
-</section>
-
-<section>
-  <h2>Virtual usage：一套规则统一四个场景</h2>
+  <h3>② virtual usage：一套规则统一四个场景</h3>
   <p><b>核心观察</b>：四个场景其实只有两类——负载均衡，与「在某实例上制造空闲」（去碎片/优先级/排干）。后者可以统一进前者：给请求设「<b>虚拟用量</b>」让实例<b>虚拟过载</b>，负载均衡策略就会自然触发迁出。</p>
   <table>
     <tr><th>请求情形</th><th>virtual usage 规则</th><th>触发效果</th></tr>
@@ -119,9 +124,9 @@
     <tr><td rowspan="3">vs Round-robin（ShareGPT/BurstGPT 真实 trace）</td><td>e2e mean / P99</td><td>最高 2× / 2.9×</td></tr>
     <tr><td>prefill mean / P99</td><td>最高 26.6× / 34.4×（RR 会把新请求派到过载实例）</td></tr>
     <tr><td>抢占损失</td><td>平均 −84%</td></tr>
-    <tr><td rowspan="3">vs INFaaS++（负载感知派发，长尾生成分布）</td><td>prefill P99 / mean</td><td>最高 14.8×（摘要口径 15×）/ 7.7×——<b>长输入场景收益最大（去碎片）</b></td></tr>
+    <tr><td rowspan="2">vs INFaaS++（负载感知派发，长尾生成分布）</td><td>prefill P99 / mean</td><td>最高 14.8×（摘要口径 15×）/ 7.7×——<b>长输入场景收益最大（去碎片）</b></td></tr>
     <tr><td>碎片内存占比</td><td>7.9% → 0.7%（−92%）；P99 decode 最高 2×，抢占损失平均 −70.4%</td></tr>
-    <tr><td>调度可扩展性（64 实例）</td><td>中心化 baseline 每迭代停顿 40ms，Llumnix 近零</td></tr>
+    <tr><td>调度可扩展性（64 实例）</td><td>中心化 baseline 每迭代停顿 40ms</td><td>Llumnix 近零（两级架构解耦）</td></tr>
     <tr><td>优先级（10% 高优请求）</td><td>高优 mean / prefill P99 / normal 代价</td><td>1.2–1.5×；最高 10×；normal 请求 mean 仅 +4.5%（prefill +13%）</td></tr>
     <tr><td>autoscaling</td><td>同等 P99 prefill（~5s）下的成本</td><td>省 36%</td></tr>
   </table>
@@ -129,8 +134,8 @@
 </section>
 
 <section>
-  <h2>适用条件：什么时候 Llumnix 会起作用</h2>
-  <p>先把机制归结成一条：Llumnix 赚的钱 = <b>「初始派发错误暴露后的事后修正价值」 − 迁移成本（~20–30ms + ≤1% 开销）</b>。它不是普适加速器——四个条件同时满足才进入甜点区：</p>
+  <h2>适用条件：什么时候这条链会真正兑现</h2>
+  <p>把主线折算成一条账：Llumnix 赚的钱 = <b>「初始派发错误暴露后的事后修正价值」 − 迁移成本（~20–30ms + ≤1% 开销）</b>。它不是普适加速器——四个条件同时满足才进入甜点区：</p>
   <table>
     <tr><th>条件</th><th>为什么</th><th>论文证据</th></tr>
     <tr><td><b>① 负载高方差、先验不可知</b></td><td>输出长度逐 token 显形、内存随生成增长——初始派发必然有错可纠；同质负载下 RR ≈ JSQ ≈ Llumnix，没东西可纠</td><td>收益全部来自 power-law 长尾 / ShareGPT 高方差 trace</td></tr>
@@ -156,7 +161,7 @@
 </section>
 
 <section>
-  <h2>为什么它重要（对照你的研究主线）</h2>
+  <h2>主线收束：对照你的研究</h2>
   <div class="callout ac">
     <ul>
       <li><b>「度量粗 + 决策可逆」是队列组成盲区的另一条出路</b>：Llumnix 的全局度量也是<b>实例级聚合</b>（virtual usage / freeness）——它绕开盲区的方式不是把度量做细，而是把决策做<b>可逆</b>。与 <a href="../routing-design.html" target="_blank">routing-design 的细粒度准入排序</a>（事前算准）<b>正交、可组合</b>：迁移摊薄初始派发错误的代价，准入重排决定队列内次序。</li>
