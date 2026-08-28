@@ -89,6 +89,10 @@
   </div>
 </header>
 
+<p style="text-align:center; margin: 8px 0 32px;">
+  <a href="https://github.com/MindLab-Research/sglang/commit/1f3f4b12709525c951f7ab120371d4f022cf12e2" style="display:inline-block; padding:10px 22px; background:var(--accent); color:#fff; border-radius:8px; font-weight:600; text-decoration:none;">🔗 在 GitHub 上查看代码 diff</a>
+</p>
+
 <div class="background">
   <p>这个 commit（<a href="https://github.com/MindLab-Research/sglang/commit/1f3f4b12709525c951f7ab120371d4f022cf12e2">1f3f4b12709525c951f7ab120371d4f022cf12e2</a>）是 GLM-5.2 decode 阶段每 token 时延（TPOT）优化工作的一部分，目标是<strong>不改精度、纯代码/配置改动</strong>地把 decode TPOT 降低 30%。</p>
   <p>它包含<strong>两处代码改动</strong> + <strong>一份优化文档</strong>：① 把 DSA KV cache 的量化 + 写回从「两步」融合成「一个 triton kernel」；② 在 MoE forward 里跳过一次无意义的 slice+copy；③ 文档记录了两项配置层优化（AllReduce 融合、tile 对齐）与一套严格的 A/B 方法论。</p>
