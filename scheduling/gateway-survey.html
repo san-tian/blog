@@ -452,33 +452,33 @@
   </div>
 
   <h3>第二部分：路由方式调研</h3>
-  <p class="muted" style="margin-top:0">学术的 LMetric、工业的 llm-d 与 Anyscale，代表三种「手工」把 KV 命中与 token 负载捏合的方式；Lodestar 是第四种——不手工捏合、交给在线学习。先记住这四个，就抓住了本篇主线：</p>
+  <p class="muted" style="margin-top:0">四个方法回答的是同一个问题：<b>「这个新请求，该发给哪个实例？」</b>。它们的分歧只有一处——<b>怎么判断一个实例「忙不忙」，以及怎么把「命中缓存能省多少」和「实例多忙」合成一个决定</b>。四种答案，从手写到学习：</p>
   <table>
-    <tr><th>方案</th><th>路由方式（一句话）</th><th>KV 与负载的关系</th></tr>
+    <tr><th>方案</th><th>怎么决定（人话）</th><th>一句话本质</th></tr>
     <tr>
       <td><b><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a></b><br><span class="muted">OSDI 26 · 学术</span> <a href="gateway-survey/lmetric.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>乘法路由</b>：score = KV 感知指标（考虑命中后需新算的 prefill token 数）× 负载指标（batch size），选乘积最小的实例。超参在跨实例比较中相互约去，<b>零调参</b>；极端 KV 偏斜时检测并回退纯负载均衡。</td>
-      <td>命中直接折扣工作量：命中越多 → 需新算的 token 越少 → 等效负载越低</td>
+      <td><b>乘法路由</b>：给每个实例算「命中缓存能省的活儿 × 现在多忙」的乘积，<b>谁小发给谁</b>。命中越多乘积越小、越忙乘积越大，两项自动平衡，<b>不需要人调权重</b>。</td>
+      <td>命中缓存 = 活儿变少 = 更划算</td>
     </tr>
     <tr>
       <td><b><a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing" target="_blank">llm-d</a></b><br><span class="muted">sticky-until-saturated · 工业</span> <a href="gateway-survey/llm-d-sticky.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>亲和 + 饱和释放</b>：优先把请求粘在 KV 前缀命中的实例；负载超过校准阈值 τ（= peakPrefillThroughput × maxTTFTPenaltyMs）后释放亲和，按「瓶颈匹配」的 token 负载选实例——prefill-bound 看在途未缓存 token，decode-bound 看活跃请求数。</td>
-      <td>KV 亲和是默认项，token 负载是饱和后的接管者</td>
+      <td><b>先粘后放</b>：请求<b>优先发给缓存了它前缀的实例</b>（省 prefill）；等那个实例忙到超过一个校准阈值 τ，就<b>改按负载选</b>——prefill 吃紧看「还有多少 token 没算」，decode 吃紧看「还有多少请求在跑」。</td>
+      <td>缓存亲和优先，忙过头才让位给负载</td>
     </tr>
     <tr>
       <td><b><a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale / Ray Serve</a></b><br><span class="muted">KVAwareRouter · 工业</span> <a href="gateway-survey/anyscale-kvaware.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>统一 token-load 打分</b>：订阅引擎 KV 块级事件构建全局 radix tree（复用 Dynamo KV indexer），用 overlap 估计「能省多少 prefill」、折算成剩余 prefill 负载，加上活跃 decode 请求的 KV 足迹，<b>合成单一 token load 指标</b>加权打分选实例；按请求生命周期（admitted → first token → decode → 完成）持续更新负载。</td>
-      <td>KV overlap 是「负载估计的代理」，不是路由目标本身（博客原文）</td>
+      <td><b>算总欠账</b>：给每个实例算一笔「还欠多少活」——<b>没算完的 prefill token ＋ 正在 decode 占着的 KV 内存</b>，加权合成一个数，发给<b>欠账最少</b>的。命中缓存只是从这笔欠账里「抵扣」掉一部分。</td>
+      <td>命中是打折券，真正比的是谁欠的活少</td>
     </tr>
     <tr>
       <td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b><br><span class="muted">arXiv · 学术</span> <a href="gateway-survey/lodestar.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>学习式路由</b>：MLP 预测「负 TTFT」（−TTFT，越短越好）选最大的实例；特征含 KV 命中率 + inflight prefill/decode token（分开保留）等，参数跨实例共享；用候选池 + 部署池（two-pool）<b>在线训练</b>，吃真实请求反馈应对分布漂移。</td>
-      <td>不显式规定 KV 与负载怎么捏合——交给模型从在线反馈里学</td>
+      <td><b>让模型学</b>：不手写公式，训练一个小模型（MLP）<b>直接预测「发给它，首 token 要等多久」</b>，选等得最短的。输入还是那几样（命中率、prefill/decode token 数），但「怎么组合」交给模型从线上数据里学。</td>
+      <td>不写规则，让模型学出该发谁</td>
     </tr>
   </table>
-  <p class="muted">四种方式的共同落点：<b>KV 命中都只是负载估计的输入，路由目标都是 token 负载均衡</b>。前三种是启发式，区别在捏合公式（乘法 / 阈值 / 统一打分）；Lodestar 是学习式——不显式写公式，而是学一个 −TTFT 预测器，代价是需在线训练、部署重（单实例无 HA）。注意递进关系——Anyscale 已把 prefill/decode 合成单一标量 token load，比 llm-d 的「瓶颈二选一」更进一步，但仍是标量、丢了两维度各自的饱和度；把它升级为瓶颈向量的设计见 <a href="routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>。</p>
+  <p class="muted">共同的结论只有一句：<b>命中缓存只是「估计负载」的输入，不是路由的目标；目标始终是「把活分匀」</b>。前三种是手写规则，区别只在把「命中」和「负载」捏合的方式（乘法 / 阈值 / 加权求和）；Lodestar 干脆不捏合，交给模型学。递进看，Anyscale 已经比 llm-d 更进一步——把 prefill 和 decode 合成一个总分数，而不是「二选一」；但这个总分数仍是一个<b>标量</b>，prefill 和 decode 两个维度的「饱和程度」被压成了一个数。把它拆成两个维度、各自建模的设计见 <a href="routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>。</p>
 
-  <h3>开放问题：现有工作的公共边界（下一步设计的入口）</h3>
+<h3>开放问题：现有工作的公共边界（下一步设计的入口）</h3>
   <ul>
     <li><b>负载度量全是实例级聚合</b>：token 总和 / 请求数 / batch size，看不到队列组成与预算稀释——「逐请求」一栏在上表空缺（→ <a href="routing-design.html">细粒度设计 →</a>）。</li>
     <li><b>逐请求状态的跨副本同步无先例</b>：连聚合 token 负载都只有最终一致（Dynamo 对 output-block 故意不同步），逐请求队列的同步成本更高。</li>
