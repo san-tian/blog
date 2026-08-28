@@ -411,11 +411,24 @@
 <!-- ============ 结论 ============ -->
 <section>
   <h2 class="core">结论与建议</h2>
+
+  <h3>第一部分：工业级 gateway 选型</h3>
   <div class="callout core">
     <b>结论：只有 Dynamo、llm-d、SMG 三家</b>——同时满足「块级 KV 感知 + Token 负载感知 + 多实例 HA 同步 + 引擎无关」四个条件的，目前只有这三家。选型从这三家出发即可，其余项目都是冗余选项（见下方备查行，不再展开）。
   </div>
+  <p class="muted" style="margin-top:8px"><b>其余六家（冗余备查）</b>：SGLang Router（块级靠外部 indexer 可选，单实例无 HA）· AIBrix（前缀级 + 必须 K8s）· vLLM Router（前缀级 + vLLM 专用）· Ray Serve LLM（块级 KV 与 token 负载已具备，但 KV indexer 复用 Dynamo、且绑定 Ray 编排）· Lodestar（学术，单实例，学习式部署重）· DLRouter（新项目，前缀级）。</p>
+  <div class="callout tip">
+    <b>按四个关注点选型</b>：
+    <ul>
+      <li>要「多实例 + 状态同步」最强 → <b>SMG</b>（SWIM+CRDT 同步了 cache-aware 路由树）；次选 Dynamo / llm-d（事件驱动最终一致）。</li>
+      <li>要「SGLang KV event 块级感知」→ <b>Dynamo 或 llm-d</b>（都订阅 SGLang 的 ZMQ KV 事件）。</li>
+      <li>要「脱离 K8s/Ray 独立跑」→ <b>Dynamo / SMG / SGLang Router</b>（引擎无关、零编排依赖）。</li>
+      <li>要「cache hit + 负载均衡」最干净 → 学术是 <b>LMetric 乘法路由（零调参）</b>；工业落地是 <b>llm-d sticky-until-saturated（阈值可推导）</b> 或 <b>Dynamo（cache-credit 打分）</b>。</li>
+    </ul>
+  </div>
 
-  <h3>三种代表性路由方式（先记住这三个，就抓住了本篇主线）</h3>
+  <h3>第二部分：路由方式调研</h3>
+  <p class="muted" style="margin-top:0">学术的 LMetric、工业的 llm-d 与 Anyscale，代表三种把「KV 命中」和「token 负载」捏合的方式——先记住这三个，就抓住了本篇主线：</p>
   <table>
     <tr><th>方案</th><th>路由方式（一句话）</th><th>KV 与负载的关系</th></tr>
     <tr>
@@ -436,28 +449,15 @@
   </table>
   <p class="muted">三种方式的共同落点：<b>KV 命中都只是负载估计的输入，路由目标都是 token 负载均衡</b>。注意递进关系——Anyscale 已把 prefill/decode 合成单一标量 token load，比 llm-d 的「瓶颈二选一」更进一步，但仍是标量、丢了两维度各自的饱和度；把它升级为瓶颈向量的设计见 <a href="routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>。</p>
 
-  <p class="muted" style="margin-top:8px"><b>其余六家（冗余备查）</b>：SGLang Router（块级靠外部 indexer 可选，单实例无 HA）· AIBrix（前缀级 + 必须 K8s）· vLLM Router（前缀级 + vLLM 专用）· Ray Serve LLM（块级 KV 与 token 负载已具备，但 KV indexer 复用 Dynamo、且绑定 Ray 编排）· Lodestar（学术，单实例，学习式部署重）· DLRouter（新项目，前缀级）。</p>
-
-  <ul>
-    <li><b>工业选型</b>：从 <a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a> / <a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a> / <a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a> 三家出发，按下方四个关注点挑。</li>
-    <li><b>学术侧核心会议</b>：<b>OSDI / NSDI / SOSP</b>（系统方向）+ ICML（ML 系统方向）。</li>
-    <li><b>最该精读的三篇</b>：<a href="https://arxiv.org/abs/2406.03243" target="_blank"><b>Llumnix</b></a>（OSDI 24，动态重调度）、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank"><b>LMetric</b></a>（OSDI 26，乘法路由）、<a href="https://www.usenix.org/system/files/osdi23-li-zhuohan.pdf" target="_blank"><b>AlpaServe</b></a>（OSDI 23，统计复用）。</li>
-    <li><b>你目录里已有的</b>：<a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a>、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>、<a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale KV+token 路由博客</a>——已覆盖「学习式」和「启发式」两条主线，与本次调研的 A 类高度重合，形成闭环。</li>
-  </ul>
-
   <div class="callout ac">
     <b>贯穿性共识</b>：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve</a>（KVAwareRouter，KV indexer 复用 Dynamo）、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a> 多个工业实现，加上 <a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）、<a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a>（OSDI 24）两篇顶会论文，以及 <a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale 官方博客的明确表述</a>——「KV cache affinity is a proxy for load estimation, not the routing objective itself」——在「负载感知路由」上殊途同归：<b>KV 重叠度只是负载估计的输入，真正的路由目标是让 token 负载均衡</b>。
   </div>
 
-  <div class="callout tip">
-    <b>按四个关注点选型</b>：
-    <ul>
-      <li>要「多实例 + 状态同步」最强 → <b>SMG</b>（SWIM+CRDT 同步了 cache-aware 路由树）；次选 Dynamo / llm-d（事件驱动最终一致）。</li>
-      <li>要「SGLang KV event 块级感知」→ <b>Dynamo 或 llm-d</b>（都订阅 SGLang 的 ZMQ KV 事件）。</li>
-      <li>要「脱离 K8s/Ray 独立跑」→ <b>Dynamo / SMG / SGLang Router</b>（引擎无关、零编排依赖）。</li>
-      <li>要「cache hit + 负载均衡」最干净 → 学术是 <b>LMetric 乘法路由（零调参）</b>；工业落地是 <b>llm-d sticky-until-saturated（阈值可推导）</b> 或 <b>Dynamo（cache-credit 打分）</b>。</li>
-    </ul>
-  </div>
+  <ul>
+    <li><b>学术侧核心会议</b>：<b>OSDI / NSDI / SOSP</b>（系统方向）+ ICML（ML 系统方向）。</li>
+    <li><b>最该精读的三篇</b>：<a href="https://arxiv.org/abs/2406.03243" target="_blank"><b>Llumnix</b></a>（OSDI 24，动态重调度）、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank"><b>LMetric</b></a>（OSDI 26，乘法路由）、<a href="https://www.usenix.org/system/files/osdi23-li-zhuohan.pdf" target="_blank"><b>AlpaServe</b></a>（OSDI 23，统计复用）。</li>
+    <li><b>你目录里已有的</b>：<a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a>、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>、<a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale KV+token 路由博客</a>——已覆盖「学习式」和「启发式」两条主线，与本次调研的 A 类高度重合，形成闭环。</li>
+  </ul>
 
   <p class="muted" style="margin-top:12px">
     核实说明：Llumnix=OSDI 2024、LMetric=OSDI 2026、Libra=NSDI 2026、AlpaServe=OSDI 2023、Shepherd=NSDI 2023、
