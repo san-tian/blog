@@ -107,7 +107,7 @@
 
   <a class="post" href="glm52-prefill-experiment.html">
     <div class="title">GLM-5.2 prefill 实测报告：两个核心结论</div>
-    <div class="desc">两个核心结论：① prefill 随 prompt 长度呈弱超线性增长（α≈1.12，源自 GLM-5.2 的 DSA 稀疏注意力 O(n·k)）；② 300k×1 与 30k×10 的总 prefill 仅差 1.3×，而 cache hit 的影响达 22×——远大于长度的影响。含 log-log 回归、每 token 成本曲线、冷缓存实测数据表。</div>
+    <div class="desc">两个核心结论：① prefill 随 prompt 长度呈弱超线性增长（α≈1.12，源自 GLM-5.2 的 DSA 稀疏注意力 O(n·k)）；② 300k×1 与 30k×10 的总 prefill 仅差 1.3×，而 cache hit 的影响达 22×——远大于长度的影响。含 log-log 回归、每 token 成本曲线、冷缓存实测数据表。图 5（忙碌等待）为 null 结果且无法归因，待重测：先跑 5 分钟拓扑探针，再定 A1–A4。</div>
     <div class="meta">
       <span class="tag">prefill</span>
       <span class="tag">实测</span>
@@ -131,7 +131,7 @@
 
   <a class="post" href="routing-design.html">
     <div class="title">细粒度负载路由设计：基于「逐请求 prefill 等待」</div>
-    <div class="desc">研究设计：现有路由策略在「度量」和「瓶颈」两个层次都太粗——聚合看不到队列组成、标量丢失 prefill/decode 两个瓶颈。提出逐请求队列 W_i(r) + 瓶颈向量 (P_i, D_i) 的细粒度路由模型，含算法谱系溯源与诚实假设限定。</div>
+    <div class="desc">研究设计：现有路由策略在「度量」和「瓶颈」两个层次都太粗——聚合看不到队列组成、标量丢失 prefill/decode 两个瓶颈。以 GLM-5.2 实测校准动机（α≈1.12 / 集中度 1.3× / cache 22×），把方案定为「准入排序 W_i(r) + token 预算稀释 steps×t_step」+ 两段式瓶颈过滤，统一「解析骨架 + 学习残差」，附验证方案与适用域。</div>
     <div class="meta">
       <span class="tag agent">🤖 AI-assisted</span>
       <span class="tag">研究设计</span>

@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350">
+  <defs>
+    <linearGradient id="bg3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#fef3c7;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#fed7aa;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1080" height="1350" fill="url(#bg3)"/>
+
+  <!-- Title -->
+  <rect x="40" y="60" width="1000" height="280" rx="20" fill="white" opacity="0.95"/>
+  <text x="540" y="135" font-family="PingFang SC, sans-serif" font-size="46" font-weight="700" fill="#ea580c" text-anchor="middle">H200 上服务</text>
+  <text x="540" y="200" font-family="PingFang SC, sans-serif" font-size="46" font-weight="700" fill="#ea580c" text-anchor="middle">GLM-5.2 智能体负载</text>
+  <text x="540" y="260" font-family="PingFang SC, sans-serif" font-size="26" fill="#78716c" text-anchor="middle">llm-d 工程实践与成本测算</text>
+
+  <!-- Six Capabilities Grid -->
+  <rect x="80" y="400" width="920" height="680" rx="16" fill="white" opacity="0.95"/>
+  <text x="540" y="465" font-family="PingFang SC, sans-serif" font-size="32" font-weight="600" fill="#1c1917" text-anchor="middle">六项核心能力组合</text>
+
+  <!-- Row 1 -->
+  <rect x="140" y="510" width="360" height="140" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+  <text x="320" y="560" font-family="PingFang SC, sans-serif" font-size="24" font-weight="700" fill="#2563eb" text-anchor="middle">MLA</text>
+  <text x="320" y="600" font-family="PingFang SC, sans-serif" font-size="18" fill="#1c1917" text-anchor="middle">多头潜在注意力</text>
+  <text x="320" y="630" font-family="PingFang SC, sans-serif" font-size="18" fill="#78716c" text-anchor="middle">降低 KV cache 开销</text>
+
+  <rect x="580" y="510" width="360" height="140" rx="12" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+  <text x="760" y="560" font-family="PingFang SC, sans-serif" font-size="24" font-weight="700" fill="#d97706" text-anchor="middle">Wide-EP</text>
+  <text x="760" y="600" font-family="PingFang SC, sans-serif" font-size="18" fill="#1c1917" text-anchor="middle">专家并行</text>
+  <text x="760" y="630" font-family="PingFang SC, sans-serif" font-size="18" fill="#78716c" text-anchor="middle">单机扩展到 8 卡</text>
+
+  <!-- Row 2 -->
+  <rect x="140" y="680" width="360" height="140" rx="12" fill="#f0fdf4" stroke="#10b981" stroke-width="2"/>
+  <text x="320" y="730" font-family="PingFang SC, sans-serif" font-size="24" font-weight="700" fill="#059669" text-anchor="middle">前缀路由</text>
+  <text x="320" y="770" font-family="PingFang SC, sans-serif" font-size="18" fill="#1c1917" text-anchor="middle">Prefix Routing</text>
+  <text x="320" y="800" font-family="PingFang SC, sans-serif" font-size="18" fill="#78716c" text-anchor="middle">复用 system prompt</text>
+
+  <rect x="580" y="680" width="360" height="140" rx="12" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
+  <text x="760" y="730" font-family="PingFang SC, sans-serif" font-size="24" font-weight="700" fill="#dc2626" text-anchor="middle">CPU 卸载</text>
+  <text x="760" y="770" font-family="PingFang SC, sans-serif" font-size="18" fill="#1c1917" text-anchor="middle">KV Offload</text>
+  <text x="760" y="800" font-family="PingFang SC, sans-serif" font-size="18" fill="#78716c" text-anchor="middle">扩大上下文容量</text>
+
+  <!-- Row 3 -->
+  <rect x="140" y="850" width="360" height="140" rx="12" fill="#faf5ff" stroke="#9333ea" stroke-width="2"/>
+  <text x="320" y="900" font-family="PingFang SC, sans-serif" font-size="24" font-weight="700" fill="#9333ea" text-anchor="middle">P-D 分池</text>
+  <text x="320" y="940" font-family="PingFang SC, sans-serif" font-size="18" fill="#1c1917" text-anchor="middle">Prefill/Decode 分离</text>
+  <text x="320" y="970" font-family="PingFang SC, sans-serif" font-size="18" fill="#78716c" text-anchor="middle">提升吞吐</text>
+
+  <rect x="580" y="850" width="360" height="140" rx="12" fill="#fff7ed" stroke="#f97316" stroke-width="2"/>
+  <text x="760" y="900" font-family="PingFang SC, sans-serif" font-size="24" font-weight="700" fill="#ea580c" text-anchor="middle">MTP</text>
+  <text x="760" y="940" font-family="PingFang SC, sans-serif" font-size="18" fill="#1c1917" text-anchor="middle">多 token 预测</text>
+  <text x="760" y="970" font-family="PingFang SC, sans-serif" font-size="18" fill="#78716c" text-anchor="middle">投机解码加速</text>
+
+  <!-- Cost Insight -->
+  <rect x="80" y="1120" width="920" height="140" rx="16" fill="#ecfdf5"/>
+  <text x="540" y="1175" font-family="PingFang SC, sans-serif" font-size="26" font-weight="700" fill="#059669" text-anchor="middle">成本测算</text>
+  <text x="540" y="1220" font-family="PingFang SC, sans-serif" font-size="22" fill="#1c1917" text-anchor="middle">64 GPU 配置 · 经验法则 · 调参指南</text>
+
+  <!-- Footer -->
+  <text x="540" y="1300" font-family="PingFang SC, sans-serif" font-size="20" fill="#a8a29e" text-anchor="middle">编译自 llm-d 官方博客</text>
+</svg>

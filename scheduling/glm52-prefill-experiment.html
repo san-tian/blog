@@ -59,7 +59,7 @@
 
 <header>
   <h1>GLM-5.2 prefill 实测报告</h1>
-  <div class="meta">endpoint: http://38.255.28.13:10100 · glm-5.2-fp8 · 冷缓存 / 随机独立内容 / 每点 2 次取中位数</div>
+  <div class="meta">endpoint: http://38.255.28.13:10100 · glm-5.2-fp8 · 冷缓存 / 随机独立内容 / 每点 2 次取中位数 · 2026-08 实测</div>
 </header>
 
 <!-- 两个核心结论 -->
@@ -77,6 +77,21 @@
     <p>实测 1×300k ≈ 17s、10×30k ≈ 13s，比值 <b>1.3×</b>。对比之下，cache hit 的影响（22×）远大于长度的影响。</p>
   </div>
 </div>
+
+<!-- 待重测提醒 -->
+<section style="border:2px solid #f59e0b; background:#fffbeb;">
+  <h2 style="border-left-color:#d97706;">⚠️ 待重测（下次看到这条，先跑 5 分钟探针）</h2>
+  <p><b>图 5 的 null 结果无法归因</b>：这是共享多租户 endpoint，短请求只有 1/N 概率与长请求落在<b>同一副本</b>——「短请求没变慢」既可能是 chunked prefill 插队，也可能只是被分流到空闲副本。单副本 SGLang 默认配置（FCFS + chunked prefill）下若真同副本，短请求应等待 ~10s 量级而非 0.74s，<b>所以「无影响」更可能是分流假象</b>。结论 1/2（α≈1.12、1.3×、22×）不受影响，可作方向性证据。</p>
+  <table>
+    <tr><th>#</th><th>实验</th><th>做法</th><th>裁决什么</th></tr>
+    <tr><td><b>探针</b></td><td>拓扑探针（5 分钟）</td><td>并发 4×128k 请求测 makespan：≈6s → 多副本；≈24s+ → 单副本</td><td>本 endpoint 上图 5 算不算有效证据</td></tr>
+    <tr><td>A1</td><td>单副本忙等待复测</td><td>pin 单副本 + 流式 TTFT + 每点 ≥10 次 + 记录引擎配置</td><td>chunked prefill 插队 vs 多副本分流</td></tr>
+    <tr><td>A2</td><td>chunked prefill 开/关对照</td><td>同一负载下切换 mixed-chunk / chunked-prefill-size 配置</td><td>插队机制的直接证据</td></tr>
+    <tr><td>A3</td><td>预算稀释扫描</td><td>固定 Σ prefill token，扫活跃 decode 数 d，测短请求 TTFT</td><td><b>路由设计的核心方程 steps×t_step</b>（<a href="routing-design.html">细粒度设计 →</a>）</td></tr>
+    <tr><td>A4</td><td>1.3× 并发版</td><td>10×30k 并发 vs 1×300k（原实验为串行构造）</td><td>集中度结论的并发稳健性</td></tr>
+  </table>
+  <p style="margin-top:8px; font-size:13.5px; color:#92400e;">顺序：探针定拓扑 → A1/A2 裁决图 5 → A3 是把 45–93 μs/token 曲线用作路由器 lookup 常数、或写进论文的前置；定案需在<b>独占 GPU</b> 复测。</p>
+</section>
 
 <!-- 环境 -->
 <section>
@@ -140,7 +155,7 @@
   <div class="chart-box short"><canvas id="c4"></canvas></div>
 
   <h3>图 5 · 忙碌节点下短请求的等待（辅助）</h3>
-  <div class="sub">后台跑超长请求时，短请求 TTFT 仍 ≈ 空闲基线——chunked prefill 让短请求插队。</div>
+  <div class="sub">后台跑 30k–240k 长请求（prefill 窗口 1.3–13.4s）时，短请求 TTFT 0.744–0.765s ≈ 空闲 0.768s——<b>未观测到等待上升</b>。⚠️ 归因待裁决（多副本分流 or chunked prefill 插队，见顶部「待重测」），结论暂按「未观察到」表述。</div>
   <div class="chart-box short"><canvas id="c5"></canvas></div>
 </section>
 
@@ -161,7 +176,7 @@
   <p><code>scripts/cold_prefill_test.py</code> 含全部实验，其余 <code>test_*.py</code> 为历史版本（踩坑记录）。</p>
   <pre>python3 scripts/cold_prefill_test.py prefill   # prefill vs 长度（拟合 α）
 python3 scripts/cold_prefill_test.py cache     # cache hit 影响
-python3 scripts/cold_prefill_test.py busy      # 忙碌节点等待</pre>
+python3 scripts/cold_prefill_test.py busy      # 忙碌节点等待（图5 归因待重测，见顶部提醒）</pre>
   <div class="callout note">多租户共享 endpoint，绝对秒数会漂移，结论以<b>相对形状</b>（斜率、比值）为准；定案需在独占 GPU 复测。</div>
 </section>
 

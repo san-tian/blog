@@ -101,6 +101,21 @@
   </table>
 </section>
 
+<!-- 三代演进 -->
+<section>
+  <h2>演进主线：从「前缀近似」到「统一负载度量」的三代</h2>
+  <p>把下面的项目按「负载估计怎么做」排成一条演进线，能看清行业走到哪一步、还缺什么：</p>
+  <table>
+    <tr><th>代际</th><th>负载估计方式</th><th>代表</th><th>留下的差距</th></tr>
+    <tr><td><b>一代 · 前缀近似</b></td><td>radix 树 / 文本前缀匹配估 KV 命中 + 队列长度/请求数粗计数</td><td>SGLang Router、AIBrix、vLLM Router</td><td>命中是估计值，负载是粗计数</td></tr>
+    <tr><td><b>二代 · 块级精确</b></td><td>订阅引擎 KV 事件（ZMQ），维护块级精确 cache 状态</td><td>Dynamo（KV indexer）、llm-d（KV-Cache Indexer）、SMG（精确镜像）</td><td>「能省多少 prefill」精确了，但「还要等多久」仍是聚合数</td></tr>
+    <tr><td><b>三代 · 统一负载度量</b></td><td>KV 重叠折算进 token 负载，乘法 / 阈值 / 学习式合成单一打分</td><td>LMetric（学术）、llm-d sticky-until-saturated、Anyscale KVAwareRouter</td><td>负载仍是<b>实例级聚合</b>——队列组成盲区（→ <a href="routing-design.html">细粒度设计</a>）</td></tr>
+  </table>
+  <div class="callout tip">
+    <b>读法</b>：一、二代解决「KV 命中怎么估」，三代解决「命中和负载怎么合成一个分数」；三代的分数全部建立在<b>实例级聚合负载</b>上——这是现有工作共同的边界，也是 <a href="routing-design.html">下一篇设计</a> 的出发点。
+  </div>
+</section>
+
 <!-- ============ 第一部分 工业项目 ============ -->
 <section>
   <h2>第一部分：开源工业项目 <span class="tag ind">Industry</span></h2>
@@ -160,13 +175,15 @@
       <td class="no">✗</td><td class="ok">✅</td><td class="ok">✅</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td>
     </tr>
     <tr>
-      <td><b><a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter</a></b><br><code>DeepLink-org/DLRouter</code></td>
-      <td>—</td><td>新</td>
+      <td><b><a href="https://github.com/DeepLink-org/DLRouter" target="_blank">DLRouter</a></b>（新）<br><code>DeepLink-org/DLRouter</code></td>
+      <td>—</td><td class="unk">—</td>
       <td class="no">✗</td><td class="ok">✅</td><td class="no">✗</td><td class="no">✗</td><td class="unk">?</td><td class="no">✗</td><td class="ok">✅</td>
     </tr>
   </table>
   <p class="muted">图例：<b class="ok">✅</b> 支持 / <b class="part">⚠️</b> 部分·受限 / <b class="no">✗</b> 无 / <b class="unk">?</b> 未知。<br>
-  能力术语：<b>块级 KV 感知</b>＝订阅引擎 KV 事件或精确镜像后端 KV cache，做块级精确 cache hit；<b>前缀缓存感知</b>＝radix 树 / 文本前缀近似；<b>Token 负载感知</b>＝prefill / decode token 级负载打分；<b>在线学习路由</b>＝ML 预测延迟 / 奖励；<b>多实例 HA 同步</b>＝跨副本路由状态同步；<b>SLA 自动扩缩</b>＝按 SLO 自动扩缩副本；<b>多后端</b>＝跨引擎 / 跨提供商。</p>
+  能力术语：<b>块级 KV 感知</b>＝订阅引擎 KV 事件或精确镜像后端 KV cache，做块级精确 cache hit；<b>前缀缓存感知</b>＝radix 树 / 文本前缀近似；<b>Token 负载感知</b>＝prefill / decode token 级负载打分；<b>在线学习路由</b>＝ML 预测延迟 / 奖励；<b>多实例 HA 同步</b>＝跨副本路由状态同步；<b>SLA 自动扩缩</b>＝按 SLO 自动扩缩副本；<b>多后端</b>＝跨引擎 / 跨提供商。<br>
+  口径说明：本表只判功能「有无」，实现细节与判定依据见下方「四维度对比」与各子页面；⭐ 数与各格判定核实截至 2026-08。<br>
+  ⚠️ 格判定依据——llm-d「在线学习 ⚠️」：EPP 支持可插拔估计器，默认发布不带训练好的模型；SGLang Router「块级 ⚠️」：块级感知靠 external KV indexer（cache_aware_zmq），需额外部署，默认仍是本地 radix tree；AIBrix「HA ⚠️」：gateway 可多副本，但路由/KV 状态不跨副本同步；vLLM Router「前缀 ⚠️」：仅部分策略感知前缀；Ray Serve「多后端 ⚠️」：KV indexer 复用 Dynamo（vLLM/SGLang），其余引擎覆盖有限。</p>
 
   <h3>各 gateway 功能实现讲解（子页面）</h3>
   <ul>
@@ -292,6 +309,7 @@
     <tr><td><b>加权求和</b></td><td>Dynamo（cache-credit）、llm-d 旧默认、AIBrix、vLLM Router</td><td>score = α·KV 命中 + β·负载，权重手调</td><td class="part">⚠️ 需逐负载调参</td></tr>
     <tr><td><b>阈值过滤 + 择优</b></td><td>llm-d sticky-until-saturated</td><td>先过滤过载实例，再选缓存最优；阈值 τ 可推导</td><td class="ok">✅ τ = R_peak × T_max 闭式</td></tr>
     <tr><td><b>乘法路由</b></td><td>LMetric（学术）</td><td>score = KV 感知指标 × 负载指标，超参约去</td><td class="ok">✅ 零调参</td></tr>
+    <tr><td><b>分位感知</b></td><td>QUARTZ（ACL 26 findings）</td><td>保守分位预测 + K=2 候选 + 三成分打分；准入队列逐请求 SJF + aging</td><td class="ok">✅ 分位水平可定（默认 0.95）</td></tr>
     <tr><td><b>学习式</b></td><td>Lodestar</td><td>MLP 预测 −TTFT，特征含 KV 命中率 + 负载，在线训练</td><td class="part">⚠️ 免手工规则，需在线训练</td></tr>
   </table>
 </section>
@@ -334,6 +352,7 @@
     <tr><td><b><a href="https://www.usenix.org/system/files/nsdi26-ruan-libra.pdf" target="_blank">Libra</a></b> <a href="gateway-survey/libra.html" target="_blank" class="detail-link">详解 →</a></td><td class="conf">NSDI 2026</td><td>灵活请求切分（FPS）</td><td><b>FPS</b>＝在任意 token 边界把请求切成 micro-request（prefill 节点可多扛 decode、decode 节点可多扛 prefill），动态平衡两阶段负载；本质是 PD 分离的泛化，非「哪个实例缓存了前缀」</td></tr>
     <tr><td><b><a href="https://arxiv.org/abs/2407.00023" target="_blank">Preble</a></b> <a href="gateway-survey/preble.html" target="_blank" class="detail-link">详解 →</a></td><td class="conf">NSDI 2024</td><td>分布式 prompt sharing</td><td><b>分布式 prompt sharing</b>＝第一个跨实例复用 KV cache 的分布式平台，联合优化 KV 复用 + 计算负载均衡（分层调度：全局路由 + 局部组批）</td></tr>
   </table>
+  <p class="muted">分类说明：Preble 做了跨实例 KV 复用，但它是「分布式 prompt sharing 平台」——分层调度（全局路由 + 局部组批）内嵌在自有服务栈里，不是可插拔在任意引擎前的独立 gateway，故归 C 不归 A；其「复用 vs 负载均衡联合优化」的思路与 A 类高度相关。</p>
 
   <div class="callout bg">
     <b>背景前提（引擎侧，非调度本身）</b>：<b><a href="https://arxiv.org/abs/2309.06180" target="_blank">vLLM / PagedAttention</a></b>（SOSP 2023，块级 KV 管理）与
@@ -384,19 +403,20 @@
 
   <h3>负载指标清单</h3>
   <table>
-    <tr><th>类别</th><th>指标</th><th>说明 / 来源</th></tr>
-    <tr><td rowspan="4"><b>KV 感知<br>（cache hit）</b></td><td>KV cache 命中率</td><td>比例；LMetric 指出不能反映绝对计算量</td></tr>
-    <tr><td>需新算的 prefill token 数</td><td>LMetric 推荐（考虑 KV 命中后的绝对量）</td></tr>
-    <tr><td>前缀匹配长度（LPM）</td><td>QUARTZ 用；反映前缀局部性</td></tr>
-    <tr><td>块级重叠（gpu/cpu/disk 分层）</td><td>Dynamo/llm-d/SMG 块级感知</td></tr>
-    <tr><td rowspan="8"><b>负载<br>（load）</b></td><td>batch size</td><td>LMetric 负载指标</td></tr>
-    <tr><td>queued requests（队列深度）</td><td>Lodestar、QUARTZ</td></tr>
-    <tr><td>running requests（活跃请求数）</td><td>Lodestar；llm-d decode 瓶颈信号</td></tr>
-    <tr><td>inflight prefill tokens</td><td>Lodestar；llm-d prefill 瓶颈信号</td></tr>
-    <tr><td>inflight decode tokens</td><td>Lodestar</td></tr>
-    <tr><td>KV cache 利用率</td><td>通用</td></tr>
-    <tr><td>GPU 内存利用率 / 型号</td><td>Lodestar（异构集群）</td></tr>
-    <tr><td>延迟估计（unfinished_requests / speed）</td><td>DLRouter</td></tr>
+    <tr><th>类别</th><th>指标</th><th>粒度</th><th>说明 / 来源</th></tr>
+    <tr><td rowspan="4"><b>KV 感知<br>（cache hit）</b></td><td>KV cache 命中率</td><td>实例聚合</td><td>比例；LMetric 指出不能反映绝对计算量</td></tr>
+    <tr><td>需新算的 prefill token 数</td><td>实例聚合</td><td>LMetric 推荐（考虑 KV 命中后的绝对量）</td></tr>
+    <tr><td>前缀匹配长度（LPM）</td><td>实例聚合</td><td>QUARTZ 用；反映前缀局部性</td></tr>
+    <tr><td>块级重叠（gpu/cpu/disk 分层）</td><td>实例聚合</td><td>Dynamo/llm-d/SMG 块级感知</td></tr>
+    <tr><td rowspan="8"><b>负载<br>（load）</b></td><td>batch size</td><td>实例聚合</td><td>LMetric 负载指标</td></tr>
+    <tr><td>queued requests（队列深度）</td><td>实例聚合</td><td>Lodestar、QUARTZ</td></tr>
+    <tr><td>running requests（活跃请求数）</td><td>实例聚合</td><td>Lodestar；llm-d decode 瓶颈信号</td></tr>
+    <tr><td>inflight prefill tokens</td><td>实例聚合</td><td>Lodestar；llm-d prefill 瓶颈信号</td></tr>
+    <tr><td>inflight decode tokens</td><td>实例聚合</td><td>Lodestar</td></tr>
+    <tr><td>KV cache 利用率</td><td>实例聚合</td><td>通用</td></tr>
+    <tr><td>GPU 内存利用率 / 型号</td><td>实例聚合</td><td>Lodestar（异构集群）</td></tr>
+    <tr><td>延迟估计（unfinished_requests / speed）</td><td>实例聚合</td><td>DLRouter</td></tr>
+    <tr><td><b>逐请求（空缺）</b></td><td>逐请求剩余 prefill 成本 / 队列位置</td><td class="no">✗ 现有工作空缺</td><td>上表所有指标都到「实例聚合」为止；逐请求粒度只有 QUARTZ 在<b>准入层</b>用过，路由层无实现——<a href="routing-design.html">细粒度设计 →</a></td></tr>
   </table>
 
   <div class="callout tip">
@@ -414,7 +434,8 @@
 
   <h3>第一部分：工业级 gateway 选型</h3>
   <div class="callout core">
-    <b>结论：只有 Dynamo、llm-d、SMG 三家</b>——同时满足「块级 KV 感知 + Token 负载感知 + 多实例 HA 同步 + 引擎无关」四个条件的，目前只有这三家。选型从这三家出发即可，其余项目都是冗余选项（见下方备查行，不再展开）。
+    <b>结论：只有 Dynamo、llm-d、SMG 三家</b>——同时满足「块级 KV 感知 + Token 负载感知 + 多实例 HA 同步 + 引擎无关」四个条件的，目前只有这三家。选型从这三家出发即可，其余项目都是冗余选项（见下方备查行，不再展开）。<br>
+    注意「四个条件」是<b>多实例生产部署</b>的严格口径，不是唯一权重集：2–4 副本的实验/小规模场景可把 HA 同步降权（SGLang Router 单实例、零编排依赖，反而最省事）；跨引擎多后端优先则 Dynamo/SMG 升权。把上面的矩阵当<b>打分表按需加权</b>——「三家」是默认权重下的答案，不是唯一答案。
   </div>
   <p class="muted" style="margin-top:8px"><b>其余六家（冗余备查）</b>：SGLang Router（块级靠外部 indexer 可选，单实例无 HA）· AIBrix（前缀级 + 必须 K8s）· vLLM Router（前缀级 + vLLM 专用）· Ray Serve LLM（块级 KV 与 token 负载已具备，但 KV indexer 复用 Dynamo、且绑定 Ray 编排）· Lodestar（学术，单实例，学习式部署重）· DLRouter（新项目，前缀级）。</p>
   <div class="callout tip">
@@ -449,20 +470,28 @@
   </table>
   <p class="muted">三种方式的共同落点：<b>KV 命中都只是负载估计的输入，路由目标都是 token 负载均衡</b>。注意递进关系——Anyscale 已把 prefill/decode 合成单一标量 token load，比 llm-d 的「瓶颈二选一」更进一步，但仍是标量、丢了两维度各自的饱和度；把它升级为瓶颈向量的设计见 <a href="routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>。</p>
 
+  <h3>开放问题：现有工作的公共边界（下一步设计的入口）</h3>
+  <ul>
+    <li><b>负载度量全是实例级聚合</b>：token 总和 / 请求数 / batch size，看不到队列组成与预算稀释——「逐请求」一栏在上表空缺（→ <a href="routing-design.html">细粒度设计 →</a>）。</li>
+    <li><b>逐请求状态的跨副本同步无先例</b>：连聚合 token 负载都只有最终一致（Dynamo 对 output-block 故意不同步），逐请求队列的同步成本更高。</li>
+    <li><b>prefill 成本被当成裸 token 数线性可加</b>：未建模实测中的分段成本（45→93 μs/token）与 cache 折扣的交互。</li>
+    <li><b>路由层与准入层割裂</b>：只有 QUARTZ 在准入层做逐请求排序，路由层全部把次序交给引擎 FCFS——两层共享同一套逐请求状态的设计不存在。</li>
+  </ul>
+
   <div class="callout ac">
     <b>贯穿性共识</b>：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve</a>（KVAwareRouter，KV indexer 复用 Dynamo）、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a> 多个工业实现，加上 <a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）、<a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a>（OSDI 24）两篇顶会论文，以及 <a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale 官方博客的明确表述</a>——「KV cache affinity is a proxy for load estimation, not the routing objective itself」——在「负载感知路由」上殊途同归：<b>KV 重叠度只是负载估计的输入，真正的路由目标是让 token 负载均衡</b>。
   </div>
 
   <ul>
     <li><b>学术侧核心会议</b>：<b>OSDI / NSDI / SOSP</b>（系统方向）+ ICML（ML 系统方向）。</li>
-    <li><b>最该精读的三篇</b>：<a href="https://arxiv.org/abs/2406.03243" target="_blank"><b>Llumnix</b></a>（OSDI 24，动态重调度）、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank"><b>LMetric</b></a>（OSDI 26，乘法路由）、<a href="https://www.usenix.org/system/files/osdi23-li-zhuohan.pdf" target="_blank"><b>AlpaServe</b></a>（OSDI 23，统计复用）。</li>
+    <li><b>最该精读的三篇</b>：<a href="https://arxiv.org/abs/2406.03243" target="_blank"><b>Llumnix</b></a>（OSDI 24，动态重调度）、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank"><b>LMetric</b></a>（OSDI 26，乘法路由）、<a href="https://www.usenix.org/system/files/osdi23-li-zhuohan.pdf" target="_blank"><b>AlpaServe</b></a>（OSDI 23，统计复用——虽归 C 类资源分配，但其「聚合实例吃掉负载波动」的容量视角对路由层设计最有启发，故列精读）。</li>
     <li><b>你目录里已有的</b>：<a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a>、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>、<a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale KV+token 路由博客</a>——已覆盖「学习式」和「启发式」两条主线，与本次调研的 A 类高度重合，形成闭环。</li>
   </ul>
 
   <p class="muted" style="margin-top:12px">
     核实说明：Llumnix=OSDI 2024、LMetric=OSDI 2026、Libra=NSDI 2026、AlpaServe=OSDI 2023、Shepherd=NSDI 2023、
     Orca=OSDI 2022、Sarathi-Serve=OSDI 2024、FastServe=NSDI 2026、Sia=SOSP 2023、MuxServe=ICML 2024、Preble=NSDI 2024 均已核实；
-    Intelligent Router、Lodestar、Slice-Level Scheduling 为 arXiv；本节「三种路由方式」的表述来源为 LMetric 论文、llm-d sticky-until-saturated 博客、Anyscale KVAwareRouter 博客，均已核对原文。
+    Intelligent Router、Lodestar、Slice-Level Scheduling 为 arXiv；本节「三种路由方式」的表述来源为 LMetric 论文、llm-d sticky-until-saturated 博客、Anyscale KVAwareRouter 博客，均已核对原文。全部核实截至 2026-08。
   </p>
 </section>
 

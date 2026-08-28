@@ -46,7 +46,7 @@
     <span class="badge">路由策略设计</span>
     <span class="badge">队列组成盲区</span>
   </p>
-  <p style="margin-top:10px">核心问题：计算负载时，现有方案用的都是<b>实例级聚合指标</b>（inflight token 总数、活跃请求数），看不到<b>实例队列内部每个请求各自的 prefill 等待量</b>。本文展开这个盲区，并设计一个基于逐请求细粒度负载的路由策略。</p>
+  <p style="margin-top:10px">核心问题：计算负载时，现有方案用的都是<b>实例级聚合指标</b>（inflight token 总数、活跃请求数），看不到<b>实例队列内部每个请求各自的 prefill 等待量</b>。本文展开这个盲区，并设计一个基于逐请求细粒度负载的路由策略。全文前提已按 <a href="glm52-prefill-experiment.html">GLM-5.2 实测</a>校准（α≈1.12 / 集中度 1.3× / cache 22×），并给出验证方案与适用域。</p>
 </header>
 
 <section>
@@ -57,7 +57,7 @@
   <ul>
     <li>现状：inflight token 总数、batch size、活跃请求数——都是<b>聚合标量</b>。</li>
     <li>缺陷：看不到<b>队列组成</b>——「谁挡在前面、挡多久」。</li>
-    <li>症状：1 个长 prefill 大块头 vs 100 个短请求，聚合值一样，新请求的实际等待天差地别。</li>
+    <li>症状：1×30k 大块头 vs 30×1k 碎片，聚合值一样——实测总成本差仅 ~1.3×，但<b>预算被谁稀释、谁排在前面</b>天差地别（见下节实测校准）。</li>
   </ul>
 
   <h3>缺陷 2：瓶颈被当作「二选一」，而非「统一度量」</h3>
@@ -80,6 +80,26 @@
 </section>
 
 <section>
+  <h2 class="core">实测校准：前提按 GLM-5.2 数据定标</h2>
+  <p>本文初稿的动机建立在「长 prefill 阻塞队列」的直觉上。<b>用实测数据校准后，这个直觉要降级</b>——先摆数据，再重述真正站得住的动机（实测详情见 <a href="glm52-prefill-experiment.html">GLM-5.2 prefill 实测报告 →</a>）：</p>
+  <table>
+    <tr><th>直觉前提</th><th>实测（GLM-5.2-fp8，DSA+MoE 架构）</th><th>判定</th></tr>
+    <tr><td>prefill 成本 ∝ n（线性）</td><td>α≈1.12；中段 ~45μs/token 平坦，&gt;128k 回升到 93μs（2×）</td><td class="ok">✅ 近似成立</td></tr>
+    <tr><td>长请求集中 → 成本平方级放大（O(n²) 直觉，曾有「30×」推演）</td><td>1×300k vs 10×30k 总 prefill 仅 1.3×</td><td class="part">⚠️ 高估——DSA O(n·k) + chunked prefill 已把非线性抹平到温和超线性</td></tr>
+    <tr><td>长请求 prefill 期间，后续短请求等待暴涨</td><td>后台 30k–240k（prefill 窗口 1.3–13.4s）时，短请求 TTFT 0.744–0.765s ≈ 空闲 0.768s</td><td class="part">⚠️ 未观测到——归因待裁决（多副本分流 or chunked prefill 插队），待单副本重测</td></tr>
+    <tr><td>cache 命中只是「折扣」</td><td>896k prompt：命中 3.75s vs 未命中 83.38s = <b>22×</b></td><td class="ok">✅ 最大量级效应，一阶项</td></tr>
+  </table>
+  <div class="callout core">
+    <b>校准后的动机（不依赖「堵队列」叙事，两种归因下都成立）</b>：
+    <ul>
+      <li><b>公理：FIFO 下逐请求信息 ≡ 聚合信息</b>——引擎 FCFS 时「排前面的总剩余」就是聚合 inflight token，聚合指标完全够用。逐请求信息的<b>全部增量价值 = 支持准入重排</b>：把新请求插到比它短的请求后面，跳过 Σ_{j: c_j&gt;c_r} c_j 的长请求工作量——这只有在 <b>router 拥有准入队列</b>时才可能（引擎只上报聚合值时，路由器无从重排）。QUARTZ 已在准入层做了逐请求 SJF+aging，「路由层与准入层共享同一套逐请求状态」的设计还不存在。</li>
+      <li><b>预算稀释：聚合 token 指标看不到「预算被谁稀释」</b>——chunked prefill 引擎每步只给 prefill B_i−d_i 的 token 预算，活跃 decode 越多 prefill 越慢；两个聚合 token 数相同的实例，(B−d) 可以差数倍。这是聚合指标的<b>真盲区</b>，与「堵队列」是否发生无关。</li>
+      <li><b>量级排序决定设计重心</b>：cache hit（22×）是一阶项 &gt;&gt; 集中度（1.3×）与长段非线性（2×）。逐请求细粒度是二阶修正，主战场在「高利用率 × 长短双峰 × 低局部性」的交集负载。</li>
+    </ul>
+  </div>
+</section>
+
+<section>
   <h2>你的 insight：聚合负载指标的「队列组成盲区」</h2>
   <p>现有路由策略计算负载时，看到的都是聚合值：</p>
   <table>
@@ -91,54 +111,67 @@
   </table>
   <p>聚合值的致命盲区：<b>同样的聚合数字，队列组成可以完全不同，新请求的实际等待时间也完全不同</b>。</p>
   <div class="callout core">
-    <b>一个反例</b>：两个实例，聚合 inflight prefill 都是 <b>100 token</b>，但——
+    <b>一个反例（按实测定标）</b>：两个实例，聚合 inflight prefill 都是 <b>30k token</b>，但——
     <ul>
-      <li><b>实例 A</b>：1 个请求正在 prefill，剩余 100 token（一个"大块头"挡在前面）。</li>
-      <li><b>实例 B</b>：100 个请求，各剩余 1 token（prefill 都快完了，但 decode 队列很长、KV 满）。</li>
+      <li><b>实例 A</b>：1 个请求剩 30k prefill（一个"大块头"在算）。</li>
+      <li><b>实例 B</b>：30 个请求各剩 1k（prefill 都在收尾），队列里还有几十个活跃 decode。</li>
     </ul>
-    聚合指标看两者"一样闲/一样忙"，但新请求路由过去：
+    按 GLM-5.2 实测，两者「总 prefill 成本」只差 ~1.3×（近线性）——<b>反例的威力不在总量差，而在瓶颈维度差</b>：
     <ul>
-      <li>到 A：要等那个 100-token 大块头 prefill 完（且它是计算密集，占满 GPU）；</li>
-      <li>到 B：prefill 瞬间就空出位置，但要挤进已经很满的 decode 批。</li>
+      <li>到 A：新请求排在大块头后面等它算完（无 chunked prefill 的引擎上这是独占窗口）；</li>
+      <li>到 B：prefill 总量小，但几十个活跃 decode 把每步预算稀释到 B−d，单步变慢、KV 压力高。</li>
     </ul>
-    <b>「总共多少」掩盖了「谁挡在前面、挡了多久」</b>——这正是你要解决的盲区。
+    <b>「总共多少 token」掩盖了「预算被谁稀释、谁挡在前面」</b>——这是聚合盲区的准确表述。
   </div>
 </section>
 
 <section>
   <h2 class="core">细粒度负载模型：把实例负载拆成「逐请求队列」</h2>
-  <p>把实例的负载从"一个聚合数"升级为"一个有序的逐请求队列"：</p>
-  <pre>Q_i = [ (r_1, c_1, s_1), (r_2, c_2, s_2), ..., (r_k, c_k, s_k) ]
+  <p>把实例的负载从"一个聚合数"升级为"一个有序的逐请求队列 + 引擎预算状态"：</p>
+  <pre>Q_i = [ (r_1, c_1, s_1), (r_2, c_2, s_2), ..., (r_k, c_k, s_k) ]  +  ( B_i, d_i )
 
-  c_j = 请求 j 的<b>剩余 prefill 成本</b>（token 数，考虑 KV 命中后还需新算的）
-  s_j = 请求 j 的状态（prefill 中 / 排队中 / decode 中）</pre>
-  <p>三个关键字段：</p>
+  c_j = 请求 j 的<b>剩余 prefill 成本</b>（token 数，考虑 KV 命中后还需新算的；
+        >128k 长段按实测成本曲线折算 45→93 μs/token）
+  s_j = 请求 j 的状态（prefill 中 / 排队中 / decode 中）
+  B_i = 引擎 max_num_batched_tokens（每步 token 预算）
+  d_i = 活跃 decode 请求数（决定 prefill 每步实际可用预算 B_i − d_i）</pre>
+  <p>四个关键字段：</p>
   <ul>
     <li><b>c_j（剩余 prefill 成本）</b>：LMetric 已经证明该用"需新算的 prefill token 数"（而非命中率）——这里把它细化到<b>每个请求</b>。</li>
     <li><b>逐请求而非聚合</b>：这样才知道"排在新请求前面的具体是哪些请求、各剩多少"，而不是只知道"总共还剩多少"。</li>
     <li><b>动态更新</b>：c_j 随 prefill 推进递减，prefill 完成后请求转入 decode（对后续 prefill 不再构成阻塞）。</li>
+    <li><b>(B_i, d_i) 是队列之外的第二半状态</b>：只有逐请求视图能同时回答「排在前面的是谁」（→ W_i(r)）和「decode 把预算稀释到多少」（→ B_i−d_i）——两半合起来才是完整负载。</li>
   </ul>
 </section>
 
 <section>
   <h2 class="core">新路由策略：最小化「新请求的期望 TTFT」</h2>
-  <p>路由目标从"平衡聚合负载"改为<b>"最小化新请求的期望 TTFT"</b>——而期望 TTFT 由逐请求队列精确算出。</p>
+  <p>路由目标从"平衡聚合负载"改为<b>"最小化新请求的期望 TTFT"</b>——期望 TTFT 由逐请求队列 + 引擎 token 预算模型算出。</p>
 
-  <h3>打分公式</h3>
-  <pre>TTFT(r → i) ≈ ( W_i(r) + c_r ) / prefill_throughput_i
+  <div class="callout warn">
+    <b>设计第一原则（公理）</b>：若引擎 FCFS 且路由器不做准入重排，则 W_i(r) = 队列全部剩余 prefill 之和 = 聚合 inflight token——<b>逐请求信息退化为聚合信息，模型零增益</b>。因此本设计的第一承诺是 <b>router 拥有准入队列</b>（请求在路由器侧排队/派发时即确定次序）：重排策略是核心自由度，也是逐请求信息唯一的变现方式。
+  </div>
 
-W_i(r) = Σ c_j        # 所有「排在 r 前面」的请求的剩余 prefill 之和</pre>
+  <h3>打分公式（引擎保真版：token 预算调度模型）</h3>
+  <pre>steps(r → i) ≈ ( Σ_{j ∈ ahead(r)} c_j  +  c_r ) / max(B_i − d_i, 1)
+TTFT(r → i)  ≈ steps(r → i) × t_step(d_i, kv_i)
+
+  ahead(r)   = 准入重排后排在 r 前面的请求集合（由下表策略决定）
+  B_i − d_i  = chunked prefill 每步分给 prefill 的 token 预算（活跃 decode 越多越少）
+  t_step     = 单步时长，随 decode 批与 KV 压力变化；
+               GLM-5.2 实测 45–93 μs/token 曲线可直接作 lookup 常数</pre>
   <ul>
-    <li><b>c_r</b>：新请求自己的 prefill 成本（输入 token − 命中 KV 的 token）。</li>
-    <li><b>W_i(r)</b>：r 插进队列后，排在它前面的那些请求的剩余 prefill 之和——<b>这才是"r 实际要等多久"的精确度量</b>，也是聚合指标算不出来的部分。</li>
-    <li><b>路由决策</b>：选 TTFT 最小的实例。</li>
+    <li><b>c_r</b>：新请求自己的 prefill 成本（输入 token − 命中 KV 的 token，长段按成本曲线折算）。</li>
+    <li><b>Σ_{j∈ahead(r)} c_j（即 W_i(r)）</b>：排在 r 前面的剩余 prefill 之和——<b>这才是"r 实际要等多久"的精确度量</b>，也是聚合指标算不出来的部分。</li>
+    <li><b>对比简化式</b> <code>TTFT ≈ (W_i(r) + c_r) / throughput</code>（吞吐常数假设）：本式把两处失真显式建模——分母的<b>预算稀释</b>（decode 挤占 prefill 预算，聚合 token 指标完全看不到）与分子的<b>成本非线性</b>（c_j 按分段成本折算，而非裸 token 数）。</li>
+    <li><b>路由决策</b>：选 TTFT 最小的实例（配 K=2 随机候选防 herding）。</li>
   </ul>
 
   <h3>「排在 r 前面」由队列重排策略决定——这是设计的核心自由度</h3>
   <table>
     <tr><th>重排策略</th><th>W_i(r) 的计算</th><th>效果</th></tr>
     <tr><td><b>FIFO（不重排）</b></td><td>r 排队尾，W = 队列里全部剩余 prefill 之和</td><td>等价于聚合指标（退化为 llm-d 的 inflight token），无新增信息</td></tr>
-    <tr><td><b>SJF（短请求插队）</b></td><td>r 插到所有 c_j &lt; c_r 的请求前面，W = 所有 c_j &lt; c_r 的请求的 prefill 之和</td><td>短请求等待大幅缩短；长请求可能饿死，需 aging 兜底</td></tr>
+    <tr><td><b>SJF（短请求插队）</b></td><td>r 排到所有比它短的请求<b>之后</b>、比它长的请求之前：ahead(r) = {j: c_j &lt; c_r}，W = Σ_{c_j&lt;c_r} c_j</td><td>短请求等待大幅缩短；长请求可能饿死，需 aging 兜底</td></tr>
     <tr><td><b>分位感知（QUARTZ 式）</b></td><td>用每个请求的 prefill 分位（而非精确值）排序</td><td>对不确定性的鲁棒性更好</td></tr>
   </table>
   <p class="muted">关键：FIFO 下逐请求信息没有新增价值（退化成聚合）；<b>逐请求信息的价值在于支持队列重排（SJF/分位）</b>——而这正是 QUARTZ 在"准入层"已经做了、但"路由层"还没做的事。</p>
@@ -159,14 +192,29 @@ W_i(r) = Σ c_j        # 所有「排在 r 前面」的请求的剩余 prefill �
   m_r = 内存冲击（KV cache 大小 ≈ 总 token 数，长期占用）</pre>
   <p>关键：<b>不同请求对两个维度的冲击不同</b>——长 prefill 请求 c_r 大、m_r 小；长 decode 请求 c_r 小、m_r 大。这正是标量 score 表达不了的。</p>
 
-  <h3>路由决策（方向性示意，范数待实验）</h3>
+  <h3>路由决策（方向性示意，但有两个未解决问题）</h3>
   <pre>cost(r → i) = max( P_i + c_r / C_i,   D_i + m_r / M_i )
 
 # C_i、M_i = 实例 i 的计算 / 内存容量
 # 取 max：任一维度超载都会拖垮实例（木桶原理），选 cost 最小的实例</pre>
 
+  <div class="callout warn">
+    <b>这个 max 公式有两个未解决的问题（诚实标注）</b>：
+    <ul>
+      <li><b>时间常数不一致</b>：P_i 是<b>瞬时量</b>（毫秒–秒级，随 batch 组成每步刷新）；D_i 是<b>持久量</b>（请求生命周期级，KV 占用要到完成/驱逐才释放）。把秒级快照和生命周期水位放进同一个 max 做代数比较，「统一度量」目前是伪统一。</li>
+      <li><b>m_r 的输出长度未知</b>：m_r ≈ (prompt_len + Q̂_out) × per-token KV bytes，而 Q̂_out 路由时不可知——只能 max_tokens 封顶（保守，系统性高估长输出请求）或 QUARTZ 式分位预测（精细，有误差）。per-token KV bytes 可从引擎 config 算出（MLA 压缩到 512 维后极小，GLM-5.2 即此类）。</li>
+    </ul>
+  </div>
+
+  <h3>修正方案：两段式（推荐）或三方消融（保留 max）</h3>
+  <table>
+    <tr><th>方案</th><th>机制</th><th>代价</th></tr>
+    <tr><td><b>两段式（推荐）</b></td><td><b>D 做硬准入</b>：D_i + m_r/M_i &gt; 阈值（如 0.9）的实例直接出局——与 llm-d 的 τ 过滤同构，且用的是 D 的正确时间常数；<b>P 做等待最小化</b>：幸存实例按 steps(r→i) 排序。两个维度各用各的调度语义，不做伪统一。</td><td>多一个阈值（KV 容量 × 安全水位，可推导）</td></tr>
+    <tr><td><b>保留 max 形态</b></td><td>作为「统一度量」假说保留，但必须与乘法基线（LMetric：新算 token × (BS+1)）、加权和基线做三方消融，证明 max 的额外增益</td><td>若消融打平，max 只是又一个待调参的归约，应舍弃</td></tr>
+  </table>
+
   <div class="callout tip">
-    <b>两个缺陷的解是天然互补的</b>：瓶颈向量 P_i 的精确值，正是逐请求队列的 Σ c_j / C_i——所以「度量细粒度」（逐请求队列）提供了精确的 P_i，而「维度细粒度」（向量化）保证 P_i 和 D_i 不被压成一个标量。两者合起来才是完整的路由模型。
+    <b>两个缺陷的解是天然互补的</b>：瓶颈向量 P_i 的精确值，正是逐请求队列的 Σ c_j / C_i——「度量细粒度」（逐请求队列）提供了精确的 P_i，「维度细粒度」（向量化）保证 P_i 和 D_i 不被压成一个标量。在两段式修正下：P 由逐请求队列精确给出，D 由硬准入过滤——互补关系不变，只是不再假装它们能压进同一个 max。
   </div>
 </section>
 
@@ -240,11 +288,21 @@ W_i(r) = Σ c_j        # 所有「排在 r 前面」的请求的剩余 prefill �
 </section>
 
 <section>
+  <h2 class="aca">与学习式预测器的关系：解析骨架 + 学习残差</h2>
+  <p>LMetricPlus 的设计（XGBoost 预测 TTFT + blitz-router 执行）常被看作与本文「解析公式」竞争的另一个方案。<b>不是——它们是同一方案的两层</b>：</p>
+  <table>
+    <tr><th>层</th><th>职责</th><th>冷启动 / 数据积累后</th></tr>
+    <tr><td><b>解析骨架</b>（本文）</td><td>steps×t_step 调度器模型给出先验预测；同时定义特征集：W_i(r)、前方长请求工作量 Σ_{c_j&gt;c_r} c_j、B_i−d_i、命中折扣——<b>学习式模型的特征就是解析模型的组成部分</b></td><td>零训练，新实例/新负载立即可用；始终作为兜底</td></tr>
+    <tr><td><b>学习残差</b>（LMetricPlus）</td><td>XGBoost 只学解析模型没覆盖的部分：多租户干扰、t_step 漂移、未建模的引擎行为</td><td>数据积累后逐实例接管置信度；残差小 → 退回解析先验</td></tr>
+  </table>
+  <div class="callout ac"><b>一句话</b>：解析模型负责「结构」（机制上必然成立的项），学习模型负责「残差」（机制外干扰）。骨架不学习、残差不发明——两层拼起来才是可部署的完整方案，而不是两个竞争设计。</div>
+</section>
+
+<section>
   <h2 class="core">打分公式的两种实现（精确 vs 分位）</h2>
   <h3>实现 A：精确逐请求队列</h3>
-  <pre>TTFT(r → i) = ( Σ_{j: c_j < c_r} c_j  +  c_r ) / prefill_throughput_i
-
-# 假设 SJF 重排，r 插到所有比它短的请求前面</pre>
+  <pre>steps(r → i) = ( Σ_{j: c_j < c_r} c_j  +  c_r ) / max(B_i − d_i, 1)   # SJF：比 r 短的先走，r 只等它们
+TTFT(r → i)  ≈ steps × t_step(d_i, kv_i)</pre>
   <p>优点：精确，无预测误差。缺点：需要实时维护每个实例的逐请求队列（成本动态递减、完成即移除），且多实例路由时这个状态的跨副本同步更难。</p>
 
   <h3>实现 B：分位逐请求队列（QUARTZ 的细粒度版）</h3>
@@ -255,32 +313,63 @@ W_i(r) = Σ c_j        # 所有「排在 r 前面」的请求的剩余 prefill �
 <section>
   <h2 class="core">挑战与代价（诚实标注）</h2>
   <ul>
-    <li><b>状态维护成本</b>：路由器要实时追踪每个实例里每个请求的剩余 prefill（c_j 动态递减），这比维护一个聚合计数器重得多。但好消息是：引擎（vLLM/SGLang）已经知道每个请求的剩余 token，只需把"逐请求进度"上报给路由器（而不是只上报聚合值）。</li>
-    <li><b>跨副本同步</b>：多实例路由（llm-d active-active、SMG mesh）下，逐请求队列的同步比聚合值更难——这是 llm-d active-active 下"前缀缓存分区"问题的放大版。可能需要接受"最终一致的逐请求队列"（短暂分歧可接受，像 Dynamo 那样）。</li>
-    <li><b>SJF 的公平性</b>：短请求插队会让长请求饿死，必须配 aging（QUARTZ 的 λ·a_r 项）——这个 QUARTZ 已经给了现成解法。</li>
-    <li><b>prefill 吞吐不是常数</b>：不同请求的 prefill 吞吐受 batch 组成影响，用常数 prefill_throughput_i 是近似。可以用离线 profile 的 lookup table（Libra 的做法）修正。</li>
+    <li><b>状态维护成本</b>：路由器要实时追踪每个实例里每个请求的剩余 prefill（c_j 动态递减）。落地<b>不需要改引擎</b>——router 侧影子记账：按 admission / first-token / 完成 / 取消事件维护队列进出与 c_j 递减（Anyscale KVAwareRouter 已按请求生命周期更新聚合负载，同一事件流升级为逐请求即可）；<code>yaullm</code> 已有 step-level SSE，逐请求进度有现成通道。</li>
+    <li><b>跨副本同步</b>：多实例路由下逐请求队列的同步比聚合值更难。建议<b>单 router 起步</b>（状态天然一致），多 router 时接受最终一致的逐请求队列（短暂分歧可接受，Dynamo 对 output-block 的处理同款）。</li>
+    <li><b>SJF 的公平性</b>：短请求插队会让长请求饿死，必须配 aging（QUARTZ 的 λ·a_r 项）——现成解法。</li>
+    <li><b>t_step 不是常数</b>：token 预算模型已显式处理主项（B_i−d_i 稀释）；剩余波动（KV 压力、专家路由不均）用实测成本曲线 lookup 打底，残差交给学习层。</li>
+    <li><b>突发同步冲击（herding）</b>：同一窗口到达的多个请求会算出同一个「最优实例」挤过去——需要 power-of-two（K=2 随机候选，QUARTZ 同构）或小抖动打散。</li>
+    <li><b>预期效应量级（最重要的一条）</b>：cache hit 22× 是一阶项，逐请求细粒度是二阶修正。<b>适用域 = 高利用率 × 长短双峰 × 低局部性的交集</b>——低利用率下队列本来空，负载单峰时聚合够用。验收线应对齐 P99 TTFT 降幅 ≥10%，而不是乘法级的戏剧性收益。</li>
   </ul>
+</section>
+
+<section>
+  <h2 class="core">验证方案：先测预测精度，再谈端到端</h2>
+  <p>这个设计能否成立，取决于两个可分离的问题：<b>① 模型准不准</b>（W_i(r) + steps×t_step 能否预测真实 TTFT）和 <b>② 收益大不大</b>（用预测做路由，P99 比基线好多少）。①是②的前置，顺序不能反。</p>
+  <table>
+    <tr><th>步骤</th><th>做法</th><th>通过标准</th></tr>
+    <tr><td><b>第一步 · 预测精度</b></td><td>trace 回放：固定路由决策，对比模型预测 TTFT vs 实测，按（短/长请求 × 高/低 d_i）分桶看误差</td><td>中位相对误差有界（如 &lt;30%）；长段误差用成本曲线 lookup 收敛</td></tr>
+    <tr><td><b>第二步 · 端到端 A/B</b></td><td>基线族：RR / JSQ / 聚合 token（llm-d 式）/ LMetric 乘法 / sticky-until-saturated；负载用长短双峰 + 低局部性合成</td><td>P99 TTFT 降幅 ≥10%（LMetricPlus 验收线）</td></tr>
+  </table>
+  <h3>消融（证明每个机制各自挣到钱）</h3>
+  <ul>
+    <li><b>−重排</b>：准入退回 FIFO——验证「逐请求信息」本身的贡献（公理预言：FIFO 下与聚合基线打平，消融可裁决）；</li>
+    <li><b>−预算稀释</b>：分母换回常数吞吐——验证 (B_i−d_i) 项的贡献；</li>
+    <li><b>−D 硬准入</b>：去掉两段式第一段——验证 D 维度过滤的贡献。</li>
+  </ul>
+  <h3>最小隔离实验（单 GPU，可控负载，先于端到端）</h3>
+  <ul>
+    <li><b>A1</b> 单副本复测忙等待（pin 副本 + 流式 TTFT）——裁决实测报告图 5 的归因（chunked prefill 插队 vs 多副本分流）；</li>
+    <li><b>A2</b> chunked prefill 开/关对照；</li>
+    <li><b>A3</b> 预算稀释扫描：固定 Σc，扫 d_i，直接验证 steps×t_step 模型——本设计的核心方程；</li>
+    <li><b>A4</b> 1.3× 集中度实验的并发版。</li>
+  </ul>
+  <p class="muted">实验数据与待重测清单见 <a href="glm52-prefill-experiment.html">GLM-5.2 prefill 实测报告 →</a>（成本曲线 45–93 μs/token 将直接成为路由器 lookup 常数）。</p>
 </section>
 
 <section>
   <h2>待验证的开放问题</h2>
   <ul>
-    <li><b>W_i(r) 的精确收益有多大？</b> 相比 llm-d 的聚合 inflight token，逐请求 W_i(r) 能再降多少 TTFT？需要实测——一个合理的预期是：在"长 prefill + 短请求混合"的负载下收益最大（因为聚合指标在这种负载下最误导）。</li>
-    <li><b>SJF 重排 vs FIFO</b>：路由层允许重排（SJF）的收益，是否足以抵消重排的公平性代价和实现复杂度？QUARTZ 在准入层的答案是"值得"，路由层是否同样成立待验证。</li>
-    <li><b>和 KV 命中的交互</b>：c_r 已经扣掉了 KV 命中（= 需新算的 token），但 KV 命中还会影响"队列里其他请求的成本"（如果新请求的 prefill 会改变 KV 状态）。这个二阶效应是否需要建模？</li>
+    <li><b>验证顺序</b>：先测 W_i(r)+steps×t_step 的预测精度（trace 回放、分桶误差），再谈端到端收益——预测不准，路由收益免谈（见上节验证方案）。</li>
+    <li><b>二阶修正够不够</b>：在 cache hit（22×）主导的一阶效应下，逐请求细粒度在真实 trace 上能再拿多少 P99？适用域假设（高利用率 × 双峰 × 低局部性）需要用真实负载分布验证。</li>
+    <li><b>SJF 重排 vs FIFO（路由层）</b>：QUARTZ 在准入层的答案是"值得"；公理预言路由层若不做准入重排则收益为零——端到端差异是否恰好等于「准入重排的贡献」，用 −重排 消融即可裁决。</li>
+    <li><b>和 KV 命中的交互</b>：c_r 已扣掉 KV 命中，但新请求的 prefill 会改变 KV 状态、影响后续请求的成本（二阶效应）——是否需要建模待定。</li>
+    <li><b>两段式阈值的泛化</b>：D 硬准入阈值（KV 容量 × 水位）跨引擎/跨模型（MLA vs MHA 的 per-token KV bytes 差异巨大）如何自动标定？</li>
   </ul>
 </section>
 
 <section>
   <h2>一句话总结</h2>
   <div class="callout tip">
-    <b>完整的 gap 是「双重粗粒度」</b>：度量层面只有聚合值（看不到队列组成），瓶颈层面只有二选一或标量（无法同时表达 prefill/decode 两个维度的饱和度）。<br>
-    对应的解是两半：<b>① 度量细粒度</b>——逐请求队列 W_i(r)，选等待最短的实例（SJF + aging 是钥匙，QUARTZ 已在准入做了、路由层还没做）；<b>② 瓶颈统一度量</b>——把 prefill/decode 综合成同一个 metric：瓶颈向量 (P_i, D_i) × 冲击向量 (c_r, m_r)，选在两个维度上都最有余量的实例。
+    <b>完整的 gap 是「双重粗粒度」，但动机按实测定标</b>：度量层面只有聚合值（看不到队列组成与预算稀释），瓶颈层面只有二选一或标量；实测表明「堵队列」叙事不成立（集中度仅 1.3×、忙碌等待未升高），真正站得住的是两个机制：<br>
+    <b>① 准入排序</b>——router 拥有逐请求队列，SJF + aging 让 W_i(r) 兑现（公理：FIFO 下逐请求信息退化为聚合，重排是唯一变现方式）；<b>② 预算稀释</b>——steps ≈ (Σ_{j∈ahead} c_j + c_r)/(B_i − d_i)、TTFT ≈ steps × t_step，把 chunked prefill 的调度语义显式建模。<br>
+    <b>③ 瓶颈向量改两段式</b>——D 硬准入（时间常数正确）+ P 最小化，替代量纲不一致的 max；<b>④ 与学习式统一</b>——解析骨架（零训练冷启动 + 天然特征集）+ 学习残差（XGBoost 修干扰）。<br>
+    量级预期要诚实：cache hit 22× 是一阶项，逐请求细粒度是二阶修正；适用域 = 高利用率 × 长短双峰 × 低局部性；验收 = 预测精度先行，P99 降幅 ≥10%。
   </div>
 </section>
 
 <div class="foot">
   <a href="gateway-survey.html">← 返回全景调研</a>
+  <a href="glm52-prefill-experiment.html">GLM-5.2 实测报告 →</a>
 </div>
 
 </div>
