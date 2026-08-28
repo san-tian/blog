@@ -412,19 +412,41 @@
 <section>
   <h2 class="core">结论与建议</h2>
   <div class="callout core">
-    <b>工业 gateway 三选一结论</b>：同时满足「块级 KV 感知 + Token 负载感知 + 多实例 HA 同步 + 引擎无关」四个条件的，目前只有 <b>Dynamo、llm-d、SMG</b> 三家。<br>
-    其余六家短板：SGLang Router（slim，块级靠外部 indexer 可选，单实例无 HA）、AIBrix（前缀级 + 必须 K8s）、vLLM Router（前缀级 + vLLM 专用）、Ray Serve LLM（必须 Ray + SGLang 早期）、Lodestar（学术，单实例，学习式部署重）、DLRouter（新项目，前缀级）。
+    <b>结论：只有 Dynamo、llm-d、SMG 三家</b>——同时满足「块级 KV 感知 + Token 负载感知 + 多实例 HA 同步 + 引擎无关」四个条件的，目前只有这三家。选型从这三家出发即可，其余项目都是冗余选项（见下方备查行，不再展开）。
   </div>
+
+  <h3>三种代表性路由方式（先记住这三个，就抓住了本篇主线）</h3>
+  <table>
+    <tr><th>方案</th><th>路由方式（一句话）</th><th>KV 与负载的关系</th></tr>
+    <tr>
+      <td><b><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a></b><br><span class="muted">OSDI 26 · 学术</span> <a href="gateway-survey/lmetric.html" target="_blank" class="detail-link">详解 →</a></td>
+      <td><b>乘法路由</b>：score = KV 感知指标（考虑命中后需新算的 prefill token 数）× 负载指标（batch size），选乘积最小的实例。超参在跨实例比较中相互约去，<b>零调参</b>；极端 KV 偏斜时检测并回退纯负载均衡。</td>
+      <td>命中直接折扣工作量：命中越多 → 需新算的 token 越少 → 等效负载越低</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing" target="_blank">llm-d</a></b><br><span class="muted">sticky-until-saturated · 工业</span></td>
+      <td><b>亲和 + 饱和释放</b>：优先把请求粘在 KV 前缀命中的实例；负载超过校准阈值 τ（= peakPrefillThroughput × maxTTFTPenaltyMs）后释放亲和，按「瓶颈匹配」的 token 负载选实例——prefill-bound 看在途未缓存 token，decode-bound 看活跃请求数。</td>
+      <td>KV 亲和是默认项，token 负载是饱和后的接管者</td>
+    </tr>
+    <tr>
+      <td><b><a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale / Ray Serve</a></b><br><span class="muted">KVAwareRouter · 工业</span></td>
+      <td><b>统一 token-load 打分</b>：订阅引擎 KV 块级事件构建全局 radix tree（复用 Dynamo KV indexer），用 overlap 估计「能省多少 prefill」、折算成剩余 prefill 负载，加上活跃 decode 请求的 KV 足迹，<b>合成单一 token load 指标</b>加权打分选实例；按请求生命周期（admitted → first token → decode → 完成）持续更新负载。</td>
+      <td>KV overlap 是「负载估计的代理」，不是路由目标本身（博客原文）</td>
+    </tr>
+  </table>
+  <p class="muted">三种方式的共同落点：<b>KV 命中都只是负载估计的输入，路由目标都是 token 负载均衡</b>。注意递进关系——Anyscale 已把 prefill/decode 合成单一标量 token load，比 llm-d 的「瓶颈二选一」更进一步，但仍是标量、丢了两维度各自的饱和度；把它升级为瓶颈向量的设计见 <a href="routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>。</p>
+
+  <p class="muted" style="margin-top:8px"><b>其余六家（冗余备查）</b>：SGLang Router（块级靠外部 indexer 可选，单实例无 HA）· AIBrix（前缀级 + 必须 K8s）· vLLM Router（前缀级 + vLLM 专用）· Ray Serve LLM（块级 KV 与 token 负载已具备，但 KV indexer 复用 Dynamo、且绑定 Ray 编排）· Lodestar（学术，单实例，学习式部署重）· DLRouter（新项目，前缀级）。</p>
+
   <ul>
-    <li><b>工业侧主流</b>（调度/负载感知）：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a>、<a href="https://github.com/vllm-project/aibrix" target="_blank">AIBrix</a> / <a href="https://github.com/vllm-project/router" target="_blank">vLLM Router</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve LLM</a>。</li>
+    <li><b>工业选型</b>：从 <a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a> / <a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a> / <a href="https://github.com/lightseekorg/smg" target="_blank">SMG</a> 三家出发，按下方四个关注点挑。</li>
     <li><b>学术侧核心会议</b>：<b>OSDI / NSDI / SOSP</b>（系统方向）+ ICML（ML 系统方向）。</li>
     <li><b>最该精读的三篇</b>：<a href="https://arxiv.org/abs/2406.03243" target="_blank"><b>Llumnix</b></a>（OSDI 24，动态重调度）、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank"><b>LMetric</b></a>（OSDI 26，乘法路由）、<a href="https://www.usenix.org/system/files/osdi23-li-zhuohan.pdf" target="_blank"><b>AlpaServe</b></a>（OSDI 23，统计复用）。</li>
-    <li><b>你目录里已有的</b>：<a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a>、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>、<a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve</a> 博客——已覆盖「学习式」和「启发式」两条主线，与本次调研的 A 类高度重合，形成闭环。</li>
+    <li><b>你目录里已有的</b>：<a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a>、<a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>、<a href="https://aclanthology.org/2026.findings-acl.1888/" target="_blank">QUARTZ</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale KV+token 路由博客</a>——已覆盖「学习式」和「启发式」两条主线，与本次调研的 A 类高度重合，形成闭环。</li>
   </ul>
 
   <div class="callout ac">
-    <b>贯穿性共识</b>：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve</a>、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a> 四个独立工业实现，加上 <a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）、<a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a>（OSDI 24）两篇顶会论文，
-    在「负载感知路由」上殊途同归——<b>KV 重叠度只是负载估计的输入，真正的路由目标是让 token 负载均衡</b>。
+    <b>贯穿性共识</b>：<a href="https://github.com/ai-dynamo/dynamo" target="_blank">Dynamo</a>、<a href="https://github.com/llm-d/llm-d" target="_blank">llm-d</a>、<a href="https://github.com/ray-project/ray" target="_blank">Ray Serve</a>（KVAwareRouter，KV indexer 复用 Dynamo）、<a href="https://github.com/sgl-project/sglang" target="_blank">SGLang Router</a> 多个工业实现，加上 <a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a>（OSDI 26）、<a href="https://arxiv.org/abs/2406.03243" target="_blank">Llumnix</a>（OSDI 24）两篇顶会论文，以及 <a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale 官方博客的明确表述</a>——「KV cache affinity is a proxy for load estimation, not the routing objective itself」——在「负载感知路由」上殊途同归：<b>KV 重叠度只是负载估计的输入，真正的路由目标是让 token 负载均衡</b>。
   </div>
 
   <div class="callout tip">
@@ -440,7 +462,7 @@
   <p class="muted" style="margin-top:12px">
     核实说明：Llumnix=OSDI 2024、LMetric=OSDI 2026、Libra=NSDI 2026、AlpaServe=OSDI 2023、Shepherd=NSDI 2023、
     Orca=OSDI 2022、Sarathi-Serve=OSDI 2024、FastServe=NSDI 2026、Sia=SOSP 2023、MuxServe=ICML 2024、Preble=NSDI 2024 均已核实；
-    Intelligent Router、Lodestar、Slice-Level Scheduling 为 arXiv。
+    Intelligent Router、Lodestar、Slice-Level Scheduling 为 arXiv；本节「三种路由方式」的表述来源为 LMetric 论文、llm-d sticky-until-saturated 博客、Anyscale KVAwareRouter 博客，均已核对原文。
   </p>
 </section>
 
