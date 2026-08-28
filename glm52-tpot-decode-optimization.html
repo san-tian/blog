@@ -211,7 +211,34 @@ final_hidden_states = final_hidden_states[..., :origin_hidden_states_dim].contig
 <p>GLM-5.2 的 <code>GlmMoeDsaForCausalLM</code> 在 SM100（Blackwell）支持列表内，去掉 <code>--enforce-disable-flashinfer-allreduce-fusion</code> 后，TP 的 AllReduce 能融进 mnnvl attention kernel，省掉单独的通信-计算切换。同 bs/seq_len 的 A/B 下，decode verify 中位数下降 4.6%~5.5%。</p>
 
 <h3>tile 对齐 BLOCK_SIZE_M=64→16（-8.8%，最大单项）</h3>
-<p>decode 日志显示 GLM-5.2（E=257, N=256, L20D）<strong>没有匹配的 MoE config 文件，走了默认 <code>BLOCK_SIZE_M=64</code></strong>。参考同构 B200 实测 tune 值，为 L20D 生成 <code>BLOCK_SIZE_M=16</code> 的 config（含 down TMA），严格 A/B 下：</p>
+<p>这项收益最大，但原理容易被一句「改个数字」带过去。核心是 <code>BLOCK_SIZE_M</code>——fused MoE kernel 在 token 维（M 维）的 tile 大小。把 64 改成 16，本质是<strong>让 tile 大小对齐 decode 阶段「每次前向 token 数很小」的现实</strong>，避免大 tile 的 padding 浪费和并行度不足。</p>
+
+<h4>BLOCK_SIZE_M 是什么</h4>
+<p>fused MoE 的专家层本质是一堆 GEMM：每个 token 对每个被选中的 expert 算一次 <code>[M,K] × [K,N]</code>。triton 把 GEMM 切成 tile 并行：</p>
+<table>
+<tr><th>参数</th><th>控制什么</th></tr>
+<tr><td><code>BLOCK_SIZE_M</code></td><td>M 维（token 维）每个 thread-block 处理多少<strong>行</strong></td></tr>
+<tr><td><code>BLOCK_SIZE_N</code></td><td>N 维（中间维）每个 block 多宽</td></tr>
+<tr><td><code>BLOCK_SIZE_K</code></td><td>K 维（输入维）每个 block 多深</td></tr>
+<tr><td><code>GROUP_SIZE_M</code> / <code>num_warps</code> / <code>num_stages</code></td><td>权重复用 / 并行度 / 流水线深度</td></tr>
+</table>
+<p>关键认知：这里的 <strong>M 不是「并发请求数」，也不是 <code>--max-running-requests</code>，而是 kernel 一次前向实际看到的 token 数</strong>。decode 阶段 M ≈ 并发请求数 × 每步 token（开 EAGLE 投机解码会再乘草稿 token 数）；prefill 阶段 M ≈ chunked prefill 大小，能到几千。</p>
+
+<h4>为什么会走到 64：config 缺失</h4>
+<p>sglang 按 <code>(E, N, device_name, dtype, block_shape)</code> 五元组查一个 config 文件，文件内部是按 M 分桶的 tile 参数表（18 个标准 key）。GLM-5.2 是 <code>E=257, N=256, device_name=NVIDIA_L20D, block_shape=[128,128]</code>，这个 shape 在 <code>triton_3_6_0/</code> 目录里<strong>没有对应 config 文件</strong>，kernel 回退到默认的 <code>BLOCK_SIZE_M=64</code>——那套默认值本质是为 prefill 大 M 场景调的。</p>
+
+<h4>为什么 64 在 decode 是错的</h4>
+<p>decode 的 M 很小（个位数到几十），大 tile 在这个区间有两个硬伤：</p>
+<ul>
+<li><strong>padding 浪费</strong>：M=9 时，一个 64 宽的 tile 只有 9 行是真数据，剩下 55 行全是 padding，<strong>约 86% 的算力在空转</strong>。</li>
+<li><strong>并行度不足</strong>：M 小 → tile 数 = <code>ceil(M/64)</code> 很少（M&lt;64 时每个 expert 只剩 1 个 tile）→ 喂不满 GPU 的 SM。</li>
+</ul>
+
+<h4>为什么 16 是对的</h4>
+<p>小 tile 的好处反过来：M=9 时 16 宽 tile 只浪费 7/16 ≈ 44%（远好于 86%）；M=512 时能切出 32 个 tile（vs 8 个），SM 负载更均衡、更能隐藏访存延迟。但<strong>tile 也不是越小越好</strong>——太小会降低访存合并和算术强度（每块权重复用变差）。所以最优解是「对齐 M 分布」：decode 小 M 用 16，prefill 大 M 用 64。这就是「tile 对齐」四个字的含义。</p>
+
+<h4>完整 fix 不止是改 BLOCK_SIZE_M</h4>
+<p>「64→16」只是标题写法，实际生成的是<strong>整份 config 文件</strong>：除 <code>BLOCK_SIZE_M=16</code> 外，还按 M 区间精细调优了 <code>N/K/GROUP_SIZE_M/num_warps/num_stages</code>，并给 down 投影开了 TMA（Tensor Memory Accelerator，Blackwell 的异步访存加速，down 投影是收益大头，内核级 ~16%）。数值借用同构 B200（E=256/N=256）的实测 tune 值，而非对 L20D 盲调。严格同 bs/seq_len 的 A/B 实测：</p>
 <table>
 <tr><th>batch size</th><th>baseline（BLOCK_M=64）</th><th>B200 精确（BLOCK_M=16）</th><th>改善</th></tr>
 <tr><td>bs = 9</td><td>67.6ms</td><td>60.8ms</td><td><strong>-10.1%</strong></td></tr>
@@ -222,7 +249,14 @@ final_hidden_states = final_hidden_states[..., :origin_hidden_states_dim].contig
 <blockquote>
 <p>📐 <strong>数据来源</strong>：<code>docs/agent/glm52-tpot-decode-optimization.md</code>，SPEC-TIMING verify 口径、同 bs/seq_len 严格 A/B、排除缓存混杂；2026-08-27 结案。</p>
 </blockquote>
-<p>一个值得注意的细节：config 的 18 个标准 key 里，<code>BLOCK_M=16</code> 覆盖了 1~512 的全部 decode 实际 M 值；decode 里 46.4% 的非标准 M（40/72/88/104）fallback 到邻近 key 后 BLOCK_M 仍为 16。也就是说<strong>主导的 tile 维度被 100% 覆盖</strong>，残留的只是 N/K 的 64↔128 小差异。</p>
+
+<h4>为什么敢上生产：M 覆盖验证</h4>
+<p>这是关键的「锁死」步骤，防止改了 tile 反而在别的 M 上负优化。config 有 18 个标准 M key（1,2,4,…,4096）：</p>
+<ul>
+<li><code>BLOCK_M=16</code> 覆盖 M=1~512，即 decode 的全部实际 M 范围；</li>
+<li>只有 M=1024~4096（prefill 大 batch）才用 <code>BLOCK_M=64</code>；</li>
+<li>decode 里 46.4% 的<strong>非标准 M</strong>（40/72/88/104）fallback 到最近的标准 key（32/64/96），而这些 key 恰好也都是 <code>BLOCK_M=16</code> → 主导 tile 维度 <strong>100% 覆盖</strong>，残留的只是 N/K 的 64↔128 小差异（B200 官方同样 fallback 处理）。</li>
+</ul>
 
 <h3>判定不做的方向（避免负优化）</h3>
 <table>
