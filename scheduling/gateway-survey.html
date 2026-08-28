@@ -461,7 +461,7 @@
     </tr>
     <tr>
       <td><b><a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing" target="_blank">llm-d</a></b><br><span class="muted">sticky-until-saturated · 工业</span> <a href="gateway-survey/llm-d-sticky.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>先粘后放</b>：命中前缀 → 粘住；<code>负载 &gt; 阈值 τ（τ = 峰值 prefill 吞吐 × TTFT 容忍上限）</code> 才释放，之后按瓶颈二选一：<br>· <b>prefill 吃紧</b>：<code>分数 = 在途未缓存 token + 本请求 prompt token × (1 − 命中率)</code><br>· <b>decode 吃紧</b>：选活跃请求数最少的实例</td>
+      <td><b>先粘后放</b>：命中前缀 → 粘住；<code>负载 &gt; 阈值 τ（τ = 峰值 prefill 吞吐 × TTFT 容忍上限）</code> 才释放，之后按瓶颈二选一：<br>· <b>prefill 吃紧</b>：<code>分数 = 在途未缓存 token + 本请求未缓存 token</code><br>· <b>decode 吃紧</b>：选活跃请求数最少的实例</td>
     </tr>
     <tr>
       <td><b><a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale / Ray Serve</a></b><br><span class="muted">KVAwareRouter · 工业</span> <a href="gateway-survey/anyscale-kvaware.html" target="_blank" class="detail-link">详解 →</a></td>
