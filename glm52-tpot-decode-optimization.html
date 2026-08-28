@@ -230,7 +230,8 @@ final_hidden_states = final_hidden_states[..., :origin_hidden_states_dim].contig
 <p>关键认知：这里的 <strong>M 不是「并发请求数」，也不是 <code>--max-running-requests</code>，而是 kernel 一次前向实际看到的 token 数</strong>。decode 阶段 M ≈ 并发请求数 × 每步 token（开 EAGLE 投机解码会再乘草稿 token 数）；prefill 阶段 M ≈ chunked prefill 大小，能到几千。</p>
 
 <h4>为什么会走到 64：config 缺失</h4>
-<p>sglang 按 <code>(E, N, device_name, dtype, block_shape)</code> 五元组查一个 config 文件，文件内部是按 M 分桶的 tile 参数表（18 个标准 key）。GLM-5.2 是 <code>E=257, N=256, device_name=NVIDIA_L20D, block_shape=[128,128]</code>，这个 shape 在 <code>triton_3_6_0/</code> 目录里<strong>没有对应 config 文件</strong>，kernel 回退到默认的 <code>BLOCK_SIZE_M=64</code>——那套默认值本质是为 prefill 大 M 场景调的。</p>
+<p>sglang 按 <code>(E, N, device_name, dtype, block_shape)</code> 五元组查一个 config 文件，文件内部是按 M 分桶的 tile 参数表（18 个标准 key）。GLM-5.2 是 <code>E=257, N=256, device_name=NVIDIA_L20D, block_shape=[128,128]</code>，这个 shape 在 <code>triton_3_6_0/</code> 目录里<strong>没有对应 config 文件</strong>，kernel 回退到默认的 <code>BLOCK_SIZE_M=64</code>。</p>
+<p>这里有个容易误解的点：<strong>config 不是运行时自动 tune 出来的</strong>。CUDA kernel 是 triton 运行时 JIT 编译的没错，但 <code>BLOCK_SIZE_M</code> 这些 tile 参数来自「静态 JSON 文件 + 硬编码默认值」——运行时只做 <code>os.path.exists</code> 文件查找，查不到就吃 <code>get_default_config()</code> 里<strong>写死的 64</strong>（block-wise fp8 量化分支固定 64、不随 M 自适应），没有任何测量或 autotune。真正的 tune 是离线 benchmark（<code>tuning_fused_moe_triton.py --tune</code>），要手动跑、手动落盘，没人跑过 E=257/N=256/L20D 这个 shape，所以没有 config、也不会被运行时自动发现。</p>
 
 <h4>为什么 64 在 decode 是错的</h4>
 <p>decode 的 M 很小（个位数到几十），大 tile 在这个区间有两个硬伤：</p>
