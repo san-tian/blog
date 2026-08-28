@@ -264,6 +264,21 @@ final_hidden_states = final_hidden_states[..., :origin_hidden_states_dim].contig
 <li>decode 里 46.4% 的<strong>非标准 M</strong>（40/72/88/104）fallback 到最近的标准 key（32/64/96），而这些 key 恰好也都是 <code>BLOCK_M=16</code> → 主导 tile 维度 <strong>100% 覆盖</strong>，残留的只是 N/K 的 64↔128 小差异（B200 官方同样 fallback 处理）。</li>
 </ul>
 
+<h4>为什么之前的 B200 tune 没发现这个问题</h4>
+<p>这不是「之前 tune 漏了」，而是<strong>两次不是同一台机器、同一个起点</strong>：</p>
+<ul>
+<li>之前 tune 的机器 GPU 型号是 <code>NVIDIA_B200</code>，仓库里早就有一份 <code>triton_3_5_1/E=257,N=256,device_name=NVIDIA_B200,...json</code>，里面小 M 已经全是 <code>BLOCK_SIZE_M=16</code>（1~512 用 16，1024+ 才用 64）。也就是说那台机器 decode 时<strong>已经在用 16</strong>——tile 旋钮本来就拧在正确位置，tune 只能转 N/K/stages/TMA 这些别的旋钮，自然碰不到「64 vs 16」。</li>
+<li>这次 decode 集群的 GPU 型号是 <code>NVIDIA_L20D</code>（被改过的名字），表里没有 L20D 条目，查表失败 → 掉到写死的默认值 <strong>64</strong>（且不区分 decode/prefill，一律 64）。</li>
+</ul>
+<table>
+<tr><th></th><th>之前（B200）</th><th>这次（L20D）</th></tr>
+<tr><td>GPU 型号</td><td><code>NVIDIA_B200</code></td><td><code>NVIDIA_L20D</code>（改名）</td></tr>
+<tr><td>config 表里有没有条目</td><td>✅ 有（triton_3_5_1）</td><td>❌ 没有</td></tr>
+<tr><td>decode 用的 tile</td><td>16（对）</td><td>64（错）</td></tr>
+<tr><td>tune 的结果</td><td>无收益（已是最优）</td><td>-8.8%（从错改对）</td></tr>
+</table>
+<p>所以这 -8.8% 不是「比之前更聪明的优化」，而是<strong>把 L20D 这台机器从错误值 64 拉回正确值 16</strong>——做法就是照着 B200 那份现成的表抄一份 L20D 条目。之前 tune 没发现是正常的：那台 B200 机器根本没有这个问题。</p>
+
 <h3>判定不做的方向（避免负优化）</h3>
 <table>
 <tr><th>方向</th><th>结论</th><th>原因</th></tr>
