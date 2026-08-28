@@ -465,7 +465,7 @@
     </tr>
     <tr>
       <td><b><a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale / Ray Serve</a></b><br><span class="muted">KVAwareRouter · 工业</span> <a href="gateway-survey/anyscale-kvaware.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>算总欠账</b>：<code>token 负载 = prefill 权重 × prefill 负载 + decode 负载</code>，选最小。<br><code>prefill 负载 = 未算完的 prefill − KV 重叠抵扣</code>；<code>decode 负载 = 活跃 decode 的 KV 块</code>。命中只抵扣、不决定，比的是<b>谁欠的活少</b>。</td>
+      <td><b>算总欠账</b>：<code>token 负载 = prefill 权重 × prefill 负载 + decode 负载</code>，选最小。<br><code>prefill 负载 = 在途未缓存 token + 本请求未缓存 token</code>；<code>decode 负载 = 活跃 decode 的 KV 块</code>。命中只抵扣、不决定，比的是<b>谁欠的活少</b>。</td>
     </tr>
     <tr>
       <td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b><br><span class="muted">arXiv · 学术</span> <a href="gateway-survey/lodestar.html" target="_blank" class="detail-link">详解 →</a></td>
