@@ -107,7 +107,7 @@
 </div>
 
 <h2>这个 commit 改了什么</h2>
-<p>整个 commit 共 <strong>5 个文件、+309 / -16 行</strong>：</p>
+<p>整个 commit 共 <strong>5 个文件、+309 / -16 行</strong>。注意：<strong>真正的代码改动只有两处</strong>（融合量化写回 kernel、no-op slice 跳过）；而 AllReduce 融合、tile 对齐这两项收益大头<strong>不在这个 commit 的 diff 里</strong>——它们是 config 文件 / 启动参数的改动，通过 rsync 部署、不进 git，本 commit 只是把它们<strong>记录在文档</strong>里：</p>
 <table>
 <tr><th>文件</th><th>改动</th><th>作用</th></tr>
 <tr><td><code>python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py</code></td><td><strong>新增 +192 行</strong></td><td>融合 DSA 量化 + paged 写回 triton kernel</td></tr>
@@ -204,8 +204,13 @@ final_hidden_states = final_hidden_states[..., :origin_hidden_states_dim].contig
     final_hidden_states = final_hidden_states[..., :origin_hidden_states_dim].contiguous()</code></pre>
 <p>那个无条件的 view + contiguous 会额外起一个 copy kernel（profile 里表现为 <code>unrolled/vectorized_elementwise</code>），数值上完全无影响，只是白跑一次拷贝。加一个 shape 判断就能省掉每个 MoE forward 的一次 kernel launch——它计入本次 -13.1% 的累计收益里。<span class="badge ok">✓ 源码确认</span></p>
 
-<h2>改动③：文档记录的两项配置层优化</h2>
-<p>真正拉开收益的两项，其实不在「写代码」而在「改配置」，它们记录在新增文档 <code>docs/agent/glm52-tpot-decode-optimization.md</code> 里。</p>
+<h2>改动③：文档记录的两项配置层优化（不在 commit 的代码里）</h2>
+<p>真正拉开收益的两项，<strong>并不在这个 commit 的 diff 里</strong>——它们既不是代码，也没有进 git：</p>
+<ul>
+<li><strong>AllReduce 融合</strong>是启动参数改动（去掉 <code>--enforce-disable-flashinfer-allreduce-fusion</code>）；</li>
+<li><strong>tile 对齐</strong>是 MoE config 文件改动（<code>configs/triton_3_6_0/E=257,N=256,device_name=NVIDIA_L20D,...json</code>），通过 rsync 部署到集群、不进仓库——在该 commit 的 git 树里这份 config 直接 404。</li>
+</ul>
+<p>这个 commit 只是把这两项连同方法论一起<strong>写进了文档</strong> <code>docs/agent/glm52-tpot-decode-optimization.md</code>。所以严格说：<strong>本 commit 的代码只贡献了「融合量化写回 kernel + no-op slice 跳过」两个算子级优化；-13.1% 的大头（AllReduce 融合 + tile 对齐）是配置层优化，只是被这份 commit 的文档记录了下来。</strong></p>
 
 <h3>AllReduce 融合（-4.6~5.5%）</h3>
 <p>GLM-5.2 的 <code>GlmMoeDsaForCausalLM</code> 在 SM100（Blackwell）支持列表内，去掉 <code>--enforce-disable-flashinfer-allreduce-fusion</code> 后，TP 的 AllReduce 能融进 mnnvl attention kernel，省掉单独的通信-计算切换。同 bs/seq_len 的 A/B 下，decode verify 中位数下降 4.6%~5.5%。</p>
