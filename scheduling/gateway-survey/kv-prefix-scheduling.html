@@ -185,13 +185,13 @@ k = ∞  → 退化为 LPM（纯复用）</pre>
   <div class="callout core">
     <b>三篇殊途同归</b>：它们都在解「<b>如何同时均衡 cache hit 和负载</b>」这同一个问题，只是层次和手法不同。这条线补上了全景调研页「组合范式」表里的理论底座——<b>k-LPM 用 NP-hard 证明了这个权衡本身是难的（不是工程技巧），LMetric 和 Preble 分别给出启发式和系统化的解</b>。
   </div>
-  <p>对「细粒度负载路由设计」的意义：k-LPM 的「复用 vs 公平」张力，在实例间路由同样成立——把请求全路由到"KV 命中最多的实例"就是实例间版的 LPM，会饿死"前缀不匹配的实例"（造成负载不均）。这正是 <a href="routing-design.html" target="_blank">细粒度路由设计页</a> 里「瓶颈向量」要解决的问题之一。</p>
+  <p>对「细粒度负载路由设计」的意义：k-LPM 的「复用 vs 公平」张力，在实例间路由同样成立——把请求全路由到"KV 命中最多的实例"就是实例间版的 LPM，会饿死"前缀不匹配的实例"（造成负载不均）。这正是 <a href="../routing-design.html" target="_blank">细粒度路由设计页</a> 里「瓶颈向量」要解决的问题之一。</p>
 </section>
 
 <div class="foot">
   <a href="../gateway-survey.html">← 返回全景调研</a>
   <a href="lmetric.html">LMetric 详解</a>
-  <a href="routing-design.html">细粒度路由设计</a>
+  <a href="../routing-design.html">细粒度路由设计</a>
 </div>
 
 </div>
