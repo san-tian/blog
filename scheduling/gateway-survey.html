@@ -454,26 +454,22 @@
   <h3>第二部分：路由方式调研</h3>
   <p class="muted" style="margin-top:0">四个方法回答的是同一个问题：<b>「这个新请求，该发给哪个实例？」</b>。它们的分歧只有一处——<b>怎么判断一个实例「忙不忙」，以及怎么把「命中缓存能省多少」和「实例多忙」合成一个决定</b>。四种答案，从手写到学习：</p>
   <table>
-    <tr><th>方案</th><th>怎么决定（人话）</th><th>一句话本质</th></tr>
+    <tr><th>方案</th><th>怎么决定（公式 + 一句话）</th></tr>
     <tr>
       <td><b><a href="https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf" target="_blank">LMetric</a></b><br><span class="muted">OSDI 26 · 学术</span> <a href="gateway-survey/lmetric.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>乘法路由</b>：给每个实例算「命中缓存能省的活儿 × 现在多忙」的乘积，<b>谁小发给谁</b>。命中越多乘积越小、越忙乘积越大，两项自动平衡，<b>不需要人调权重</b>。</td>
-      <td>命中缓存 = 活儿变少 = 更划算</td>
+      <td><b>乘法路由</b>：<code>score = 需新算的 prefill token × batch size</code>，选最小。<br>命中缓存 → 需新算的 token 少；实例忙 → batch 大。两者相乘自动平衡，<b>零调参</b>。</td>
     </tr>
     <tr>
       <td><b><a href="https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing" target="_blank">llm-d</a></b><br><span class="muted">sticky-until-saturated · 工业</span> <a href="gateway-survey/llm-d-sticky.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>先粘后放</b>：请求<b>优先发给缓存了它前缀的实例</b>（省 prefill）；等那个实例忙到超过一个校准阈值 τ，就<b>改按负载选</b>——prefill 吃紧看「还有多少 token 没算」，decode 吃紧看「还有多少请求在跑」。</td>
-      <td>缓存亲和优先，忙过头才让位给负载</td>
+      <td><b>先粘后放</b>：命中前缀 → 粘住；<code>负载 &gt; τ = R_peak × T_max</code> 才释放。<br>默认发缓存了前缀的实例；超阈值后按<b>瓶颈匹配</b>选——prefill 吃紧看「在途未缓存 token」，decode 吃紧看「活跃请求数」。</td>
     </tr>
     <tr>
       <td><b><a href="https://www.anyscale.com/blog/llm-kv-token-aware-routing" target="_blank">Anyscale / Ray Serve</a></b><br><span class="muted">KVAwareRouter · 工业</span> <a href="gateway-survey/anyscale-kvaware.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>算总欠账</b>：给每个实例算一笔「还欠多少活」——<b>没算完的 prefill token ＋ 正在 decode 占着的 KV 内存</b>，加权合成一个数，发给<b>欠账最少</b>的。命中缓存只是从这笔欠账里「抵扣」掉一部分。</td>
-      <td>命中是打折券，真正比的是谁欠的活少</td>
+      <td><b>算总欠账</b>：<code>token_load = PREFILL_LOAD_SCALE × prefill_load + decode_load</code>，选最小。<br><code>prefill_load = 未算完的 prefill − KV 重叠抵扣</code>；<code>decode_load = 活跃 decode 的 KV 块</code>。命中只抵扣、不决定，比的是<b>谁欠的活少</b>。</td>
     </tr>
     <tr>
       <td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b><br><span class="muted">arXiv · 学术</span> <a href="gateway-survey/lodestar.html" target="_blank" class="detail-link">详解 →</a></td>
-      <td><b>让模型学</b>：不手写公式，训练一个小模型（MLP）<b>直接预测「发给它，首 token 要等多久」</b>，选等得最短的。输入还是那几样（命中率、prefill/decode token 数），但「怎么组合」交给模型从线上数据里学。</td>
-      <td>不写规则，让模型学出该发谁</td>
+      <td><b>让模型学</b>：MLP 在线训练，<code>选 argmax(−TTFT 预测值)</code>。<br>特征 = KV 命中率 + prefill/decode token 数（分开保留）。不手写公式，模型从线上反馈学「该发谁」。</td>
     </tr>
   </table>
   <p class="muted">共同的结论只有一句：<b>命中缓存只是「估计负载」的输入，不是路由的目标；目标始终是「把活分匀」</b>。前三种是手写规则，区别只在把「命中」和「负载」捏合的方式（乘法 / 阈值 / 加权求和）；Lodestar 干脆不捏合，交给模型学。递进看，Anyscale 已经比 llm-d 更进一步——把 prefill 和 decode 合成一个总分数，而不是「二选一」；但这个总分数仍是一个<b>标量</b>，prefill 和 decode 两个维度的「饱和程度」被压成了一个数。把它拆成两个维度、各自建模的设计见 <a href="routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>。</p>
