@@ -449,7 +449,7 @@
   </div>
 
   <h3>第二部分：路由方式调研</h3>
-  <p class="muted" style="margin-top:0">学术的 LMetric、工业的 llm-d 与 Anyscale，代表三种把「KV 命中」和「token 负载」捏合的方式——先记住这三个，就抓住了本篇主线：</p>
+  <p class="muted" style="margin-top:0">学术的 LMetric、工业的 llm-d 与 Anyscale，代表三种「手工」把 KV 命中与 token 负载捏合的方式；Lodestar 是第四种——不手工捏合、交给在线学习。先记住这四个，就抓住了本篇主线：</p>
   <table>
     <tr><th>方案</th><th>路由方式（一句话）</th><th>KV 与负载的关系</th></tr>
     <tr>
@@ -467,8 +467,13 @@
       <td><b>统一 token-load 打分</b>：订阅引擎 KV 块级事件构建全局 radix tree（复用 Dynamo KV indexer），用 overlap 估计「能省多少 prefill」、折算成剩余 prefill 负载，加上活跃 decode 请求的 KV 足迹，<b>合成单一 token load 指标</b>加权打分选实例；按请求生命周期（admitted → first token → decode → 完成）持续更新负载。</td>
       <td>KV overlap 是「负载估计的代理」，不是路由目标本身（博客原文）</td>
     </tr>
+    <tr>
+      <td><b><a href="https://arxiv.org/abs/2606.00946" target="_blank">Lodestar</a></b><br><span class="muted">arXiv · 学术</span> <a href="gateway-survey/lodestar.html" target="_blank" class="detail-link">详解 →</a></td>
+      <td><b>学习式路由</b>：MLP 预测「负 TTFT」（−TTFT，越短越好）选最大的实例；特征含 KV 命中率 + inflight prefill/decode token（分开保留）等，参数跨实例共享；用候选池 + 部署池（two-pool）<b>在线训练</b>，吃真实请求反馈应对分布漂移。</td>
+      <td>不显式规定 KV 与负载怎么捏合——交给模型从在线反馈里学</td>
+    </tr>
   </table>
-  <p class="muted">三种方式的共同落点：<b>KV 命中都只是负载估计的输入，路由目标都是 token 负载均衡</b>。注意递进关系——Anyscale 已把 prefill/decode 合成单一标量 token load，比 llm-d 的「瓶颈二选一」更进一步，但仍是标量、丢了两维度各自的饱和度；把它升级为瓶颈向量的设计见 <a href="routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>。</p>
+  <p class="muted">四种方式的共同落点：<b>KV 命中都只是负载估计的输入，路由目标都是 token 负载均衡</b>。前三种是启发式，区别在捏合公式（乘法 / 阈值 / 统一打分）；Lodestar 是学习式——不显式写公式，而是学一个 −TTFT 预测器，代价是需在线训练、部署重（单实例无 HA）。注意递进关系——Anyscale 已把 prefill/decode 合成单一标量 token load，比 llm-d 的「瓶颈二选一」更进一步，但仍是标量、丢了两维度各自的饱和度；把它升级为瓶颈向量的设计见 <a href="routing-design.html" target="_blank" class="detail-link">细粒度负载路由设计 →</a>。</p>
 
   <h3>开放问题：现有工作的公共边界（下一步设计的入口）</h3>
   <ul>
