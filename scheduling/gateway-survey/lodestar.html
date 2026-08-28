@@ -5,19 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lodestar 功能实现讲解</title>
 <style>
-  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  :root { --bg:#fafbfe; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#002bff; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
   * { box-sizing:border-box; margin:0; padding:0; }
   body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
   .wrap { max-width:880px; margin:0 auto; }
-  header { background:#0f172a; border-bottom:3px solid #6366f1; color:#fff; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
+  header { background:linear-gradient(180deg,#f4f7ff,#ffffff); border:1px solid #dbe4f6; border-top:3px solid #002bff; color:#0f172a; border-radius:14px; padding:24px 28px; margin-bottom:20px; }
   header h1 { font-size:22px; margin-bottom:8px; }
-  header p { color:#cbd5e1; font-size:14px; }
-  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  header p { color:#64748b; font-size:14px; }
+  section { background:var(--card); border-radius:14px; padding:20px 24px; margin-bottom:16px; border:1px solid #e8eef8; }
   h2 { font-size:17px; margin-bottom:12px; padding-left:10px; border-left:4px solid var(--ind); }
   p { font-size:14.5px; margin-bottom:10px; }
   ul { padding-left:20px; margin:8px 0; }
   li { font-size:14px; margin-bottom:5px; }
-  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  code { background:#eef3fb; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
   .src { display:block; color:var(--muted); font-size:12.5px; margin-top:4px; }
   .src a { color:var(--muted); }
   .tag { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11px; font-weight:700; margin-right:4px; }

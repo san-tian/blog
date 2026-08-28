@@ -5,15 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>k-LPM 论文讲解：前缀复用 + 延迟约束下的 LLM 查询调度</title>
 <style>
-  :root { --bg:#f5f6f8; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#0066ff; --aca:#8b20be; --core:#ea580c; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
+  :root { --bg:#fafbfe; --card:#fff; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --ind:#002bff; --aca:#8b20be; --core:#ea580c; --ok:#16a34a; --no:#dc2626; --part:#d97706; }
   * { box-sizing:border-box; margin:0; padding:0; }
   body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--ink); line-height:1.75; padding:24px 16px 60px; }
   .wrap { max-width:900px; margin:0 auto; }
-  header { background:#0f172a; border-bottom:3px solid #6366f1; color:#fff; border-radius:14px; padding:26px 28px; margin-bottom:22px; }
+  header { background:linear-gradient(180deg,#f4f7ff,#ffffff); border:1px solid #dbe4f6; border-top:3px solid #002bff; color:#0f172a; border-radius:14px; padding:26px 28px; margin-bottom:22px; }
   header h1 { font-size:22px; margin-bottom:10px; line-height:1.4; }
-  header p { color:#cbd5e1; font-size:14px; }
+  header p { color:#64748b; font-size:14px; }
   .badge { display:inline-block; background:rgba(255,255,255,.16); border-radius:20px; padding:2px 12px; font-size:12px; margin-right:6px; margin-bottom:4px; }
-  section { background:var(--card); border-radius:14px; padding:22px 26px; margin-bottom:18px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  section { background:var(--card); border-radius:14px; padding:22px 26px; margin-bottom:18px; border:1px solid #e8eef8; }
   h2 { font-size:19px; margin-bottom:14px; padding-left:10px; border-left:4px solid var(--ind); }
   h2.core { border-left-color:var(--core); }
   h2.aca { border-left-color:var(--aca); }
@@ -21,11 +21,11 @@
   p { margin-bottom:10px; font-size:14.5px; }
   ul { padding-left:20px; margin:8px 0; }
   li { font-size:14px; margin-bottom:5px; }
-  code { background:#eef2f7; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
+  code { background:#eef3fb; padding:1px 6px; border-radius:5px; font-family:"SF Mono",Consolas,monospace; font-size:13px; color:#0f172a; }
   pre { background:#1e293b; color:#e2e8f0; border-radius:10px; padding:14px 16px; overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:13px; margin:10px 0; line-height:1.6; }
   table { width:100%; border-collapse:collapse; font-size:13.5px; margin:10px 0; }
   th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
-  th { background:#f1f5f9; }
+  th { background:#f5f8fd; }
   .callout { border-radius:10px; padding:14px 16px; margin:12px 0; font-size:14px; }
   .callout.tip { background:#eff6ff; border:1px solid #93c5fd; }
   .callout.core { background:#fff7ed; border:1px solid #fdba74; }

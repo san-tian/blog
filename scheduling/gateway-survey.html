@@ -6,9 +6,9 @@
 <title>LLM 推理「调度 & 负载感知」路由调研（开源工业项目 + CCF-A 学术论文）</title>
 <style>
   :root {
-    --bg: #f5f6f8;
+    --bg: #fafbfe;
     --card: #ffffff;
-    --ind: #0066ff;      /* 工业项目 蓝 */
+    --ind: #002bff;      /* 工业项目 蓝 */
     --aca: #8b20be;      /* 学术论文 紫 */
     --core: #ea580c;     /* 核心方向 橙 */
     --ink: #1e293b;
@@ -23,16 +23,16 @@
   }
   .wrap { max-width: 960px; margin: 0 auto; }
   header {
-    background:#0f172a; border-bottom:3px solid #6366f1;
-    color: #fff; border-radius: 14px; padding: 28px 28px 24px; margin-bottom: 22px;
+    background: linear-gradient(180deg, #f4f7ff, #ffffff); border: 1px solid #dbe4f6; border-top: 3px solid #002bff;
+    color: #0f172a; border-radius: 14px; padding: 28px 28px 24px; margin-bottom: 22px;
   }
   header h1 { font-size: 24px; margin-bottom: 10px; line-height: 1.4; }
-  header p { color:#cbd5e1; font-size: 14px; }
-  .badge { display: inline-block; background: rgba(255,255,255,.16); border-radius: 20px;
+  header p { color:#64748b; font-size: 14px; }
+  .badge { display: inline-block; background:#dae3ff; color:#0030c9; border-radius: 20px;
     padding: 2px 12px; font-size: 12px; margin-right: 6px; margin-bottom: 4px; }
   section {
     background: var(--card); border-radius: 14px; padding: 22px 24px; margin-bottom: 18px;
-    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    border: 1px solid #e8eef8;
   }
   h2 { font-size: 19px; margin-bottom: 14px; padding-left: 10px; border-left: 4px solid var(--ind); }
   h2.aca { border-left-color: var(--aca); }
@@ -69,9 +69,9 @@
   .unk { color: #94a3b8; text-align: center; white-space: nowrap; }
   .yes { color: #16a34a; font-weight: 700; }
   .q { color: #94a3b8; font-weight: 700; }
-  .detail-link { display: inline-block; margin-left: 6px; padding: 1px 9px; border: 1px solid #0066ff; border-radius: 4px; color: #0066ff; font-size: 11px; font-weight: 600; text-decoration: none; white-space: nowrap; }
-  .detail-link:hover { background: #0066ff; color: #fff; }
-  a { color: #0066ff; text-decoration: none; }
+  .detail-link { display: inline-block; margin-left: 6px; padding: 1px 9px; border: 1px solid #002bff; border-radius: 4px; color: #002bff; font-size: 11px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+  .detail-link:hover { background: #002bff; color: #fff; }
+  a { color: #002bff; text-decoration: none; }
   a:hover { text-decoration: underline; }
 </style>
 </head>
