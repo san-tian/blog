@@ -22,7 +22,7 @@
   .progress { position: fixed; top: 0; left: 0; height: 3px; background: var(--accent); width: 0; transition: width .3s; z-index: 20; }
   .deck { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 56px 20px 90px; }
   .slide { display: none; width: 100%; }
-  .slide.active { display: flex; animation: fadeUp .35s ease; }
+  .slide.active { display: flex; justify-content: center; animation: fadeUp .35s ease; }
   @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
   .inner {
     width: min(980px, 100%); background: var(--card); border: 1px solid var(--border);
