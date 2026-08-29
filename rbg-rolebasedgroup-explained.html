@@ -69,6 +69,8 @@
   .nav { position: fixed; bottom: 18px; right: 22px; display: flex; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 7px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.10); z-index: 20; }
   .nav button { border: 1px solid var(--border); background: var(--card-2); color: var(--text); border-radius: 999px; width: 34px; height: 34px; font-size: 16px; cursor: pointer; }
   .nav button:hover { background: var(--inline-code-bg); }
+  .nav a.navhome { border: 1px solid var(--border); background: var(--card-2); color: var(--text-dim); border-radius: 999px; padding: 6px 13px; font-size: 13px; }
+  .nav a.navhome:hover { background: var(--inline-code-bg); color: var(--accent); text-decoration: none; }
   .counter { font-size: 13px; color: var(--text-dim); min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
   .hint { position: fixed; bottom: 26px; left: 26px; font-size: 12px; color: #b8b3ad; z-index: 20; }
   @media (max-width: 760px) {
@@ -122,7 +124,7 @@
     <span class="chip">📚 文档：<a href="https://rolebasedgroup.github.io">rolebasedgroup.github.io</a></span>
     <span class="chip">📄 详细版：<code>rbg-rolebasedgroup-explained.md</code></span>
   </div>
-  <div class="footnote">源码锚定 commit <a href="https://github.com/sgl-project/rbg/commit/4acd5a791e9709f34c4bd5da569e6427896d21a5">4acd5a7</a>（2026-08-29）；全部结论来自该 commit 静态阅读 + 官方文档，未上机部署。←/→ 翻页</div>
+  <div class="footnote">源码锚定 commit <a href="https://github.com/sgl-project/rbg/commit/4acd5a791e9709f34c4bd5da569e6427896d21a5">4acd5a7</a>（2026-08-29）；全部结论来自该 commit 静态阅读 + 官方文档，未上机部署。←/→ 翻页 · 右下角「目录」随时返回 · <a href="index.html">返回目录页</a></div>
 </div>
 </section>
 
@@ -617,6 +619,7 @@ spec:
 </div>
 
 <div class="nav">
+  <a href="index.html" class="navhome" title="返回目录页">目录</a>
   <button id="prev" aria-label="上一页">←</button>
   <span class="counter" id="counter">1 / 14</span>
   <button id="next" aria-label="下一页">→</button>
