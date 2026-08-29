@@ -34,5 +34,13 @@
 | CP（上下文并行） | prefill 按序列长度切块分到多卡（与 DCP 的 decode 侧对应） | why-prefill-cp-breaks-standalone-decode.md |
 | AllReduce 融合 | TP 通信的 allreduce + residual + RMSNorm 融合为一次 kernel | glm52-tpot-decode-optimization.html |
 | flashinfer 三件套 | flashinfer-python / cubin / jit-cache 必须同版本 | sglang-flashinfer-fusion-error-investigation.md |
+| **Kubernetes（K8s）** | 容器编排系统：把「哪些程序跑几份、各用多少资源」声明成 YAML，集群持续拉起维持 | rbg-rolebasedgroup-explained.html（P2 术语卡） |
+| **Operator / CRD** | 用自定义控制器扩展 K8s 的模式 / 往 K8s 注册新对象类型的机制 | rbg-rolebasedgroup-explained.html（P2 术语卡） |
+| **TP（张量并行）** | 一个模型多卡协同计算；1 leader + N worker 组成一个推理实例 | rbg-rolebasedgroup-explained.html（P2；leader-worker 模式 P7） |
+| **headless Service** | 不分配虚拟 IP 的 Service，DNS 直达每个 pod，pod 名稳定可寻址 | rbg-rolebasedgroup-explained.html（P8 服务发现） |
+| **gang 调度** | 一组 pod 要么全部调度成功要么全不调度，避免多卡只上一半 | rbg-rolebasedgroup-explained.html（P12） |
+| **原地更新（in-place update）** | 改镜像只重启容器不重建 pod，名字/IP/节点/GPU 绑定不变 | rbg-rolebasedgroup-explained.html（P11） |
+| **RBG 对象层级（角色/实例/组件）** | RoleBasedGroup→Role→RoleInstanceSet→RoleInstance→Pod 四层；角色=服务成员、实例=角色一副本（可能一组 pod）、组件=实例内单个 pod | rbg-rolebasedgroup-explained.html（P14） |
+| **CoordinatedPolicy / maxSkew** | RBG 跨角色协同 CRD：滚动更新/扩缩的进度差钳制 | rbg-rolebasedgroup-explained.html（P10） |
 
 > 维护约定：出处列到文章 + 章节/页；同一个术语被多篇文章解释时，登记「首次详细解释」的那篇；粗体行 = 近期新登记。

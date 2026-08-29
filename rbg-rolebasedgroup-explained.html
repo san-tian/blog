@@ -131,16 +131,14 @@
   <div class="grid2">
     <div class="mini"><b>Kubernetes（K8s）</b>容器编排系统：把「哪些程序跑几份、各用多少资源」声明成 YAML，集群负责持续拉起和维持</div>
     <div class="mini"><b>Operator / CRD</b>Operator 是用自定义控制器扩展 K8s 的模式；CRD（自定义资源定义）是注册新对象类型的机制——RBG 就是装进 K8s 的一套新对象 + 控制器</div>
-    <div class="mini"><b>prefill（预填充）</b>推理第一步：把整个 prompt 一次性算完、产出 KV cache——决定首字延迟（TTFT）</div>
-    <div class="mini"><b>decode（解码）</b>推理第二步：拿着 prefill 结果逐个 token 生成——决定吐字速度</div>
-    <div class="mini"><b>PD 分离</b>把 prefill 和 decode 拆成两个独立角色分别部署、分别扩缩，互不抢算力；RBG 的头号场景</div>
+    <div class="mini"><b>prefill / decode / PD 分离</b>术语索引已登记（首次详解见 <a href="pd-decode-kvcache-offload.md">pd-decode-kvcache-offload.md</a>），本篇直接使用；部署编排视角的展开见第 4 页</div>
     <div class="mini"><b>TP（张量并行）</b>一个大模型由多张 GPU 协同计算；1 个 leader + N 个 worker 组成一个推理实例</div>
     <div class="mini"><b>headless Service</b>不分配虚拟 IP 的 K8s Service：DNS 直接解析到每个 pod，pod 名稳定、可直接按名寻址</div>
     <div class="mini"><b>gang 调度</b>一组 pod「要么全部调度成功，要么全部不调度」，避免 8 卡只上 7 卡白占资源</div>
     <div class="mini"><b>原地更新</b>改镜像只重启容器、不重建 pod——名字 / IP / 节点 / GPU 绑定都不变</div>
     <div class="mini warn"><b>名词约定（全文统一）</b>「角色」= 服务成员（router / prefill / decode）；「实例」= 角色的一副本（可能是一组 pod）；「组件」= 实例内的单个 pod（leader / worker）</div>
   </div>
-  <div class="footnote">定义依据：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/quick_start.md">doc/quick_start.md</a>（PD 概念与聚合/分离部署）· <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/README.md">README</a>（角色/实例定义）</div>
+  <div class="footnote">术语遵循 <a href="glossary.md">glossary.md</a> 跨文章复用：讲过的引用不重复解释，本页新讲的（K8s / Operator / TP / headless Service / gang / 原地更新）发布后登记；PD 概念图解：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/quick_start.md">doc/quick_start.md</a> · <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/README.md">README</a>（角色/实例定义）</div>
 </div>
 </section>
 

@@ -6,7 +6,7 @@
 >
 > 📌 讲解对象：[sgl-project/rbg](https://github.com/sgl-project/rbg) @ commit [`4acd5a7`](https://github.com/sgl-project/rbg/commit/4acd5a791e9709f34c4bd5da569e6427896d21a5)（2026-08-29，v0.7.0 已发布）。文中所有源码引用都锚定该 SHA。官方文档站：[rolebasedgroup.github.io](https://rolebasedgroup.github.io)。
 
-**术语约定（全文统一）**：Kubernetes（K8s）是容器编排系统——把「哪些程序跑几份、各用多少资源」声明成 YAML，集群负责持续拉起和维持；Operator 是用自定义控制器扩展 K8s 的模式，CRD 是往 K8s 注册新对象类型的机制；prefill（预填充）是推理第一步，把整个 prompt 一次算完、产出 KV cache，决定首字延迟；decode（解码）是第二步，逐 token 生成，决定吐字速度；PD 分离即把两者拆成独立角色分别部署、分别扩缩；TP（张量并行）指一个大模型由多张 GPU 协同计算，1 leader + N worker 组成一个推理实例；headless Service 指不分配虚拟 IP 的 Service，DNS 直接解析到每个 pod；gang 调度指一组 pod 要么全部调度成功、要么全部不调度。行文用「角色」（服务的成员）、「实例」（角色的一副本，可能是一组 pod）、「组件」（实例内的单个 pod）。
+**术语约定（全文统一）**：prefill / decode / PD 分离已登记进术语索引（首次详解见 [pd-decode-kvcache-offload.md](pd-decode-kvcache-offload.md)），本文按部署编排视角直接使用；TP（张量并行）指一个大模型由多张 GPU 协同计算，1 leader + N worker 组成一个推理实例；headless Service 指不分配虚拟 IP 的 Service，DNS 直接解析到每个 pod；gang 调度指一组 pod 要么全部调度成功、要么全部不调度。行文用「角色」（服务的成员）、「实例」（角色的一副本，可能是一组 pod）、「组件」（实例内的单个 pod）。新讲术语发布后登记进 [glossary.md](glossary.md)。
 
 ---
 
