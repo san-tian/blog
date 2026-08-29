@@ -514,7 +514,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 13 复盘 dcp=8 ============ -->
+<!-- ============ 13 现象核对 1/2：时间与范围 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -524,38 +524,42 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <span class="step done">③ 全库契约</span><span class="sep">→</span>
     <span class="step done">④ 根因</span><span class="sep">→</span>
     <span class="step done">⑤ 定位</span><span class="sep">→</span>
-    <span class="step cur">复盘 · dcp=8</span>
+    <span class="step cur">现象核对</span>
   </div>
-  <div class="kicker" style="margin-top:2px;">复盘 · 线索 3 的解释</div>
-  <h2>那为什么 dcp=8 没复现？<span class="dim">最可能：跑的不是这份代码</span></h2>
-  <div class="fig">
-    <svg viewBox="0 0 880 235" xmlns="http://www.w3.org/2000/svg">
-      <line x1="40" y1="195" x2="840" y2="195" stroke="#cbd5e1" stroke-width="2"/>
-      <text x="440" y="222" font-size="12.5" fill="#78716c" text-anchor="middle">累计分配 token 数（服务运行时间 →）</text>
-      <line x1="520" y1="40" x2="520" y2="195" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 4"/>
-      <text x="520" y="30" font-size="13" fill="#dc2626" text-anchor="middle" font-weight="700">size（越界拐点，与 dcp 无关）</text>
-      <text x="606" y="58" font-size="11.5" fill="#dc2626">越界区 →</text>
-      <line x1="60" y1="95" x2="520" y2="95" stroke="#059669" stroke-width="4"/>
-      <line x1="520" y1="95" x2="740" y2="95" stroke="#dc2626" stroke-width="4"/>
-      <circle cx="740" cy="95" r="8" fill="#dc2626"/>
-      <text x="66" y="82" font-size="13.5" fill="#1c1917" font-weight="700">dcp=4 实验</text>
-      <text x="756" y="100" font-size="12.5" fill="#dc2626">跑到拐点后 → 乱码（已观测）</text>
-      <line x1="60" y1="150" x2="400" y2="150" stroke="#059669" stroke-width="4"/>
-      <circle cx="400" cy="150" r="8" fill="#d97706"/>
-      <text x="66" y="137" font-size="13.5" fill="#1c1917" font-weight="700">dcp=8 实验</text>
-      <text x="416" y="155" font-size="12.5" fill="#d97706">停在拐点前 → 未复现（推断）</text>
-    </svg>
+  <div class="kicker" style="margin-top:2px;">现象核对 1/2 · 时间与范围</div>
+  <h2>三个现象，都指向同一个原因</h2>
+  <div class="grid3">
+    <div class="mini"><b>现象① 开头正常</b>越界写不是一开始就有：v&lt;size 时错位写仍在池内，读写用同一套编号（原始 v）时暂时自洽 → 早期输出正常</div>
+    <div class="mini warn"><b>现象② 几小时后才出问题</b>越界写要等累计分配越过 size（池填到约 1/dcp），大池高负载下几小时才过线 → 拐点前一直正常</div>
+    <div class="mini warn"><b>现象③ 不是所有请求都出问题</b>越界写踩的是相邻内存里恰好在那的请求数据；只有高位虚拟 id（v≥size）的请求、或数据被踩掉的请求才乱码 → 零星而非全体</div>
   </div>
-  <ul class="pts">
-    <li><b>最可能（代码证据）</b>：写侧 bug 对 dcp=4/8 完全对称，都该炸——所以 dcp=8 未复现更可能是<b>那组实验跑的不是这份代码</b>：生产分支（b300-glm52）没有 fused kernel（走旧 DCP-aware 两步路径）且读侧 DCP 换算齐全（dsa_indexer 有 _localize_index_k_cache_locs）；新分支只有 fused kernel、读侧无换算</li>
-    <li><b>次要可能</b>：若两份实验确实是同一份代码、只有 dcp 值不同，则是 dcp=8 那组没跑到越界水位（阈值 = 累计分配 &gt; size，与 dcp 无关）</li>
-    <li>数学上只有 dcp=1 正确：<code>v//1 == v</code>，虚拟域与物理域重合</li>
-  </ul>
-  <div class="footnote">⚠ 需你确认 dcp=8 是在哪套环境/分支跑的：生产分支（未 deploy 本 commit）还是同一份代码。写侧 bug 是 commit 引入（diff 铁证），与 dcp=8 的观测无关。</div>
+  <div class="footnote">三个现象都由「越界写 + 水位拐点」一个原因解释，无需引入第二种原因。「逻辑错误」会全体立刻崩，与「几小时 + 零星」不符——这反过来说明是越界写。</div>
 </div>
 </section>
 
-<!-- ============ 14 修复 ============ -->
+<!-- ============ 14 现象核对 2/2：控制变量 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step done">④ 根因</span><span class="sep">→</span>
+    <span class="step done">⑤ 定位</span><span class="sep">→</span>
+    <span class="step cur">现象核对</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">现象核对 2/2 · 控制变量</div>
+  <h2>删掉就好、dcp=8 没炸：也都符合</h2>
+  <div class="grid2">
+    <div class="mini ok"><b>现象④ 删掉优化就好了</b>回退旧两步路径（quantize_k_cache_separate + set_mla_kv_buffer_triton），DCP 换算（loc % dcp == rank + loc // dcp）恢复 → 写对行号 → 正常。这是「变量隔离」的正面证据</div>
+    <div class="mini warn"><b>现象⑤ dcp=8 没炸</b>越界阈值与 dcp 值无关（都是累计分配 &gt; size），dcp=8 不免疫；更可能只是那组没跑够时间到水位、或跑的不是这份代码（生产分支无 fused kernel）</div>
+  </div>
+  <div class="footnote">五个现象全部由「写侧丢失 DCP 换算」这一个根因解释，无一构成反例——这些现象不削弱现有证据，反而互相印证。</div>
+</div>
+</section>
+
+<!-- ============ 15 修复 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">修复 · 把旧 kernel 的两行映射补回来</div>
@@ -579,7 +583,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 15 证据索引 ============ -->
+<!-- ============ 16 证据索引 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">证据索引 · 每条结论的源码出处（点击直达 GitHub）</div>
@@ -605,7 +609,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 16 总结 ============ -->
+<!-- ============ 17 总结 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">总结 · 三句话</div>
@@ -632,7 +636,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 
 <div class="nav">
   <button id="prev" aria-label="上一页">←</button>
-  <span class="counter" id="counter">1 / 16</span>
+  <span class="counter" id="counter">1 / 17</span>
   <button id="next" aria-label="下一页">→</button>
 </div>
 <div class="hint">← / → 翻页</div>
