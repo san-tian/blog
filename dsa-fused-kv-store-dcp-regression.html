@@ -104,6 +104,7 @@
   <div class="kicker">排查报告 · 源码静态核对 · 无上机实验</div>
   <h2>indexer KV share（DSA 融合写 kernel）<br>为什么「只能兼容 dcp=8」？</h2>
   <p style="font-size:17px; margin: 6px 0 4px;">结论一句话：<b>新 kernel 丢掉了 DCP 的「虚拟 id → 物理行」映射，把虚拟 id 当物理行号直接写</b>——先错位、后越界。它对任何 dcp&gt;1 都不正确，dcp=8 的「正常」只是没跑到越界拐点。</p>
+  <p style="font-size:14px; color:var(--text-dim); margin-top:12px;">术语约定：本文假设读者没有本领域背景，但使用标准专业术语——每个术语首次出现都给直接定义（下一页统一定义 KV cache / indexer / DCP / kernel），全文名词统一。</p>
   <div class="funnel" style="margin-top:18px;">
     <span class="step done">现象</span><span class="sep">→</span>
     <span class="step">① 变量隔离</span><span class="sep">→</span>
@@ -118,13 +119,31 @@
 </div>
 </section>
 
-<!-- ============ 2 背景 ============ -->
+<!-- ============ 2 背景·术语定义 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">背景 · 这是什么系统、这次优化动了什么</div>
+  <div class="kicker">背景 · 术语定义：全文统一四个名词</div>
+  <h2>四个术语的直接定义</h2>
+  <div class="grid2">
+    <div class="mini"><b>KV cache（键值缓存）</b>注意力机制为每个 token 生成的中间状态缓存；decode 时每生成一个 token 都要读取之前全部 token 的 KV。本文的「写 kernel」就是把新算出的 KV 写入这个缓存</div>
+    <div class="mini"><b>indexer（索引器）</b>GLM-5.2 稀疏注意力的选路模块：对历史 KV 做低精度打分、选出 top-k（约 2048）条，注意力只对选中条目计算。它与 attention <b>共用同一份 KV</b>——优化名 "indexer KV share" 即由此而来</div>
+    <div class="mini"><b>DCP（decode context parallelism）</b>把 KV cache 按 token 轮转分布到 dcp 张 GPU（dcp=4 即 4 卡各存 1/4），每卡只存自己那份。因此写入前必须把<b>全局 slot 编号换算成本卡物理行号</b>——本文的 bug 正是丢掉了这步换算</div>
+    <div class="mini"><b>kernel（GPU kernel）</b>GPU 上执行的并行计算函数；本文的排查对象就是一个新写的 KV 写入 kernel（量化 + 写入一步完成）</div>
+  </div>
+  <div class="chips">
+    <span class="chip">名词约定：slot / 行 = KV cache 的一个 token 槽位；loc = 写入目标 slot 编号；rank = 一个 DCP 参与方（一张 GPU 一个 rank）</span>
+  </div>
+  <div class="footnote">「乱码」= 模型输出突然变成无意义文字（生成质量崩坏）；「优化」= 让 KV 写入更快的一个 kernel 改动，dcp=1 时输出与改动前完全一致。</div>
+</div>
+</section>
+
+<!-- ============ 3 背景·技术版 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">背景 · 技术版：这份共享 KV 与这次优化</div>
   <h2>fp8 下 indexer 与 attention 共用一行 656B 的 KV</h2>
   <div class="chips" style="margin:6px 0 10px;">
-    <span class="chip"><b>两个读者</b>：indexer 的 topk 打分 ↓ &nbsp;·&nbsp; 稀疏 attention ↓</span>
+    <span class="chip"><b>两个读者</b>：indexer 选路打分 ↓ &nbsp;·&nbsp; attention 稀疏计算 ↓（读同一份 KV）</span>
   </div>
   <div class="bar656">
     <div style="flex:512; background:#dbeafe; border-right:1px solid var(--border);"><b>k_nope fp8</b><br>512 B</div>
@@ -133,15 +152,15 @@
   </div>
   <div style="text-align:center; font-size:14px; color:var(--text-dim);">一份 KV，两边读 —— 即 "<b>indexer KV share</b>"（GLM-5.2 + <code>--kv-cache-dtype fp8_e4m3</code>：512 + 16 + 128 = 656）</div>
   <ul class="pts">
-    <li>布局公式 <code>kv_lora_rank + kv_lora_rank//128*4 + qk_rope*2</code>（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L2235-L2250">kv_cache_configurator.py:2235-2250</a>）；行内偏移硬编码在 <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L15-L24">fused_dsa_quant_store.py:15-24</a></li>
-    <li>这次优化（<a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a>）把这一行的<b>写入</b>从「量化 + 写回」两步融合成一个 kernel——性能目的本身合理（省一次 launch + 中间 tensor，字节级无损）</li>
-    <li>DCP（decode context parallelism）：token 的 KV 按轮转分布在 dcp 个 rank 上，每 rank 只有一份本地池</li>
+    <li>fp8 = 8 位浮点（常规 16 位的一半内存）：k_nope 压缩成 fp8 存，配每 128 维一个缩放系数；rope 保持 bf16——一行共 656 字节（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L2235-L2250">布局公式</a>）</li>
+    <li>这次优化（<a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a>）把这一行的<b>写入</b>从「量化 + 写回」两步并成一步 kernel——更快、输出字节级一致（性能目的合理）</li>
+    <li>但 DCP 下（上页定义），写入需先做「全局 slot 编号 → 本卡物理行号」的换算——<b>换算规则就是排查的主角</b>：归属 rank = v % dcp，物理行号 = v // dcp</li>
   </ul>
-  <div class="footnote">「关掉优化」= 回到 bf16 KV / 旧写路径（DCP 感知），所以怎么开 dcp 都正常——这是后面「变量隔离」的线索。</div>
+  <div class="footnote">「关掉优化」= 回到 bf16 KV / 旧写路径（带换算），所以怎么开 dcp 都正常——这是后面「变量隔离」的线索。</div>
 </div>
 </section>
 
-<!-- ============ 3 现象 ============ -->
+<!-- ============ 4 现象 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">现象 · 三个变量：dcp 值 / 优化开关 / 时间</div>
@@ -158,11 +177,11 @@
     <div class="mini"><b>线索 2：时间形态</b>不是立刻坏，而是「开头正常 → 跑一段时间突然乱码」⇒ 内存状态积累型（错位写 / 越界写）特征</div>
     <div class="mini warn"><b>线索 3（误导项）</b>dcp=8 暂未复现 ⇒ 后面会看到这是「没跑到拐点」的假象，不是兼容</div>
   </div>
-  <div class="footnote">排查顺序：先沿线索 1 锁定「什么变了」（下一页），再沿线索 2 定位「错误落在哪、何时发生」。</div>
+  <div class="footnote">「乱码」= 模型输出变成无意义文字；dcp=N = KV cache 分布在 N 张 GPU 上（见第 2 页术语定义）。排查顺序：先沿线索 1 锁定「什么变了」（下一页），再沿线索 2 定位「错误落在哪、何时发生」。</div>
 </div>
 </section>
 
-<!-- ============ 4 排查路径总览（漏斗） ============ -->
+<!-- ============ 5 排查路径总览（漏斗） ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">排查路径 · 从宽到窄的五层收敛</div>
@@ -198,7 +217,7 @@
 </div>
 </section>
 
-<!-- ============ 5 收敛① 变量隔离 ============ -->
+<!-- ============ 6 收敛① 变量隔离 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -236,7 +255,7 @@
 </div>
 </section>
 
-<!-- ============ 6 收敛② 虚拟 id ============ -->
+<!-- ============ 7 收敛② 虚拟 id ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -295,13 +314,13 @@
       <path d="M725 166 C 700 205, 460 205, 382 226" fill="none" stroke="#1d4ed8" stroke-width="2" marker-end="url(#ab)"/>
       <text x="470" y="308" font-size="12.5" fill="#78716c" text-anchor="middle">rank 1 的 token v=1,5,9,13,… 分别应落到 row 0,1,2,3,…（行号 = v // dcp）</text>
     </svg>
-    <div class="figcap">虚拟 id 与物理行的关系：归属 rank = v % dcp，物理行 = v // dcp</div>
+    <div class="figcap">虚拟 id = allocator 发放的全局 slot 编号；物理行号 = 本 rank KV 池内的行号。DCP 下写入前必须先换算：归属 rank = v % dcp，物理行 = v // dcp</div>
   </div>
   <div class="footnote">allocator 容量 = size×dcp、虚拟页 = 64×dcp（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L1775-L1783">kv_cache_configurator.py:1775-1783</a>）；物理池每 rank 只有 size 行（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4105-L4113">memory_pool.py:4105-4113</a>）。</div>
 </div>
 </section>
 
-<!-- ============ 7 收敛③ 全库契约 ============ -->
+<!-- ============ 8 收敛③ 全库契约 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -332,7 +351,7 @@ DCP_RANK=get_parallel().attn_dcp_rank,  DCP_WORLD_SIZE=get_parallel().attn_dcp_s
 </div>
 </section>
 
-<!-- ============ 8 收敛④ 根因 ============ -->
+<!-- ============ 9 收敛④ 根因 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -363,7 +382,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 9 定位·空间 ============ -->
+<!-- ============ 10 定位·空间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -428,11 +447,11 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <tr><td>v=9</td><td>1</td><td>2</td><td>9</td><td style="color:var(--red)">✗ 越界（size=8）</td></tr>
     <tr><td>v=13</td><td>1</td><td>3</td><td>13</td><td style="color:var(--red)">✗ 越界</td></tr>
   </table>
-  <div class="footnote">⚠ 读侧行号换算的两种可能（契约读法 v//dcp / 本分支 DSA 原始 v）详见 md 版第 5 节——无论哪种，写侧行号错了就是错的。</div>
+  <div class="footnote">错位写：写入本池内错误的行，后续按正确行号读取的一方拿到错误数据；越界写：写入超出本 layer buffer 范围，破坏相邻 layer 的 KV buffer 等内存。⚠ 读侧行号换算的两种可能（契约读法 v//dcp / 本分支 DSA 原始 v）详见 md 版第 5 节——无论哪种，写侧行号错了就是错的。</div>
 </div>
 </section>
 
-<!-- ============ 10 定位·时间 ============ -->
+<!-- ============ 11 定位·时间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -466,14 +485,14 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     </svg>
   </div>
   <ul class="pts">
-    <li>水位 = 累计分配的虚拟槽位数；越过 <code>size</code> 后出现 v ≥ size 的行号 → 越界写相邻内存</li>
+    <li>水位 = 累计分配的虚拟 slot 数（allocator 已发出的编号总数，即高水位）；越过 <code>size</code> 后出现 v ≥ size 的行号 → 越界写相邻内存</li>
     <li>拐点前（v &lt; size）：错位写 + 读侧若恰好也用原始 v（本分支 DSA 读路径无任何 dcp 换算），读写暂时自洽 → <b>看起来正常</b></li>
   </ul>
   <div class="footnote">⚠ 拐点前的「自洽」与拐点后的具体乱码形态属推断（读侧 sgl-kernel C++ 无法静态全核，md 版已逐条标注）；写侧丢失 mask+divide 是确定性事实。</div>
 </div>
 </section>
 
-<!-- ============ 11 复盘 dcp=8 ============ -->
+<!-- ============ 12 复盘 dcp=8 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -514,7 +533,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 12 修复 ============ -->
+<!-- ============ 13 修复 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">修复 · 把旧 kernel 的两行映射补回来</div>
@@ -538,7 +557,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 13 证据索引 ============ -->
+<!-- ============ 14 证据索引 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">证据索引 · 每条结论的源码出处（点击直达 GitHub）</div>
@@ -561,7 +580,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 14 总结 ============ -->
+<!-- ============ 15 总结 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">总结 · 三句话</div>
@@ -588,7 +607,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 
 <div class="nav">
   <button id="prev" aria-label="上一页">←</button>
-  <span class="counter" id="counter">1 / 14</span>
+  <span class="counter" id="counter">1 / 15</span>
   <button id="next" aria-label="下一页">→</button>
 </div>
 <div class="hint">← / → 翻页</div>
