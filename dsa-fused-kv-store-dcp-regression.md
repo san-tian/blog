@@ -194,9 +194,12 @@ DCP 下虚拟 id 的几何：`v = p·(64·dcp) + i`（p 为虚拟页号，i 为�
 - **模式 A（错位写）**：`v < size` 时写入物理行 `v`，而读侧（[dcp_kernels.py:105](https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dcp_kernels.py#L98-L105)、trtllm 路径、以及一切按契约实现的消费方）按 `v // dcp` 取数 → 读到别的 token 或从未写入的行。此阶段读侧如果恰好也用原始 `v` 取值（本分支 DSA 读路径没有任何 DCP 换算代码，`dsa_backend.py` 与 `dsa/` 目录 grep 不到 dcp 引用），读写可以暂时自洽，输出正常。
 - **模式 B（越界写）**：`v ≥ size` 时写入超过该 layer buffer 的 `size+64` 行范围，打穿后面紧邻的 GPU 内存（同一 `kv_buffer` 列表里后续 layer 的 buffer、indexer 缓存、其他 pool）。allocator 从低位顺序发页，**累计分配超过 `size` 即进入模式 B** —— 服务跑一段时间必达，这就是"开头正常、突然乱码"的拐点。
 
-两个模式对 dcp=4 和 dcp=8 完全对称（越界阈值都是累计分配 > size），所以 "dcp=8 能跑" 只说明那组实验没跑到水位：
+两个模式对 dcp=4 和 dcp=8 完全对称（越界阈值都是累计分配 > size）。两个实测现象与模式 B 完全吻合：
 
-> ⚠ 诚实标注：dcp=8 未复现乱码的具体原因（读侧巧合自洽的持续区间、实验负载/时长差异）无法纯静态分析确定，需要压测验证；但 kernel 对 dcp>1 不正确的结论不依赖这一点——写侧丢失 mask+divide 是确定性事实，只有 dcp=1 时 `v//1 == v` 才数学上成立。
+- **「几小时之后才出问题」**：越界写不是一开始就有——虚拟 id 从低位顺序发，`v ≥ size` 要等累计分配越过 `size`（每 rank 池只有 size 行、虚拟空间 size×dcp，即池填到约 1/dcp）。大池高负载下要跑几小时才过线。
+- **「不是所有请求都出问题」**：越界写踩的是相邻内存里恰好在那的请求数据——只有分配在高位虚拟 id（v ≥ size）的请求、或数据被踩掉的请求才乱码，是零星而非全体（逻辑错误才会全体立刻崩）。
+
+> ⚠ 诚实标注：拐点前的「自洽」与读侧 sgl-kernel C++ 的换算细节无法纯静态确定；但「越界写 + 水位拐点」这条因果链由写侧代码（raw v 写入、size+64 行 buffer）直接推导，且与「几小时、零星」的实测特征一致。写侧丢失 mask+divide 是确定性事实。
 
 ## 旁证：同一 bug 类在生产分支有前科
 
@@ -206,7 +209,7 @@ DCP 下虚拟 id 的几何：`v = p·(64·dcp) + i`（p 为虚拟页号，i 为�
 
 ## 结论与责任归属
 
-- **写侧（本 commit 引入，确定）**：`fused_dsa_quant_store` 丢掉了旧路径的 DCP mask+divide（`loc % dcp == rank` + `loc // dcp`），直接以虚拟 id 当物理行号写。这是 commit `0a60805df4` 的唯一改动（diff 铁证，旧 kernel 与新 kernel 逐行对比即可确认），**不需要上机验证**。
+- **写侧（本 commit 引入，确定）**：`fused_dsa_quant_store` 丢掉了旧路径的 DCP mask+divide（`loc % dcp == rank` + `loc // dcp`），直接以虚拟 id 当物理行号写。这是 commit `0a60805df4` 的唯一改动（diff 铁证，旧 kernel 与新 kernel 逐行对比即可确认），**已实测确认**：删掉该优化（回退旧两步路径）后恢复正常。
 - **读侧（本来就有，非本 bug 来源）**：本分支 DSA 读/indexer 路径没有 DCP 换算代码（生产分支 b300-glm52 有整套 `_localize_index_k_cache_locs` + 读侧 repair，见 `37231e4884`/`3a6d3f281f`）。它之前靠写侧 kernel 写对行号才没暴露；本 commit 拆掉写侧保护后，隐患变成真 bug。rebase 生产分支时需一并补齐。
 - **dcp=8 未复现（待确认，最可能是不同代码）**：写侧 bug 对 dcp=4/8 完全对称、都该乱码，所以 dcp=8 未复现更可能是那组实验跑的不是这份代码——生产分支（b300-glm52）没有 fused kernel（走旧 DCP-aware 两步路径）且读侧 DCP 换算齐全（dsa_indexer.py 的 `_localize_index_k_cache_locs`），新分支只有 fused kernel、读侧无换算。次要可能：若确实是同一份代码，则 dcp=8 那组没跑到越界水位（阈值 = 累计分配 > size，与 dcp 无关）。需确认 dcp=8 的部署分支/环境，此点不影响前两条结论。
 

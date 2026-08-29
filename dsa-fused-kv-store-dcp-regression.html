@@ -506,10 +506,11 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     </svg>
   </div>
   <ul class="pts">
-    <li>水位 = 累计分配的虚拟 slot 数（allocator 已发出的编号总数，即高水位）；越过 <code>size</code> 后出现 v ≥ size 的行号 → 越界写相邻内存</li>
+    <li>水位 = 累计分配的虚拟 slot 数（allocator 已发出的编号总数，即高水位）；越过 <code>size</code> 后出现 v ≥ size 的行号 → 越界写相邻内存。每 rank 池只有 size 行，虚拟空间是 size×dcp，所以<b>池填到约 1/dcp 就开始越界</b>——大池高负载下要跑<b>几小时</b>才过线</li>
     <li>拐点前（v &lt; size）：错位写 + 读侧若恰好也用原始 v（本分支 DSA 读路径无任何 dcp 换算），读写暂时自洽 → <b>看起来正常</b></li>
+    <li><b>不是所有请求都出问题</b>：越界写踩的是相邻内存里恰好在那的请求数据——只有分配在高位虚拟 id（v≥size）的请求、或数据被踩掉的请求才乱码，是零星而非全体（若逻辑错则全体立刻崩）</li>
   </ul>
-  <div class="footnote">⚠ 拐点前的「自洽」与拐点后的具体乱码形态属推断（读侧 sgl-kernel C++ 无法静态全核，md 版已逐条标注）；写侧丢失 mask+divide 是确定性事实。</div>
+  <div class="footnote">「几小时之后才出问题 + 不是所有请求」正是越界写破坏内存的典型指纹，与水位拐点一致。⚠ 拐点前的「自洽」与拐点后的具体乱码形态属推断（读侧 sgl-kernel C++ 无法静态全核，md 版已逐条标注）；写侧丢失 mask+divide 是确定性事实。</div>
 </div>
 </section>
 
@@ -623,7 +624,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <span class="chip">🔍 源码 commit：<a href="https://github.com/san-tian/sglang/commit/0a60805df4">0a60805df4</a></span>
     <span class="chip">🧾 同类前科：<a href="https://github.com/MindLab-Research/sglang/commit/37231e4884">37231e4884</a>（生产分支 fix(dcp)）</span>
   </div>
-  <div class="footnote">责任归属：写侧丢失 DCP 换算 = 本 commit 引入（diff 铁证，确定）；读侧 DCP 不完整 = 分支本来就有（隐患，非本 bug 来源）；dcp=8 未复现 = 待实测。本报告为源码静态排查（2026-08-27，无上机实验）；读侧 C++ 无法静态核实处已在 md 版用 ⚠ 标注。←/→ 或方向键翻页 · <a href="index.html">返回目录</a></div>
+  <div class="footnote">责任归属：写侧丢失 DCP 换算 = 本 commit 引入（diff 铁证 + 实测确认：删掉该优化即恢复正常）；读侧 DCP 不完整 = 分支本来就有（隐患，非本 bug 来源）；dcp=8 未复现 = 待确认。←/→ 或方向键翻页 · <a href="index.html">返回目录</a></div>
 </div>
 </section>
 
