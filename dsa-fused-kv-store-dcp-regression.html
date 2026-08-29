@@ -104,7 +104,7 @@
   <div class="kicker">排查报告 · 源码静态核对 · 无上机实验</div>
   <h2>indexer KV share（DSA 融合写 kernel）<br>为什么「只能兼容 dcp=8」？</h2>
   <p style="font-size:17px; margin: 6px 0 4px;">结论一句话：<b>新 kernel 丢掉了 DCP 的「虚拟 id → 物理行」映射，把虚拟 id 当物理行号直接写</b>——先错位、后越界。它对任何 dcp&gt;1 都不正确，dcp=8 的「正常」只是没跑到越界拐点。</p>
-  <p style="font-size:14px; color:var(--text-dim); margin-top:12px;">术语约定：本文假设读者没有本领域背景，但使用标准专业术语——每个术语首次出现都给直接定义（下一页统一定义 KV cache / indexer / DCP / kernel），全文名词统一。</p>
+  <p style="font-size:14px; color:var(--text-dim); margin-top:12px;">术语约定：未讲过的术语接下来每词一页详讲（DSA、indexer）；讲过的（KV cache、kernel、MLA、DCP 概念）直接引用旧文，术语索引见 <a href="glossary.md">glossary.md</a>；全文名词统一。</p>
   <div class="funnel" style="margin-top:18px;">
     <span class="step done">现象</span><span class="sep">→</span>
     <span class="step">① 变量隔离</span><span class="sep">→</span>
@@ -119,39 +119,52 @@
 </div>
 </section>
 
-<!-- ============ 2 背景·新术语：DSA 与 indexer ============ -->
+<!-- ============ 2 背景·术语 1/2：DSA ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">背景 · 首次详细解释：DSA 与 indexer（讲过的术语直接引用，见 glossary.md）</div>
-  <h2>DSA（稀疏注意力）与 indexer（选路模块）</h2>
+  <div class="kicker">背景 · 术语 1/2：DSA（本文首次详细解释）</div>
+  <h2>DSA（DeepSeek Sparse Attention，稀疏注意力架构）</h2>
   <div class="grid2">
-    <div class="mini"><b>DSA（DeepSeek Sparse Attention）</b>GLM-5.2 采用的稀疏注意力架构。dense 注意力（MHA/MLA）每步对<b>全部</b>历史 token 计算，长上下文下计算量不可控；DSA 改为两段式：<b>先选路、再计算</b></div>
-    <div class="mini"><b>indexer（索引器）</b>DSA 的选路模块：对每个 query 用低精度（fp8）打分器给<b>全部历史 KV</b> 打分，选出 top-k 条（GLM-5.2 约 2048）——它决定 attention「看哪些历史」。它与 attention <b>共用同一份 K</b>，即优化名 "indexer KV share" 的由来</div>
+    <div class="mini"><b>是什么</b>GLM-5.2 采用的注意力架构。dense 注意力（MHA/MLA）每步对<b>全部</b>历史 token 计算，长上下文下计算量不可控</div>
+    <div class="mini"><b>怎么做</b>两段式：<b>先选路、再计算</b>——先选出相关的历史条目，attention 只对选中条目计算；每步计算量从 O(全部历史) 降到 O(top-k)</div>
   </div>
   <div class="flow">
-    <div class="fbox" style="flex:1.3"><b>query</b><small>当前 token 的查询向量</small></div>
+    <div class="fbox" style="flex:1.2"><b>query</b><small>当前 token 的查询向量</small></div>
     <div class="farrow">→</div>
-    <div class="fbox" style="flex:2.1"><b>① indexer 打分</b><small>fp8 低精度，扫全部历史 K，选出 top-k 条目 id</small></div>
+    <div class="fbox" style="flex:2.1"><b>① 选路（indexer，下页）</b><small>低精度打分，选出 top-k 条目 id</small></div>
     <div class="farrow">→</div>
     <div class="fbox" style="flex:2.1"><b>② 稀疏 attention</b><small>只对选中的 top-k 条目做完整计算</small></div>
     <div class="farrow">→</div>
-    <div class="fbox" style="flex:1.2"><b>输出</b><small>每步计算量 O(top-k)，而非 O(全部历史)</small></div>
+    <div class="fbox" style="flex:1.2"><b>输出</b><small>每步计算量 O(top-k)</small></div>
   </div>
-  <div class="chips">
-    <span class="chip">📄 <b>DCP</b>：概念已讲过——<a href="dynamic-context-parallelism.md">《DCP 实测》</a>（KV 按序列维切分到多卡）；本文只讲 sglang 实现的换算细节（第 7 页）</span>
-    <span class="chip">📄 <b>KV cache / kernel / MLA</b>：旧文已讲过，本文直接使用（术语索引见 <a href="glossary.md">glossary.md</a>）</span>
-  </div>
-  <div class="footnote">名词约定：slot / 行 = KV cache 的一个 token 槽位；loc = 写入目标 slot 编号；rank = 一个 DCP 参与方（一张 GPU 一个 rank）；「乱码」= 模型输出变成无意义文字。DSA 与 indexer 为本文首次详细解释，已登记术语索引。</div>
+  <div class="footnote">本文首次详细解释 DSA，已登记术语索引（<a href="glossary.md">glossary.md</a>）；dense 侧的 MLA 见姊妹篇《在 H200 上服务 GLM-5.2》（glm52-llm-d-agentic-serving.md）。</div>
 </div>
 </section>
 
-<!-- ============ 3 背景·技术版 ============ -->
+<!-- ============ 3 背景·术语 2/2：indexer ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">背景 · 术语 2/2：indexer（本文首次详细解释）</div>
+  <h2>indexer（索引器）：DSA 的选路模块</h2>
+  <div class="grid2">
+    <div class="mini"><b>是什么</b>对每个 query 用低精度（fp8）打分器给<b>全部历史 KV</b> 打分，选出 top-k 条（GLM-5.2 约 2048）——它决定 attention「看哪些历史」</div>
+    <div class="mini"><b>与本文的关系</b>indexer 打分与 attention 计算读<b>同一份 K</b>（同一行 656B）——优化名 "indexer KV share" 的由来；本文排查的正是这份数据的写入 kernel</div>
+  </div>
+  <div class="chips">
+    <span class="chip">📄 <b>DCP</b>：概念已讲过——<a href="dynamic-context-parallelism.md">《DCP 实测》</a>；本文只讲 sglang 实现的换算细节（第 8 页）</span>
+    <span class="chip">📄 <b>KV cache / kernel / MLA</b>：旧文已讲过，直接使用（<a href="glossary.md">glossary.md</a>）</span>
+  </div>
+  <div class="footnote">名词约定：slot / 行 = KV cache 的一个 token 槽位；loc = 写入目标 slot 编号；rank = 一个 DCP 参与方（一张 GPU 一个 rank）；「乱码」= 模型输出变成无意义文字。indexer 为本文首次详细解释，已登记术语索引。</div>
+</div>
+</section>
+
+<!-- ============ 4 背景·技术版 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">背景 · 技术版：这份共享 KV 与这次优化</div>
   <h2>fp8 下 indexer 与 attention 共用一行 656B 的 KV</h2>
   <div class="chips" style="margin:6px 0 10px;">
-    <span class="chip"><b>两个读者</b>：indexer 选路打分 ↓ &nbsp;·&nbsp; attention 稀疏计算 ↓（读同一份 KV）</span>
+    <span class="chip"><b>两个读者</b>：indexer 选路打分 ↓ &nbsp;·&nbsp; attention 稀疏计算 ↓</span>
   </div>
   <div class="bar656">
     <div style="flex:512; background:#dbeafe; border-right:1px solid var(--border);"><b>k_nope fp8</b><br>512 B</div>
@@ -162,13 +175,13 @@
   <ul class="pts">
     <li>fp8 = 8 位浮点（常规 16 位的一半内存）：k_nope 压缩成 fp8 存，配每 128 维一个缩放系数；rope 保持 bf16——一行共 656 字节（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L2235-L2250">布局公式</a>）</li>
     <li>这次优化（<a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a>）把这一行的<b>写入</b>从「量化 + 写回」两步并成一步 kernel——更快、输出字节级一致（性能目的合理）</li>
-    <li>但 DCP 下（上页定义），写入需先做「全局 slot 编号 → 本卡物理行号」的换算——<b>换算规则就是排查的主角</b>：归属 rank = v % dcp，物理行号 = v // dcp</li>
+    <li>但 DCP 下，写入需先做「全局 slot 编号 → 本卡物理行号」的换算——<b>换算规则就是排查的主角</b>：归属 rank = v % dcp，物理行号 = v // dcp</li>
   </ul>
   <div class="footnote">「关掉优化」= 回到 bf16 KV / 旧写路径（带换算），所以怎么开 dcp 都正常——这是后面「变量隔离」的线索。656B 布局与量化公式的逐字节解读见姊妹篇《GLM-5.2 decode TPOT 优化》（glm52-tpot-decode-optimization.html）。</div>
 </div>
 </section>
 
-<!-- ============ 4 现象 ============ -->
+<!-- ============ 5 现象 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">现象 · 三个变量：dcp 值 / 优化开关 / 时间</div>
@@ -180,16 +193,16 @@
     <div class="mini"><b>dcp=1</b>（对照）虚拟域=物理域，数学上正确</div>
   </div>
   <h3 style="font-size:16.5px; margin:22px 0 8px; color:#111;">从现象读出三条线索</h3>
-  <div class="grid3">
-    <div class="mini"><b>线索 1：变量隔离</b>关掉优化就正常 ⇒ 问题范围锁定在这个 commit 改动的东西</div>
-    <div class="mini"><b>线索 2：时间形态</b>不是立刻坏，而是「开头正常 → 跑一段时间突然乱码」⇒ 内存状态积累型（错位写 / 越界写）特征</div>
-    <div class="mini warn"><b>线索 3（误导项）</b>dcp=8 暂未复现 ⇒ 后面会看到这是「没跑到拐点」的假象，不是兼容</div>
+  <div class="chips">
+    <span class="chip"><b>线索 1 · 变量隔离</b>：关掉优化就正常 ⇒ 问题范围锁定在这个 commit 改动的东西</span>
+    <span class="chip"><b>线索 2 · 时间形态</b>：开头正常 → 跑一段时间突然乱码 ⇒ 状态积累型（错位 / 越界写）特征</span>
+    <span class="chip warn"><b>线索 3 · 误导项</b>：dcp=8 暂未复现 ⇒ 后面会看到是「没跑到拐点」的假象，不是兼容</span>
   </div>
-  <div class="footnote">「乱码」= 模型输出变成无意义文字；dcp=N = KV cache 分布在 N 张 GPU 上（DCP 概念详见《DCP 实测》，第 2 页有引用）。排查顺序：先沿线索 1 锁定「什么变了」（下一页），再沿线索 2 定位「错误落在哪、何时发生」。</div>
+  <div class="footnote">「乱码」= 模型输出变成无意义文字；dcp=N = KV cache 分布在 N 张 GPU 上（DCP 概念见《DCP 实测》）。排查顺序：先沿线索 1 锁定「什么变了」（下一页），再沿线索 2 定位「错误落在哪、何时发生」。</div>
 </div>
 </section>
 
-<!-- ============ 5 排查路径总览（漏斗） ============ -->
+<!-- ============ 6 排查路径总览（漏斗） ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">排查路径 · 从宽到窄的五层收敛</div>
@@ -225,7 +238,7 @@
 </div>
 </section>
 
-<!-- ============ 6 收敛① 变量隔离 ============ -->
+<!-- ============ 7 收敛① 变量隔离 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -263,7 +276,7 @@
 </div>
 </section>
 
-<!-- ============ 7 收敛② 虚拟 id ============ -->
+<!-- ============ 8 收敛② 虚拟 id ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -328,7 +341,7 @@
 </div>
 </section>
 
-<!-- ============ 8 收敛③ 全库契约 ============ -->
+<!-- ============ 9 收敛③ 全库契约 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -359,7 +372,7 @@ DCP_RANK=get_parallel().attn_dcp_rank,  DCP_WORLD_SIZE=get_parallel().attn_dcp_s
 </div>
 </section>
 
-<!-- ============ 9 收敛④ 根因 ============ -->
+<!-- ============ 10 收敛④ 根因 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -390,7 +403,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 10 定位·空间 ============ -->
+<!-- ============ 11 定位·空间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -459,7 +472,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 11 定位·时间 ============ -->
+<!-- ============ 12 定位·时间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -500,7 +513,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 12 复盘 dcp=8 ============ -->
+<!-- ============ 13 复盘 dcp=8 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -541,7 +554,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 13 修复 ============ -->
+<!-- ============ 14 修复 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">修复 · 把旧 kernel 的两行映射补回来</div>
@@ -565,30 +578,33 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 14 证据索引 ============ -->
+<!-- ============ 15 证据索引 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">证据索引 · 每条结论的源码出处（点击直达 GitHub）</div>
   <h2>12 条证据 <span class="dim">（fork san-tian/sglang @ 0a60805df4；生产分支 commit 在 MindLab-Research/sglang）</span></h2>
-  <div class="grid3">
-    <div class="mini"><b>allocator 发虚拟 id</b>容量 size×dcp、页 64×dcp<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L1775-L1783">kv_cache_configurator.py:1775-1783</a></div></div>
-    <div class="mini"><b>物理池每 rank 仅 size 行</b>torch.zeros((size+64, 1, 656))<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4105-L4113">memory_pool.py:4105-4113</a></div></div>
-    <div class="mini ok"><b>旧 kernel 有 mask+divide</b>v%dcp==rank；safe_loc=v//dcp<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/kvcache/mla_buffer.py#L39-L43">mla_buffer.py:39-43</a> · <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/kvcache/mla_buffer.py#L173-L174">173-174</a></div></div>
-    <div class="mini ok"><b>契约注释原话</b>"kernel divides by the world size itself"<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4240-L4245">memory_pool.py:4240-4245</a></div></div>
-    <div class="mini ok"><b>读侧契约 v//dcp</b>create_mla_kv_page_table_for_dcp<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dcp_kernels.py#L98-L105">dcp_kernels.py:98-105</a></div></div>
-    <div class="mini ok"><b>其他写路径都守约</b>set_kv_buffer 过滤；trtllm 显式传 dcp 参数<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4172-L4176">memory_pool.py:4172-4176</a> · <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/layers/attention/trtllm_mla_backend.py#L1030-L1033">trtllm_mla_backend.py:1030-1033</a></div></div>
-    <div class="mini no"><b>新 kernel 原样写 loc</b>cache_loc 无过滤、无除法、无 slot0 跳过<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L51-L71">fused_dsa_quant_store.py:51-71</a></div></div>
-    <div class="mini no"><b>kernel 无任何 dcp 参数</b>签名与 launch 均无 DCP_RANK/WORLD_SIZE<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L31-L47">fused_dsa_quant_store.py:31-47</a> · <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L104-L120">104-120</a></div></div>
-    <div class="mini no"><b>调用点直接透传 loc</b>fused_dsa_quant_store(..., dst_buffer, loc)<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4204-L4216">memory_pool.py:4204-4216</a></div></div>
-    <div class="mini"><b>commit 前走 DCP 感知路径</b>quantize + set_mla_kv_buffer_triton<div class="src"><a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> 的 parent（^）</div></div>
-    <div class="mini"><b>只改写侧，读侧零改动</b>2 files, +181/−12<div class="src"><a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> --stat</div></div>
-    <div class="mini warn"><b>同类 bug 前科</b>生产分支 index_k 虚拟 id 未转换 → 错位 → 乱码<div class="src"><a href="https://github.com/MindLab-Research/sglang/commit/37231e4884">commit 37231e4884</a>（b300-glm52）</div></div>
-  </div>
+  <div class="kicker">证据索引 · 每条结论的源码出处（点击直达 GitHub）</div>
+  <h2>12 条证据 <span class="dim">（fork san-tian/sglang @ 0a60805df4；生产分支 commit 在 MindLab-Research/sglang）</span></h2>
+  <table class="tbl">
+    <tr><th style="width:44%">断言</th><th>证据（点击直达）</th></tr>
+    <tr><td>allocator 发虚拟 id（容量 size×dcp，页 64×dcp）</td><td><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L1775-L1783">kv_cache_configurator.py:1775-1783</a></td></tr>
+    <tr><td>物理池每 rank 仅 size 行</td><td><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4105-L4113">memory_pool.py:4105-4113</a></td></tr>
+    <tr><td><span style="color:var(--green)">✓</span> 旧 kernel 有 mask+divide（v%dcp==rank；safe_loc=v//dcp）</td><td><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/kvcache/mla_buffer.py#L39-L43">mla_buffer.py:39-43</a> · <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/kvcache/mla_buffer.py#L173-L174">173-174</a></td></tr>
+    <tr><td><span style="color:var(--green)">✓</span> 契约注释原话 "kernel divides by the world size itself"</td><td><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4240-L4245">memory_pool.py:4240-4245</a></td></tr>
+    <tr><td><span style="color:var(--green)">✓</span> 读侧契约 v//dcp（create_mla_kv_page_table_for_dcp）</td><td><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dcp_kernels.py#L98-L105">dcp_kernels.py:98-105</a></td></tr>
+    <tr><td><span style="color:var(--green)">✓</span> 其他写路径都守约（set_kv_buffer 过滤 / trtllm 传 dcp 参数）</td><td><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4172-L4176">memory_pool.py:4172-4176</a> · <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/layers/attention/trtllm_mla_backend.py#L1030-L1033">trtllm_mla_backend.py:1030-1033</a></td></tr>
+    <tr><td><span style="color:var(--red)">✗</span> 新 kernel 原样写 loc（无过滤、无除法、无 slot0 跳过）</td><td><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L51-L71">fused_dsa_quant_store.py:51-71</a></td></tr>
+    <tr><td><span style="color:var(--red)">✗</span> 新 kernel 无任何 dcp 参数（签名与 launch）</td><td><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L31-L47">fused_dsa_quant_store.py:31-47</a> · <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L104-L120">104-120</a></td></tr>
+    <tr><td><span style="color:var(--red)">✗</span> 调用点直接透传 loc</td><td><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4204-L4216">memory_pool.py:4204-4216</a></td></tr>
+    <tr><td>commit 前走 DCP 感知路径（quantize + set_mla_kv_buffer_triton）</td><td><a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> 的 parent（^）</td></tr>
+    <tr><td>只改写侧，读侧零改动（2 files, +181/−12）</td><td><a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> --stat</td></tr>
+    <tr><td><span style="color:var(--yellow)">⚠</span> 同类 bug 前科（生产分支 index_k 虚拟 id 未转换）</td><td><a href="https://github.com/MindLab-Research/sglang/commit/37231e4884">commit 37231e4884</a>（b300-glm52）</td></tr>
+  </table>
   <div class="footnote">656B 布局：<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L2235-L2250">kv_cache_configurator.py:2235-2250</a> · 详细推导与诚实标注见 <code>dsa-fused-kv-store-dcp-regression.md</code></div>
 </div>
 </section>
 
-<!-- ============ 15 总结 ============ -->
+<!-- ============ 16 总结 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">总结 · 三句话</div>
@@ -615,7 +631,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 
 <div class="nav">
   <button id="prev" aria-label="上一页">←</button>
-  <span class="counter" id="counter">1 / 15</span>
+  <span class="counter" id="counter">1 / 16</span>
   <button id="next" aria-label="下一页">→</button>
 </div>
 <div class="hint">← / → 翻页</div>
