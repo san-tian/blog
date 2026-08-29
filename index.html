@@ -103,6 +103,19 @@
   <h1>san-tian 的技术 blog</h1>
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
+  <a class="post" href="dsa-fused-kv-store-dcp-regression.html">
+    <div class="title">DSA 融合 KV 写 kernel 丢失 DCP 映射：dcp&gt;1 乱码根因排查</div>
+    <div class="desc">indexer KV share 优化（fused_dsa_quant_store）在 dcp=4 下「开头正常、突然乱码」的根因：新 kernel 丢掉了旧路径 set_mla_kv_buffer_triton 里的 DCP 处理（owner mask + loc//dcp 换算），把虚拟 id 直接当物理行号写——先错位、后越界。dcp=8 的「正常」是水位没过越界阈值的假象，kernel 对任何 dcp&gt;1 都不正确。附 11 条源码行号证据与修复方案。</div>
+    <div class="meta">
+      <span class="tag agent">🤖 AI-assisted</span>
+      <span class="tag">sglang</span>
+      <span class="tag">DSA</span>
+      <span class="tag">DCP</span>
+      <span class="tag">KV cache</span>
+      <span class="tag">排障</span>
+    </div>
+  </a>
+
   <a class="post" href="glm52-tpot-decode-optimization.html">
     <div class="title">GLM-5.2 decode TPOT 优化：AllReduce 融合 + 融合 DSA 量化写回 kernel（commit 解读）</div>
     <div class="desc">解读 sglang commit <code>1f3f4b1</code>：融合 DSA KV cache 量化写回 kernel（一个 triton kernel 替代「量化 + 写回」两步、字节级无损）+ MoE 跳过 no-op slice。诚实结论：融合 kernel 端到端 +0.9%（噪声级），-13.1% 的核心增益来自 AllReduce 融合（-4.6~5.5%）和 tile 对齐 BLOCK_SIZE_M=64→16（-8.8%）。含量化公式字节级一致性、fp8 e4m3fn max=448、无碰撞 loc 测试三个正确性细节。</div>
