@@ -34,9 +34,9 @@
 | CP（上下文并行） | prefill 按序列长度切块分到多卡（与 DCP 的 decode 侧对应） | why-prefill-cp-breaks-standalone-decode.md |
 | AllReduce 融合 | TP 通信的 allreduce + residual + RMSNorm 融合为一次 kernel | glm52-tpot-decode-optimization.html |
 | flashinfer 三件套 | flashinfer-python / cubin / jit-cache 必须同版本 | sglang-flashinfer-fusion-error-investigation.md |
-| **Kubernetes（K8s）** | 容器编排系统：把「哪些程序跑几份、各用多少资源」声明成 YAML，集群持续拉起维持 | rbg-rolebasedgroup-explained.html（P2 术语卡） |
-| **Operator / CRD** | 用自定义控制器扩展 K8s 的模式 / 往 K8s 注册新对象类型的机制 | rbg-rolebasedgroup-explained.html（P2 术语卡） |
-| **TP（张量并行）** | 一个模型多卡协同计算；1 leader + N worker 组成一个推理实例 | rbg-rolebasedgroup-explained.html（P2；leader-worker 模式 P7） |
+| **Kubernetes（K8s）** | 容器编排系统：把「哪些程序跑几份、各用多少资源」声明成 YAML，集群持续拉起维持 | rbg-rolebasedgroup-explained.html（P3 内联术语卡） |
+| **Operator / CRD** | 用自定义控制器扩展 K8s 的模式 / 往 K8s 注册新对象类型的机制 | rbg-rolebasedgroup-explained.html（P3 内联术语卡） |
+| **TP（张量并行）** | 一个模型多卡协同计算；1 leader + N worker 组成一个推理实例 | rbg-rolebasedgroup-explained.html（P4 内联术语卡；leader-worker 模式 P7） |
 | **headless Service** | 不分配虚拟 IP 的 Service，DNS 直达每个 pod，pod 名稳定可寻址 | rbg-rolebasedgroup-explained.html（P8 服务发现） |
 | **gang 调度** | 一组 pod 要么全部调度成功要么全不调度，避免多卡只上一半 | rbg-rolebasedgroup-explained.html（P12） |
 | **原地更新（in-place update）** | 改镜像只重启容器不重建 pod，名字/IP/节点/GPU 绑定不变 | rbg-rolebasedgroup-explained.html（P11） |

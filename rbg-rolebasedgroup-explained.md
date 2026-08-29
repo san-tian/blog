@@ -6,8 +6,6 @@
 >
 > 📌 讲解对象：[sgl-project/rbg](https://github.com/sgl-project/rbg) @ commit [`4acd5a7`](https://github.com/sgl-project/rbg/commit/4acd5a791e9709f34c4bd5da569e6427896d21a5)（2026-08-29，v0.7.0 已发布）。文中所有源码引用都锚定该 SHA。官方文档站：[rolebasedgroup.github.io](https://rolebasedgroup.github.io)。
 
-**术语约定（全文统一）**：prefill / decode / PD 分离已登记进术语索引（首次详解见 [pd-decode-kvcache-offload.md](pd-decode-kvcache-offload.md)），本文按部署编排视角直接使用；TP（张量并行）指一个大模型由多张 GPU 协同计算，1 leader + N worker 组成一个推理实例；headless Service 指不分配虚拟 IP 的 Service，DNS 直接解析到每个 pod；gang 调度指一组 pod 要么全部调度成功、要么全部不调度。行文用「角色」（服务的成员）、「实例」（角色的一副本，可能是一组 pod）、「组件」（实例内的单个 pod）。新讲术语发布后登记进 [glossary.md](glossary.md)。
-
 ---
 
 ## 1. 它是用来做什么的？
@@ -34,7 +32,9 @@ spec:
 
 原生 K8s 写法是 frontend、backend 各一个 Deployment，顺序靠 init container 探测或手动分两次 apply——**角色之间的"关系"没有原生语义**。RBG 把关系本身变成 API。
 
-**头号场景是 PD 分离的 LLM 推理。** prefill 和 decode 混布会互相干扰计算、耦合资源配比（[官方 quick start](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/quick_start.md)），分离后各自独立扩缩、独立配卡，代价是部署形态变成多角色 × 多卡 × 异构配比：router（单 pod）→ prefill（TP4：1 leader + 3 worker × 2 实例）→ decode（TP2 × 4 实例），再加 KV 传输引擎（Mooncake）。这正是 RBG 设计的目标形态——**一个 YAML 声明整条链路**（[官方 PD 分离例子](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/pd-disagg-leader-worker.yaml)）。
+> 补一句底子：K8s 即 Kubernetes，是「声明 YAML、集群持续拉起维持」的容器编排系统；Operator 是用自定义控制器扩展 K8s 的模式；CRD（自定义资源定义）是往 K8s 注册新对象类型的机制——下面这个 `RoleBasedGroup` 就是 RBG 注册的新对象类型。
+
+**头号场景是 PD 分离的 LLM 推理。** prefill（预填充：推理第一步，把整段 prompt 一次算完、产出 KV cache，决定首字延迟）和 decode（解码：逐 token 生成，决定吐字速度）混布会互相干扰计算、耦合资源配比（[官方 quick start](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/quick_start.md)），分离后各自独立扩缩、独立配卡，代价是部署形态变成多角色 × 多卡 × 异构配比：router（单 pod）→ prefill（TP4：1 leader + 3 worker × 2 实例）→ decode（TP2 × 4 实例；TP 即张量并行——一个模型多卡协同、1 leader + N worker 组成一个推理实例），再加 KV 传输引擎（Mooncake）。这正是 RBG 设计的目标形态——**一个 YAML 声明整条链路**（[官方 PD 分离例子](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/pd-disagg-leader-worker.yaml)）。PD 分离基础详见 [pd-decode-kvcache-offload.md](pd-decode-kvcache-offload.md)。
 
 ## 2. 它有什么效果？
 
@@ -63,7 +63,7 @@ spec:
 **③ 启动依赖**：`dependencies` 做拓扑排序分层推进，依赖不 Ready 下一层不创建（源码见第 5 节）。
 
 **④ 服务发现三件套**（最省心的部分）：
-- 每角色自动建 headless Service，名字 `s-<rbg名>-<角色名>`——`s-` 前缀是 DNS-1035「服务名不能数字开头」的要求（[helper.go:106-119](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/v1alpha2/helper.go#L106-L119)）；pod DNS 规律固定：`<rbg>-<role>-<序号>.s-<rbg>-<role>`
+- 每角色自动建 headless Service（不分配虚拟 IP 的 Service，DNS 直达每个 pod），名字 `s-<rbg名>-<角色名>`——`s-` 前缀是 DNS-1035「服务名不能数字开头」的要求（[helper.go:106-119](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/v1alpha2/helper.go#L106-L119)）；pod DNS 规律固定：`<rbg>-<role>-<序号>.s-<rbg>-<role>`
 - 环境变量自动注入（[constants/env.go](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/constants/env.go)）：`RBG_GROUP_NAME` / `RBG_ROLE_NAME` / `RBG_ROLE_INDEX`，leader-worker 模式再加 `RBG_LWP_LEADER_ADDRESS` / `RBG_LWP_GROUP_SIZE` / `RBG_LWP_WORKER_INDEX`——SGLang 多机组网三个参数（`--dist-init-addr/--nnodes/--node-rank`）直接用变量，零手算
 - `customComponentsPattern` 配套组件发现注解（把同实例某组件的 FQDN / 端口注入为环境变量，[component_discovery.go:34-40](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/pkg/component-discovery/component_discovery.go#L34-L40)）和端口分配器注解
 
@@ -71,7 +71,7 @@ spec:
 
 **⑥ 原地更新**（[instance.md](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/instance.md)）：`RecreatePod` / `InPlaceIfPossible`（能原地就原地：改镜像只重启容器，pod 名字 / IP / 节点 / GPU 绑定不变）/ `InPlaceOnly`（[rolebasedgroup_types.go:108-116](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/v1alpha2/rolebasedgroup_types.go#L108-L116)）。作用单元是实例（RoleInstance，pod 组整体升级）。
 
-**⑦ gang 调度**（[gang-scheduling.md](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/gang-scheduling.md)）：注解 `rbg.workloads.x-k8s.io/group-gang-scheduling: "true"`，控制器建 PodGroup（scheduler-plugins）或 Volcano podgroup，`minMember` = 全组所有角色 pod 总数——8 卡 TP 组只调度上 7 卡的场景被根治。
+**⑦ gang 调度**（一组 pod 要么全部调度成功、要么全部不调度；[gang-scheduling.md](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/gang-scheduling.md)）：注解 `rbg.workloads.x-k8s.io/group-gang-scheduling: "true"`，控制器建 PodGroup（scheduler-plugins）或 Volcano podgroup，`minMember` = 全组所有角色 pod 总数——8 卡 TP 组只调度上 7 卡的场景被根治。
 
 **⑧ 独占拓扑**（[exclusive-topology.md](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/exclusive-topology.md)）：注解 `rbg.workloads.x-k8s.io/group-exclusive-topology: kubernetes.io/hostname` 声明拓扑域，同组 pod 通过 `group-uid` / `group-unique-hash` 标签共置同节点 / 机架 / 可用区——KV 传输走 RDMA 时共置带宽直接决定架构划算与否。
 
@@ -125,6 +125,8 @@ RoleBasedGroup（一个推理服务）
 ```
 
 分层的意义：组管依赖/协同、角色管实例集合、实例管 pod 组——跨角色的事只在最上层做，每个 workload 不需要懂"别的角色"。
+
+行文名词约定：**角色**= 服务成员（router / prefill / decode）；**实例**= 角色的一副本（可能是一组 pod）；**组件**= 实例内的单个 pod（leader / worker）。
 
 **控制器 reconcile 链**（[rolebasedgroup_controller.go:475-580](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/internal/controller/workloads/rolebasedgroup_controller.go#L475-L580)）：
 

@@ -51,6 +51,8 @@
   .chip.ok { border-color: #a7f3d0; background: #f0fdf4; }
   .chip.no { border-color: #fecaca; background: #fef2f2; }
   .chip.warn { border-color: #fde68a; background: #fffbeb; }
+  .term { background: #eff6ff; border: 1px solid #bfdbfe; border-left: 3px solid var(--accent); border-radius: 8px; padding: 9px 14px; margin: 12px 0; font-size: 13.5px; line-height: 1.65; }
+  .term b { color: #1d4ed8; }
   .footnote { font-size: 13px; color: var(--text-dim); border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 20px; line-height: 1.7; }
   table.tbl { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
   table.tbl th, table.tbl td { border: 1px solid var(--border); padding: 7px 12px; text-align: left; vertical-align: top; }
@@ -123,25 +125,6 @@
 </div>
 </section>
 
-<!-- ============ 2 术语卡 ============ -->
-<section class="slide">
-<div class="inner">
-  <div class="kicker">预备 · 零基础假设：9 个术语，每个一句话直接定义</div>
-  <h2>先统一词汇 <span class="dim">读不懂任何一页时，翻回这页</span></h2>
-  <div class="grid2">
-    <div class="mini"><b>Kubernetes（K8s）</b>容器编排系统：把「哪些程序跑几份、各用多少资源」声明成 YAML，集群负责持续拉起和维持</div>
-    <div class="mini"><b>Operator / CRD</b>Operator 是用自定义控制器扩展 K8s 的模式；CRD（自定义资源定义）是注册新对象类型的机制——RBG 就是装进 K8s 的一套新对象 + 控制器</div>
-    <div class="mini"><b>prefill / decode / PD 分离</b>术语索引已登记（首次详解见 <a href="pd-decode-kvcache-offload.md">pd-decode-kvcache-offload.md</a>），本篇直接使用；部署编排视角的展开见第 4 页</div>
-    <div class="mini"><b>TP（张量并行）</b>一个大模型由多张 GPU 协同计算；1 个 leader + N 个 worker 组成一个推理实例</div>
-    <div class="mini"><b>headless Service</b>不分配虚拟 IP 的 K8s Service：DNS 直接解析到每个 pod，pod 名稳定、可直接按名寻址</div>
-    <div class="mini"><b>gang 调度</b>一组 pod「要么全部调度成功，要么全部不调度」，避免 8 卡只上 7 卡白占资源</div>
-    <div class="mini"><b>原地更新</b>改镜像只重启容器、不重建 pod——名字 / IP / 节点 / GPU 绑定都不变</div>
-    <div class="mini warn"><b>名词约定（全文统一）</b>「角色」= 服务成员（router / prefill / decode）；「实例」= 角色的一副本（可能是一组 pod）；「组件」= 实例内的单个 pod（leader / worker）</div>
-  </div>
-  <div class="footnote">术语遵循 <a href="glossary.md">glossary.md</a> 跨文章复用：讲过的引用不重复解释，本页新讲的（K8s / Operator / TP / headless Service / gang / 原地更新）发布后登记；PD 概念图解：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/quick_start.md">doc/quick_start.md</a> · <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/README.md">README</a>（角色/实例定义）</div>
-</div>
-</section>
-
 <!-- ============ 3 第一层：用来做什么（最小例子） ============ -->
 <section class="slide">
 <div class="inner">
@@ -168,6 +151,7 @@ spec:
     <li>这就是 RBG 的全部出发点：<b>角色之间的「关系」本身成为声明式 API 的一部分</b>——顺序、寻址、协同升级、配对扩缩，都写进一个 YAML</li>
     <li>nginx 是官方 quick start 例子；真实场景是下一页的 LLM 推理服务</li>
   </ul>
+  <div class="term"><b>Kubernetes / Operator / CRD</b> —— K8s 是「声明 YAML、集群持续拉起维持」的容器编排系统；<b>Operator</b> 是用自定义控制器扩展 K8s 的模式；<b>CRD</b>（自定义资源定义）是往 K8s 注册新对象类型的机制——下面这个 <code>RoleBasedGroup</code> 就是 RBG 注册进 K8s 的新对象类型。</div>
   <div class="footnote">例子出处：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/README.md">README「Quick Start」</a>（原文照抄，格式压缩）· 依赖语义源码：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/pkg/dependency/dependency.go#L43-L79">pkg/dependency/dependency.go:43-79</a></div>
 </div>
 </section>
@@ -210,6 +194,8 @@ spec:
     <li>PD 分离后<b>资源利用率更高</b>（官方 quick start：分离消除了两阶段的计算干扰、解耦了资源分配）——这是官方动机，不是实测结论</li>
     <li>代价是<b>部署复杂度暴涨</b>：三种角色、多卡组、KV 传输、配对扩缩——这正是 RBG 存在的理由</li>
   </ul>
+  <div class="term"><b>prefill / decode / PD 分离</b> —— prefill（预填充）是推理第一步：把整段 prompt 一次算完、产出 KV cache，决定首字延迟；decode（解码）是第二步：逐 token 生成，决定吐字速度；PD 分离即把两者拆成两个独立角色分别部署、分别扩缩。深入见 <a href="pd-decode-kvcache-offload.md">pd-decode-kvcache-offload.md</a>。</div>
+  <div class="term"><b>TP（张量并行）</b> —— 一个大模型由多张 GPU 协同计算，1 个 leader + N 个 worker 组成一个推理实例；「TP4」即一个实例 4 张卡（1 leader + 3 worker）。</div>
   <div class="footnote">PD 概念与聚合/分离部署图解：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/quick_start.md">doc/quick_start.md「PD Colocation / PD Disaggregated」</a> · 官方完整例子：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/pd-disagg-leader-worker.yaml">examples/inference/pd-disagg-leader-worker.yaml</a></div>
 </div>
 </section>
@@ -256,6 +242,7 @@ spec:
     <div class="mini"><b>⑪ CLI</b>kubectl-rbg 管理资源与 LLM 部署</div>
     <div class="mini"><b>⑫ AI 助手部署</b>rbg-agent-guide：让 Claude Code 等替你写 RBG YAML</div>
   </div>
+  <div class="chips"><span class="chip">README 用 SCOPE 五字母概括功能：<b>Stable</b> 拓扑确定性 · <b>Coordination</b> 跨角色协同 · <b>Orchestration</b> 依赖/启动/服务发现 · <b>Performance</b> 硬件亲和调度 · <b>Extensible</b> 声明式 + 插件</span></div>
   <div class="footnote">功能清单出处：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/TOC.md">doc/ 目录（TOC）</a> · <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/README.md">README「Key Features — SCOPE」</a>（Stable / Coordination / Orchestration / Performance / Extensible）</div>
 </div>
 </section>
@@ -335,6 +322,7 @@ spec:
     <li>③ customComponentsPattern 还有组件发现注解（把同实例某组件的 FQDN / 端口注入为环境变量）+ 端口分配器</li>
     <li>服务名 <code>s-</code> 前缀是故意的：DNS 规范要求服务名不能以数字开头（<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/v1alpha2/helper.go#L106-L119">helper.go:106-119</a>）</li>
   </ul>
+  <div class="term"><b>headless Service</b> —— 不分配虚拟 IP 的 K8s Service：DNS 直接解析到每个 pod，pod 名稳定、可按名寻址。RBG 给每个角色自动建一个，所以上面的域名规律才固定。</div>
   <div class="footnote">变量定义：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/constants/env.go#L60-L67">api/workloads/constants/env.go:60-67</a> · 组件发现：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/pkg/component-discovery/component_discovery.go#L34-L40">pkg/component-discovery/component_discovery.go:34-40</a> · 全表：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/reference/variables.md">doc/reference/variables.md</a></div>
 </div>
 </section>
@@ -480,6 +468,7 @@ spec:
       <text x="665" y="202" text-anchor="middle" font-size="11.5" fill="#78716c">KV 传输走 RDMA 时，共置带宽直接决定架构划算与否</text>
     </svg>
   </div>
+  <div class="term"><b>gang 调度</b> —— 一组 pod「要么全部调度成功、要么全部不调度」，避免多卡组只调度上一半白占资源、互相死等；独占拓扑则是让同组 pod 共置同一拓扑域（node / zone / region）。</div>
   <ul class="pts">
     <li>两条都是<b>一个注解</b>的事：声明在 RoleBasedGroup 上，控制器翻译成 PodGroup / pod 亲和规则，不用碰调度器配置</li>
     <li>出处：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/gang-scheduling.md">doc/features/gang-scheduling.md</a> · <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/exclusive-topology.md">doc/features/exclusive-topology.md</a></li>
@@ -555,6 +544,7 @@ kubectl apply -f examples/inference/pd-disagg-leader-worker.yaml</pre>
     <div class="mini"><b>配角对象（控制器自动建）</b>每角色 headless Service · ControllerRevision（版本）· PodGroup（gang）· ScalingAdapter（HPA 挂钩）· CoordinatedPolicy（独立 CRD）</div>
     <div class="mini"><b>为什么要分层</b>组管依赖/协同、角色管实例集合、实例管 pod 组——每层职责单一；跨角色的事只在最上层做，不用每个 workload 都懂"别的角色"</div>
   </div>
+  <div class="term"><b>README 的概念定义 + 名词约定</b> —— Role：基本调度与 rollout 单位（每个角色有独立 spec / 生命周期 / 策略）；RoleBasedGroup：一组角色组成一个逻辑服务；RoleInstance：一组生命周期强绑定的 pod，支持原地更新；CoordinatedPolicy：跨角色协同的独立 CRD。「角色」= 服务成员，「实例」= 角色一副本（可能一组 pod），「组件」= 实例内单个 pod。</div>
   <div class="footnote">API 参考：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/reference/api.md">doc/reference/api.md</a> · 对象/标签全表：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/reference/variables.md">doc/reference/variables.md</a></div>
 </div>
 </section>
@@ -636,7 +626,7 @@ kubectl apply -f examples/inference/pd-disagg-leader-worker.yaml</pre>
 <div class="nav">
   <a href="index.html" class="navhome" title="返回目录页">目录</a>
   <button id="prev" aria-label="上一页">←</button>
-  <span class="counter" id="counter">1 / 16</span>
+  <span class="counter" id="counter">1 / 15</span>
   <button id="next" aria-label="下一页">→</button>
 </div>
 <div class="hint">← / → 翻页</div>
