@@ -36,6 +36,42 @@ spec:
 
 **头号场景是 PD 分离的 LLM 推理。** prefill（预填充：推理第一步，把整段 prompt 一次算完、产出 KV cache，决定首字延迟）和 decode（解码：逐 token 生成，决定吐字速度）混布会互相干扰计算、耦合资源配比（[官方 quick start](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/quick_start.md)），分离后各自独立扩缩、独立配卡，代价是部署形态变成多角色 × 多卡 × 异构配比：router（单 pod）→ prefill（TP4：1 leader + 3 worker × 2 实例）→ decode（TP2 × 4 实例；TP 即张量并行——一个模型多卡协同、1 leader + N worker 组成一个推理实例），再加 KV 传输引擎（Mooncake）。这正是 RBG 设计的目标形态——**一个 YAML 声明整条链路**（[官方 PD 分离例子](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/pd-disagg-leader-worker.yaml)）。PD 分离基础详见 [pd-decode-kvcache-offload.md](pd-decode-kvcache-offload.md)。
 
+### 1.1 定位：它和 SMG / Dynamo 是什么关系？
+
+三者不在同一层，不是竞争关系——**RBG 是「管部署的」，SMG / Dynamo 是「干活的程序」**。用开餐厅类比：
+
+| 餐厅角色 | 对应谁 | 干什么 |
+|---|---|---|
+| 厨师 | 推理引擎（SGLang / vLLM） | 把请求算成结果 |
+| 领位员 | SMG（sglang-router，SGLang Model Gateway） | 把请求路由到某个 prefill/decode 实例 |
+| 连锁运营标准 | Dynamo | 数据中心级推理编排栈：路由、PD 分离、KV 路由（跨 vLLM/SGLang） |
+| 店长 + 施工队 | RBG | 把「几个厨师、几个领位员」编排起来：谁先谁后、扩缩、升级、寻址 |
+
+分层结构：
+
+```
+RBG（K8s 部署编排层：怎么把程序跑起来、扩缩、升级、寻址）
+  └─ 部署的对象里，可能包含：
+       SMG    —— 一个路由程序（sglang-router），当「router」角色
+       Dynamo —— 一个推理编排运行时（RBG 官方有「用 RBG 部署 Dynamo」样例）
+       SGLang/vLLM 引擎 —— prefill / decode 角色
+```
+
+SMG 是 SGLang 自家轻量路由组件，只做「把请求分给哪个 prefill/decode」这一件事；Dynamo 是 NVIDIA 的数据中心级编排栈，范围大得多。RBG 两者都能部署：例子里 router 角色用 SMG，`examples/inference/ecosystem/dynamo/` 是 Dynamo 样例。
+
+**直接部署一个 Gateway vs 用 RBG 部署 Gateway：**
+
+| | 直接部署 Gateway | RBG 部署 Gateway |
+|---|---|---|
+| 得到什么 | 一个孤零零的 router pod | 整条链路（router + prefill + decode） |
+| 后端 | 后厨自己另起一堆 Deployment/StatefulSet | 同一个 YAML 声明 |
+| 寻址 | `--prefill http://…` 自己填死 | RBG 的 headless Service 自动生成地址 |
+| 顺序/扩缩/升级 | 手动协调 | 依赖、协同、锁步升级都是整体动作 |
+
+官方例子 [pd-disagg-leader-worker.yaml](https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/pd-disagg-leader-worker.yaml) 的 router 就是 `lmsysorg/sglang-router`（即 SMG），命令里的 `--prefill "http://pd-disagg-lws-prefill-0.s-pd-disagg-lws-prefill:8000"` 域名由 RBG 命名规律自动生成，不用手建 Service。
+
+一句话：**RBG 不替你做 Gateway，它替你「把 Gateway 和它背后那一大家子」一起部署好。** 只想单点跑 router 试验，直接一个 Deployment 更轻；要挂真 prefill/decode、要扩缩升级，RBG 的价值就出来了。
+
 ## 2. 它有什么效果？
 
 同样的活，人做 vs 声明（每行机制都有源码/文档出处，见第 3 节和参考资料）：

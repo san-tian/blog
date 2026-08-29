@@ -200,6 +200,48 @@ spec:
 </div>
 </section>
 
+<!-- ============ 5 第一层：定位（SMG / Dynamo 关系） ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">第 1 层 · 定位（它和 SMG / Dynamo 是什么关系）</div>
+  <h2>RBG 是「管部署的」，SMG / Dynamo 是「干活的程序」</h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 250" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah8" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#94a3b8"/></marker>
+      </defs>
+      <rect x="150" y="12" width="600" height="54" rx="12" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.6"/>
+      <text x="450" y="34" text-anchor="middle" font-size="14" fill="#1d4ed8" font-weight="700">RBG —— K8s 部署编排层（店长 + 施工队）</text>
+      <text x="450" y="54" text-anchor="middle" font-size="11.5" fill="#78716c">把程序按拓扑部署、扩缩、升级、寻址；它不炒菜也不领位</text>
+      <line x1="300" y1="66" x2="210" y2="108" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ah8)"/>
+      <line x1="600" y1="66" x2="690" y2="108" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ah8)"/>
+      <text x="255" y="82" text-anchor="middle" font-size="11" fill="#78716c">部署 / 编排</text>
+      <text x="645" y="82" text-anchor="middle" font-size="11" fill="#78716c">部署 / 编排</text>
+      <rect x="60" y="110" width="320" height="56" rx="10" fill="#fff" stroke="#bfdbfe"/>
+      <text x="220" y="132" text-anchor="middle" font-size="13" fill="#1c1917" font-weight="700">SMG（sglang-router）· 领位员</text>
+      <text x="220" y="150" text-anchor="middle" font-size="11.5" fill="#78716c">路由组件：把请求分给哪个 prefill / decode</text>
+      <rect x="520" y="110" width="320" height="56" rx="10" fill="#fff" stroke="#bfdbfe"/>
+      <text x="680" y="132" text-anchor="middle" font-size="13" fill="#1c1917" font-weight="700">Dynamo · 连锁运营标准</text>
+      <text x="680" y="150" text-anchor="middle" font-size="11.5" fill="#78716c">数据中心级推理编排：路由 / PD 分离 / KV 路由</text>
+      <line x1="220" y1="166" x2="340" y2="205" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah8)"/>
+      <line x1="680" y1="166" x2="560" y2="205" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah8)"/>
+      <text x="450" y="184" text-anchor="middle" font-size="11" fill="#78716c">路由到 / 调度</text>
+      <rect x="230" y="207" width="440" height="38" rx="10" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="450" y="231" text-anchor="middle" font-size="12.5" fill="#1c1917" font-weight="700">SGLang / vLLM 引擎（厨师）：prefill（预填充）+ decode（解码）</text>
+    </svg>
+  </div>
+  <div class="grid2">
+    <div class="mini no"><b>直接部署一个 Gateway</b>只雇了「领位员」：后厨自己另起、<code>--prefill</code> 地址自己填死、顺序/扩缩/升级手动协调</div>
+    <div class="mini ok"><b>RBG 部署 Gateway</b>router 只是三个角色之一；地址由 headless Service 自动生成；依赖/扩缩/锁步升级都是整体动作</div>
+  </div>
+  <pre class="code"><span class="cmt"># 官方例子里 router = sglang-router（即 SMG），--prefill/--decode 地址是 RBG 自动生成的域名</span>
+--pd-disaggregation
+--prefill "http://pd-disagg-lws-prefill-0<span class="hl">.s-pd-disagg-lws-prefill</span>:8000"
+--decode  "http://pd-disagg-lws-decode-0.s-pd-disagg-lws-decode:8000"</pre>
+  <div class="footnote">SMG = SGLang Model Gateway（sglang-router）；Dynamo 样例：<a href="https://github.com/sgl-project/rbg/tree/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/ecosystem/dynamo">examples/inference/ecosystem/dynamo/</a> · router 角色证据：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/pd-disagg-leader-worker.yaml">pd-disagg-leader-worker.yaml</a> · 生态定位：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/README.md">README「Ecosystem Integration」</a></div>
+</div>
+</section>
+
 <!-- ============ 5 第二层：效果 ============ -->
 <section class="slide">
 <div class="inner">
@@ -626,7 +668,7 @@ kubectl apply -f examples/inference/pd-disagg-leader-worker.yaml</pre>
 <div class="nav">
   <a href="index.html" class="navhome" title="返回目录页">目录</a>
   <button id="prev" aria-label="上一页">←</button>
-  <span class="counter" id="counter">1 / 15</span>
+  <span class="counter" id="counter">1 / 16</span>
   <button id="next" aria-label="下一页">→</button>
 </div>
 <div class="hint">← / → 翻页</div>
