@@ -27,7 +27,7 @@
 
 ## 背景：fp8 下 indexer 与 attention 共享的 KV 布局
 
-先统一定义四个术语（全文沿用，直接给定义、不用比喻）：**KV cache（键值缓存）**——注意力机制为每个 token 生成的中间状态缓存，decode 时每生成一个 token 都要读取之前全部 token 的 KV，本文的「写 kernel」即把新算出的 KV 写入该缓存；**indexer（索引器）**——GLM-5.2 稀疏注意力的选路模块，对历史 KV 做低精度打分、选出 top-k（约 2048）条，注意力只对选中条目计算，它与 attention 共用同一份 KV（即本文的 "indexer KV share"）；**DCP（decode context parallelism）**——把 KV cache 按 token 轮转分布到 dcp 张 GPU（dcp=4/8 即 4/8 卡各存一份子集），写入前需将全局 slot 编号换算为本卡物理行号，本文的 bug 正是丢掉了这步换算；**kernel**——GPU 上执行的并行计算函数。另：「乱码」指模型输出变成无意义文字；slot / 行 = KV cache 的一个 token 槽位，loc = 写入目标 slot 编号，rank = 一个 DCP 参与方（一张 GPU 一个 rank）。
+术语引用约定：只对首次出现的术语详细解释，讲过的直接引用（术语索引见 [glossary.md](glossary.md)）。**DSA（DeepSeek Sparse Attention，稀疏注意力架构）**——GLM-5.2 采用的注意力结构：dense 注意力（MHA/MLA）每步对全部历史 token 计算，长上下文下计算量不可控；DSA 改为两段式：先选路、再计算。**indexer（索引器）**——DSA 的选路模块：对每个 query 用低精度（fp8）打分器给全部历史 KV 打分、选出 top-k 条（GLM-5.2 约 2048），attention 只对选中条目计算；indexer 打分与 attention 计算读同一份 K（即本文的 "indexer KV share"）。这两个术语为本文首次详细解释，已登记术语索引。KV cache、kernel、MLA 旧文已讲过，本文直接使用：prefill/decode/PD 分离见《PD 分离架构里 decode 二级 KV 缓存机制》；MLA 见《在 H200 上服务 GLM-5.2》；DCP 概念（KV 按序列维切分到多卡）见《DCP 实测》，本文只讲 sglang 实现的「全局 slot 编号 → 本卡物理行号」换算；656B 行布局与量化公式见姊妹篇《GLM-5.2 decode TPOT 优化》。另：「乱码」指模型输出变成无意义文字；slot / 行 = KV cache 的一个 token 槽位，loc = 写入目标 slot 编号，rank = 一个 DCP 参与方（一张 GPU 一个 rank）。
 
 GLM-5.2 开 `--kv-cache-dtype fp8_e4m3` 后，DSA 层（稀疏注意力层）的 KV 行变成 656 字节混合布局，indexer 的 topk 打分和稀疏 attention 读同一份 KV（即本次的 "indexer KV share"）：
 

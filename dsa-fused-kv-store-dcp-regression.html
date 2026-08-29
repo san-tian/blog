@@ -119,21 +119,29 @@
 </div>
 </section>
 
-<!-- ============ 2 背景·术语定义 ============ -->
+<!-- ============ 2 背景·新术语：DSA 与 indexer ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">背景 · 术语定义：全文统一四个名词</div>
-  <h2>四个术语的直接定义</h2>
+  <div class="kicker">背景 · 首次详细解释：DSA 与 indexer（讲过的术语直接引用，见 glossary.md）</div>
+  <h2>DSA（稀疏注意力）与 indexer（选路模块）</h2>
   <div class="grid2">
-    <div class="mini"><b>KV cache（键值缓存）</b>注意力机制为每个 token 生成的中间状态缓存；decode 时每生成一个 token 都要读取之前全部 token 的 KV。本文的「写 kernel」就是把新算出的 KV 写入这个缓存</div>
-    <div class="mini"><b>indexer（索引器）</b>GLM-5.2 稀疏注意力的选路模块：对历史 KV 做低精度打分、选出 top-k（约 2048）条，注意力只对选中条目计算。它与 attention <b>共用同一份 KV</b>——优化名 "indexer KV share" 即由此而来</div>
-    <div class="mini"><b>DCP（decode context parallelism）</b>把 KV cache 按 token 轮转分布到 dcp 张 GPU（dcp=4 即 4 卡各存 1/4），每卡只存自己那份。因此写入前必须把<b>全局 slot 编号换算成本卡物理行号</b>——本文的 bug 正是丢掉了这步换算</div>
-    <div class="mini"><b>kernel（GPU kernel）</b>GPU 上执行的并行计算函数；本文的排查对象就是一个新写的 KV 写入 kernel（量化 + 写入一步完成）</div>
+    <div class="mini"><b>DSA（DeepSeek Sparse Attention）</b>GLM-5.2 采用的稀疏注意力架构。dense 注意力（MHA/MLA）每步对<b>全部</b>历史 token 计算，长上下文下计算量不可控；DSA 改为两段式：<b>先选路、再计算</b></div>
+    <div class="mini"><b>indexer（索引器）</b>DSA 的选路模块：对每个 query 用低精度（fp8）打分器给<b>全部历史 KV</b> 打分，选出 top-k 条（GLM-5.2 约 2048）——它决定 attention「看哪些历史」。它与 attention <b>共用同一份 K</b>，即优化名 "indexer KV share" 的由来</div>
+  </div>
+  <div class="flow">
+    <div class="fbox" style="flex:1.3"><b>query</b><small>当前 token 的查询向量</small></div>
+    <div class="farrow">→</div>
+    <div class="fbox" style="flex:2.1"><b>① indexer 打分</b><small>fp8 低精度，扫全部历史 K，选出 top-k 条目 id</small></div>
+    <div class="farrow">→</div>
+    <div class="fbox" style="flex:2.1"><b>② 稀疏 attention</b><small>只对选中的 top-k 条目做完整计算</small></div>
+    <div class="farrow">→</div>
+    <div class="fbox" style="flex:1.2"><b>输出</b><small>每步计算量 O(top-k)，而非 O(全部历史)</small></div>
   </div>
   <div class="chips">
-    <span class="chip">名词约定：slot / 行 = KV cache 的一个 token 槽位；loc = 写入目标 slot 编号；rank = 一个 DCP 参与方（一张 GPU 一个 rank）</span>
+    <span class="chip">📄 <b>DCP</b>：概念已讲过——<a href="dynamic-context-parallelism.md">《DCP 实测》</a>（KV 按序列维切分到多卡）；本文只讲 sglang 实现的换算细节（第 7 页）</span>
+    <span class="chip">📄 <b>KV cache / kernel / MLA</b>：旧文已讲过，本文直接使用（术语索引见 <a href="glossary.md">glossary.md</a>）</span>
   </div>
-  <div class="footnote">「乱码」= 模型输出突然变成无意义文字（生成质量崩坏）；「优化」= 让 KV 写入更快的一个 kernel 改动，dcp=1 时输出与改动前完全一致。</div>
+  <div class="footnote">名词约定：slot / 行 = KV cache 的一个 token 槽位；loc = 写入目标 slot 编号；rank = 一个 DCP 参与方（一张 GPU 一个 rank）；「乱码」= 模型输出变成无意义文字。DSA 与 indexer 为本文首次详细解释，已登记术语索引。</div>
 </div>
 </section>
 
@@ -156,7 +164,7 @@
     <li>这次优化（<a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a>）把这一行的<b>写入</b>从「量化 + 写回」两步并成一步 kernel——更快、输出字节级一致（性能目的合理）</li>
     <li>但 DCP 下（上页定义），写入需先做「全局 slot 编号 → 本卡物理行号」的换算——<b>换算规则就是排查的主角</b>：归属 rank = v % dcp，物理行号 = v // dcp</li>
   </ul>
-  <div class="footnote">「关掉优化」= 回到 bf16 KV / 旧写路径（带换算），所以怎么开 dcp 都正常——这是后面「变量隔离」的线索。</div>
+  <div class="footnote">「关掉优化」= 回到 bf16 KV / 旧写路径（带换算），所以怎么开 dcp 都正常——这是后面「变量隔离」的线索。656B 布局与量化公式的逐字节解读见姊妹篇《GLM-5.2 decode TPOT 优化》（glm52-tpot-decode-optimization.html）。</div>
 </div>
 </section>
 
@@ -177,7 +185,7 @@
     <div class="mini"><b>线索 2：时间形态</b>不是立刻坏，而是「开头正常 → 跑一段时间突然乱码」⇒ 内存状态积累型（错位写 / 越界写）特征</div>
     <div class="mini warn"><b>线索 3（误导项）</b>dcp=8 暂未复现 ⇒ 后面会看到这是「没跑到拐点」的假象，不是兼容</div>
   </div>
-  <div class="footnote">「乱码」= 模型输出变成无意义文字；dcp=N = KV cache 分布在 N 张 GPU 上（见第 2 页术语定义）。排查顺序：先沿线索 1 锁定「什么变了」（下一页），再沿线索 2 定位「错误落在哪、何时发生」。</div>
+  <div class="footnote">「乱码」= 模型输出变成无意义文字；dcp=N = KV cache 分布在 N 张 GPU 上（DCP 概念详见《DCP 实测》，第 2 页有引用）。排查顺序：先沿线索 1 锁定「什么变了」（下一页），再沿线索 2 定位「错误落在哪、何时发生」。</div>
 </div>
 </section>
 
