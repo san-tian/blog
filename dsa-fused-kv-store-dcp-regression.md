@@ -1,5 +1,8 @@
 # DSA 融合 KV 写 kernel 丢失 DCP 映射：dcp>1 乱码根因排查
 
+> 📑 **逐页卡片版（建议先看）**：[dsa-fused-kv-store-dcp-regression.html](dsa-fused-kv-store-dcp-regression.html) —— 12 页幻灯片，每页一张图。本文是详细证据版。
+
+
 > 排查对象：`0a60805df4`（DSA fused quant+store，即 indexer KV share 优化）。现象：dcp=4 下服务开头输出正常，跑一段时间突然乱码；关掉该优化则 dcp=4/8 均正常；dcp=8 下开优化暂时未复现乱码。结论一句话：新融合 kernel 丢掉了旧写入路径里的 DCP 虚拟 id → 本地行号映射（owner mask + `loc // dcp`），DCP 下把虚拟 id 直接当物理行号写，先错位、后越界。**这不是 dcp 值特异的 bug，kernel 对任何 dcp>1 都不正确，dcp=8 的"正常"是水位没越过越界阈值的假象。**
 
 ## TL;DR
