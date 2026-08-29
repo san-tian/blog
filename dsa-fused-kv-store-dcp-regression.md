@@ -208,7 +208,7 @@ DCP 下虚拟 id 的几何：`v = p·(64·dcp) + i`（p 为虚拟页号，i 为�
 
 - **写侧（本 commit 引入，确定）**：`fused_dsa_quant_store` 丢掉了旧路径的 DCP mask+divide（`loc % dcp == rank` + `loc // dcp`），直接以虚拟 id 当物理行号写。这是 commit `0a60805df4` 的唯一改动（diff 铁证，旧 kernel 与新 kernel 逐行对比即可确认），**不需要上机验证**。
 - **读侧（本来就有，非本 bug 来源）**：本分支 DSA 读/indexer 路径没有 DCP 换算代码（生产分支 b300-glm52 有整套 `_localize_index_k_cache_locs` + 读侧 repair，见 `37231e4884`/`3a6d3f281f`）。它之前靠写侧 kernel 写对行号才没暴露；本 commit 拆掉写侧保护后，隐患变成真 bug。rebase 生产分支时需一并补齐。
-- **dcp=8 未复现（待实测）**：按写侧代码推，dcp=4 与 dcp=8 都该乱码；dcp=8 未复现最可能是那组实验没跑到越界水位（阈值 = 累计分配 > size，与 dcp 值无关）。此点尚待实测确认，不影响前两条结论。
+- **dcp=8 未复现（待确认，最可能是不同代码）**：写侧 bug 对 dcp=4/8 完全对称、都该乱码，所以 dcp=8 未复现更可能是那组实验跑的不是这份代码——生产分支（b300-glm52）没有 fused kernel（走旧 DCP-aware 两步路径）且读侧 DCP 换算齐全（dsa_indexer.py 的 `_localize_index_k_cache_locs`），新分支只有 fused kernel、读侧无换算。次要可能：若确实是同一份代码，则 dcp=8 那组没跑到越界水位（阈值 = 累计分配 > size，与 dcp 无关）。需确认 dcp=8 的部署分支/环境，此点不影响前两条结论。
 
 ## 修复建议
 

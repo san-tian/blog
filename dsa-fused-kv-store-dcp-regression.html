@@ -526,7 +526,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <span class="step cur">复盘 · dcp=8</span>
   </div>
   <div class="kicker" style="margin-top:2px;">复盘 · 线索 3 的解释</div>
-  <h2>那为什么 dcp=8 没复现？<span class="dim">最可能是没跑到越界水位（待实测）</span></h2>
+  <h2>那为什么 dcp=8 没复现？<span class="dim">最可能：跑的不是这份代码</span></h2>
   <div class="fig">
     <svg viewBox="0 0 880 235" xmlns="http://www.w3.org/2000/svg">
       <line x1="40" y1="195" x2="840" y2="195" stroke="#cbd5e1" stroke-width="2"/>
@@ -546,11 +546,11 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     </svg>
   </div>
   <ul class="pts">
-    <li>越界阈值 = 「累计分配 &gt; size」，与 dcp 值无关——dcp=8 未复现，<b>最可能是那组实验没跑到水位</b>（推断，待实测）</li>
+    <li><b>最可能（代码证据）</b>：写侧 bug 对 dcp=4/8 完全对称，都该炸——所以 dcp=8 未复现更可能是<b>那组实验跑的不是这份代码</b>：生产分支（b300-glm52）没有 fused kernel（走旧 DCP-aware 两步路径）且读侧 DCP 换算齐全（dsa_indexer 有 _localize_index_k_cache_locs）；新分支只有 fused kernel、读侧无换算</li>
+    <li><b>次要可能</b>：若两份实验确实是同一份代码、只有 dcp 值不同，则是 dcp=8 那组没跑到越界水位（阈值 = 累计分配 &gt; size，与 dcp 无关）</li>
     <li>数学上只有 dcp=1 正确：<code>v//1 == v</code>，虚拟域与物理域重合</li>
-    <li>推论：同负载长跑，dcp=8 应该也会炸（待实测）；但「kernel 对 dcp&gt;1 不正确」是代码事实，与 dcp=8 的观测无关</li>
   </ul>
-  <div class="footnote">⚠ dcp=8 未复现的精确机理（水位/时长/读侧自洽区间差异）需压测复核；「kernel 对任何 dcp&gt;1 都不正确」不依赖此点——写侧丢失 mask+divide 是代码事实。</div>
+  <div class="footnote">⚠ 需你确认 dcp=8 是在哪套环境/分支跑的：生产分支（未 deploy 本 commit）还是同一份代码。写侧 bug 是 commit 引入（diff 铁证），与 dcp=8 的观测无关。</div>
 </div>
 </section>
 
