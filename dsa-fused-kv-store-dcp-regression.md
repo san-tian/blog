@@ -204,6 +204,12 @@ DCP 下虚拟 id 的几何：`v = p·(64·dcp) + i`（p 为虚拟页号，i 为�
 
 另外注意：生产分支还有本分支（kernel/dsa-fused-quant-store）缺失的一批 DCP 读侧修复（`_localize_index_k_cache_locs`、`_repair_global_kv_slots_`、page-table read repair，见 [`3a6d3f281f`](https://github.com/MindLab-Research/sglang/commit/3a6d3f281f) / [`37231e4884`](https://github.com/MindLab-Research/sglang/commit/37231e4884)）。如果要把这个 fused kernel 往生产分支 rebase，写侧补 DCP 只是第一步，读侧这批修复必须一并核对，否则乱码会以另一种形式重现。
 
+## 结论与责任归属
+
+- **写侧（本 commit 引入，确定）**：`fused_dsa_quant_store` 丢掉了旧路径的 DCP mask+divide（`loc % dcp == rank` + `loc // dcp`），直接以虚拟 id 当物理行号写。这是 commit `0a60805df4` 的唯一改动（diff 铁证，旧 kernel 与新 kernel 逐行对比即可确认），**不需要上机验证**。
+- **读侧（本来就有，非本 bug 来源）**：本分支 DSA 读/indexer 路径没有 DCP 换算代码（生产分支 b300-glm52 有整套 `_localize_index_k_cache_locs` + 读侧 repair，见 `37231e4884`/`3a6d3f281f`）。它之前靠写侧 kernel 写对行号才没暴露；本 commit 拆掉写侧保护后，隐患变成真 bug。rebase 生产分支时需一并补齐。
+- **dcp=8 未复现（待实测）**：按写侧代码推，dcp=4 与 dcp=8 都该乱码；dcp=8 未复现最可能是那组实验没跑到越界水位（阈值 = 累计分配 > size，与 dcp 值无关）。此点尚待实测确认，不影响前两条结论。
+
 ## 修复建议
 
 **方案 A（推荐）：kernel 内补回 DCP，与旧 kernel 逐行对齐**

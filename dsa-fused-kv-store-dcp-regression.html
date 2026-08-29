@@ -526,7 +526,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <span class="step cur">复盘 · dcp=8</span>
   </div>
   <div class="kicker" style="margin-top:2px;">复盘 · 线索 3 的解释</div>
-  <h2>那为什么 dcp=8 「没事」？<span class="dim">拐点与 dcp 值无关 —— 只是没跑到</span></h2>
+  <h2>那为什么 dcp=8 没复现？<span class="dim">最可能是没跑到越界水位（待实测）</span></h2>
   <div class="fig">
     <svg viewBox="0 0 880 235" xmlns="http://www.w3.org/2000/svg">
       <line x1="40" y1="195" x2="840" y2="195" stroke="#cbd5e1" stroke-width="2"/>
@@ -542,13 +542,13 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
       <line x1="60" y1="150" x2="400" y2="150" stroke="#059669" stroke-width="4"/>
       <circle cx="400" cy="150" r="8" fill="#d97706"/>
       <text x="66" y="137" font-size="13.5" fill="#1c1917" font-weight="700">dcp=8 实验</text>
-      <text x="416" y="155" font-size="12.5" fill="#d97706">停在拐点前 → 「看起来正常」</text>
+      <text x="416" y="155" font-size="12.5" fill="#d97706">停在拐点前 → 未复现（推断）</text>
     </svg>
   </div>
   <ul class="pts">
-    <li>越界阈值都是「累计分配 &gt; size」，<b>dcp 值不改变拐点位置</b>——dcp=8 的「正常」是没跑到，不是兼容</li>
+    <li>越界阈值 = 「累计分配 &gt; size」，与 dcp 值无关——dcp=8 未复现，<b>最可能是那组实验没跑到水位</b>（推断，待实测）</li>
     <li>数学上只有 dcp=1 正确：<code>v//1 == v</code>，虚拟域与物理域重合</li>
-    <li>同负载长跑，dcp=8 同样会炸；「兼容 dcp=8」这个结论不要采信</li>
+    <li>推论：同负载长跑，dcp=8 应该也会炸（待实测）；但「kernel 对 dcp&gt;1 不正确」是代码事实，与 dcp=8 的观测无关</li>
   </ul>
   <div class="footnote">⚠ dcp=8 未复现的精确机理（水位/时长/读侧自洽区间差异）需压测复核；「kernel 对任何 dcp&gt;1 都不正确」不依赖此点——写侧丢失 mask+divide 是代码事实。</div>
 </div>
@@ -572,7 +572,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
   </div>
   <div class="chips">
     <span class="chip warn">附带：<b>HIP fp8 分支</b>（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/kvcache/mla_buffer.py#L206-L208">set_mla_kv_buffer_fp8_quant_kernel</a>）同样没有 DCP 换算——AMD 上开 DCP+fp8 share 会踩同坑（存量，非本 commit 引入）</span>
-    <span class="chip warn">rebase 到生产分支时，读侧那批 DCP 修复（_localize_index_k_cache_locals 等，<a href="https://github.com/MindLab-Research/sglang/commit/37231e4884">37231e4884</a>）需一并核对</span>
+    <span class="chip warn">读侧 DCP 不完整是<b>本分支本来就有</b>（DSA 读路径无换算；生产分支在 dsa_indexer/dsa_backend 有整套 _localize + read repair，<a href="https://github.com/MindLab-Research/sglang/commit/37231e4884">37231e4884</a>）——非本 commit 引入，rebase 需一并核对</span>
   </div>
   <div class="footnote">验证建议：dcp=4 长时压测，监控累计分配越过 size 后的输出质量；对照 dcp=1 应全程正常。</div>
 </div>
@@ -611,7 +611,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
   <h2>narrow down 到终点</h2>
   <div class="grid3">
     <div class="mini no"><b>① 根因</b>fused_dsa_quant_store 丢掉了所有其他 KV 写路径都有的 DCP 映射（归属过滤 + v//dcp），把虚拟 id 当物理行号直接写</div>
-    <div class="mini warn"><b>② 现象</b>v&lt;size 错位写、v≥size 越界写 → 「开头正常、突然乱码」；拐点=累计分配&gt;size，与 dcp 值无关 → dcp=8 是没跑到拐点的假象</div>
+    <div class="mini warn"><b>② 现象</b>v&lt;size 错位写、v≥size 越界写 → 「开头正常、突然乱码」；dcp=8 未复现最可能是没跑到越界水位（待实测）</div>
     <div class="mini ok"><b>③ 修复</b>kernel 补回 mask+divide（或 dcp_enabled 回退旧路径）+ 补 slot0 跳过；HIP fp8 分支有同款存量坑</div>
   </div>
   <ul class="pts">
@@ -623,7 +623,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <span class="chip">🔍 源码 commit：<a href="https://github.com/san-tian/sglang/commit/0a60805df4">0a60805df4</a></span>
     <span class="chip">🧾 同类前科：<a href="https://github.com/MindLab-Research/sglang/commit/37231e4884">37231e4884</a>（生产分支 fix(dcp)）</span>
   </div>
-  <div class="footnote">本报告为源码静态排查（2026-08-27，无上机实验）；读侧 C++ kernel 无法静态核实处已在 md 版用 ⚠ 标注。←/→ 或方向键翻页 · <a href="index.html">返回目录</a></div>
+  <div class="footnote">责任归属：写侧丢失 DCP 换算 = 本 commit 引入（diff 铁证，确定）；读侧 DCP 不完整 = 分支本来就有（隐患，非本 bug 来源）；dcp=8 未复现 = 待实测。本报告为源码静态排查（2026-08-27，无上机实验）；读侧 C++ 无法静态核实处已在 md 版用 ⚠ 标注。←/→ 或方向键翻页 · <a href="index.html">返回目录</a></div>
 </div>
 </section>
 
