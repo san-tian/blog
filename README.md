@@ -147,6 +147,7 @@ push 后自动部署，文章即可在线访问。
 
 | 文件 | 主题 |
 |---|---|
+| `rbg-rolebasedgroup-explained.html` / `.md` | RBG（SGLang 项目的多角色 LLM 推理 K8s Operator）讲解：四层对象/三种模式/服务发现/协同策略/gang 调度/PD 分离实战（卡片版 + 详细版） |
 | `pd-decode-kvcache-offload.md` | PD 分离架构里 decode 二级 KV 缓存机制与路径 A/B 对比 |
 | `dsa-fused-kv-store-dcp-regression.html` | DSA×DCP 乱码根因排查：逐页卡片式报告（卡片形式的模板实现） |
 | `why-decode-needs-no-l2-cache.html` | 上面那篇的 HTML 版，标题《为什么 PD 分离中，decode 不需要二级缓存？》 |

@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RBG（RoleBasedGroup）讲解：在 K8s 上把多角色 LLM 推理服务当『一个有机体』编排（卡片版）</title>
+<style>
+  :root {
+    --bg: #fafaf9; --card: #ffffff; --card-2: #f8f8f7; --border: #e7e5e4;
+    --text: #1c1917; --text-dim: #78716c; --accent: #1d4ed8;
+    --green: #059669; --red: #dc2626; --yellow: #d97706;
+    --code-bg: #f8fafc; --inline-code-bg: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.7; font-size: 16px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .progress { position: fixed; top: 0; left: 0; height: 3px; background: var(--accent); width: 0; transition: width .3s; z-index: 20; }
+  .deck { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 56px 20px 90px; }
+  .slide { display: none; width: 100%; }
+  .slide.active { display: flex; animation: fadeUp .35s ease; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+  .inner {
+    width: min(980px, 100%); background: var(--card); border: 1px solid var(--border);
+    border-radius: 18px; padding: 42px 52px 34px; box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    max-height: calc(100vh - 130px); overflow-y: auto;
+  }
+  .kicker { color: var(--accent); font-size: 13px; letter-spacing: .14em; font-weight: 700; margin-bottom: 8px; }
+  .inner h2 { font-size: 26px; font-weight: 700; color: #111; margin: 0 0 14px; line-height: 1.35; }
+  .inner h2 .dim { color: var(--text-dim); font-weight: 500; font-size: .62em; }
+  .pts { margin: 10px 0; padding-left: 1.35em; font-size: 16px; }
+  .pts li { margin: 7px 0; }
+  .pts code, td code, .footnote code, .mini code, .chip code { font-family: "JetBrains Mono","Fira Code",Consolas,Menlo,monospace; background: var(--inline-code-bg); color: #2563eb; padding: 1px 6px; border-radius: 4px; font-size: .88em; }
+  .fig { margin: 20px auto; text-align: center; }
+  .fig svg { width: 100%; height: auto; max-width: 900px; }
+  .fig .figcap { font-size: 13px; color: var(--text-dim); margin-top: 6px; }
+  pre.code {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; font-size: 13.5px; line-height: 1.7; overflow-x: auto;
+    font-family: "JetBrains Mono","Fira Code",Consolas,Menlo,monospace; margin: 14px 0; text-align: left;
+  }
+  pre.code .cmt { color: #94a3b8; }
+  pre.code .hl { background: #fef9c3; border-radius: 3px; padding: 0 3px; }
+  pre.code .add { color: var(--green); font-weight: 700; }
+  pre.code .bad { color: var(--red); font-weight: 700; }
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
+  .chip { background: var(--card-2); border: 1px solid var(--border); border-radius: 999px; padding: 6px 14px; font-size: 13px; }
+  .chip b { color: #111; }
+  .chip.ok { border-color: #a7f3d0; background: #f0fdf4; }
+  .chip.no { border-color: #fecaca; background: #fef2f2; }
+  .chip.warn { border-color: #fde68a; background: #fffbeb; }
+  .footnote { font-size: 13px; color: var(--text-dim); border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 20px; line-height: 1.7; }
+  table.tbl { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  table.tbl th, table.tbl td { border: 1px solid var(--border); padding: 7px 12px; text-align: left; vertical-align: top; }
+  table.tbl th { background: var(--card-2); font-weight: 600; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0; }
+  .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 16px 0; }
+  .mini { background: var(--card-2); border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px; font-size: 13.5px; line-height: 1.6; }
+  .mini b { display: block; color: #111; margin-bottom: 3px; font-size: 14px; }
+  .mini .src { color: var(--text-dim); font-size: 12px; font-family: "JetBrains Mono",Consolas,monospace; word-break: break-all; }
+  .mini.no { border-color: #fecaca; background: #fef2f2; }
+  .mini.ok { border-color: #a7f3d0; background: #f0fdf4; }
+  .mini.warn { border-color: #fde68a; background: #fffbeb; }
+  .nav { position: fixed; bottom: 18px; right: 22px; display: flex; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 7px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.10); z-index: 20; }
+  .nav button { border: 1px solid var(--border); background: var(--card-2); color: var(--text); border-radius: 999px; width: 34px; height: 34px; font-size: 16px; cursor: pointer; }
+  .nav button:hover { background: var(--inline-code-bg); }
+  .counter { font-size: 13px; color: var(--text-dim); min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
+  .hint { position: fixed; bottom: 26px; left: 26px; font-size: 12px; color: #b8b3ad; z-index: 20; }
+  @media (max-width: 760px) {
+    .inner { padding: 26px 20px; } .grid3, .grid4 { grid-template-columns: 1fr 1fr; } .grid2 { grid-template-columns: 1fr; }
+    .inner h2 { font-size: 21px; } .hint { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="progress"></div>
+<div class="deck" id="deck">
+
+<!-- ============ 1 封面 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">RBG 讲解 · sgl-project/rbg @ 4acd5a7 · v0.7.0</div>
+  <h2>RBG（RoleBasedGroup）<span class="dim">把多角色 LLM 推理服务当『一个有机体』编排的 Kubernetes Operator</span></h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 240" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah1" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#78716c"/></marker>
+      </defs>
+      <!-- old world -->
+      <rect x="30" y="30" width="330" height="180" rx="12" fill="#fef2f2" stroke="#fecaca"/>
+      <text x="195" y="58" text-anchor="middle" font-size="14" fill="#dc2626" font-weight="700">原生 K8s：N 个各自为政的对象</text>
+      <rect x="55" y="80" width="120" height="34" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="115" y="102" text-anchor="middle" font-size="12.5" fill="#1c1917">Deployment: router</text>
+      <rect x="55" y="130" width="120" height="34" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="115" y="152" text-anchor="middle" font-size="12.5" fill="#1c1917">STS: prefill</text>
+      <rect x="55" y="180" width="120" height="34" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="115" y="202" text-anchor="middle" font-size="12.5" fill="#1c1917">STS: decode</text>
+      <text x="255" y="130" text-anchor="middle" font-size="12" fill="#78716c">启动顺序？配对扩缩？</text>
+      <text x="255" y="150" text-anchor="middle" font-size="12" fill="#78716c">协同升级？服务发现？</text>
+      <text x="255" y="170" text-anchor="middle" font-size="12" fill="#78716c">全靠人肉胶水</text>
+      <!-- arrow -->
+      <line x1="390" y1="120" x2="470" y2="120" stroke="#78716c" stroke-width="2.5" marker-end="url(#ah1)"/>
+      <text x="430" y="106" text-anchor="middle" font-size="12.5" fill="#1d4ed8" font-weight="700">RBG</text>
+      <!-- new world -->
+      <rect x="490" y="30" width="380" height="180" rx="12" fill="#eff6ff" stroke="#bfdbfe"/>
+      <text x="680" y="58" text-anchor="middle" font-size="14" fill="#1d4ed8" font-weight="700">RoleBasedGroup：一个 CRD = 一个推理服务</text>
+      <rect x="520" y="78" width="100" height="56" rx="8" fill="#fff" stroke="#bfdbfe"/><text x="570" y="100" text-anchor="middle" font-size="12" fill="#1c1917" font-weight="700">router</text><text x="570" y="118" text-anchor="middle" font-size="11" fill="#78716c">standalone ×1</text>
+      <rect x="640" y="78" width="100" height="56" rx="8" fill="#fff" stroke="#bfdbfe"/><text x="690" y="100" text-anchor="middle" font-size="12" fill="#1c1917" font-weight="700">prefill</text><text x="690" y="118" text-anchor="middle" font-size="11" fill="#78716c">TP4 ×2 实例</text>
+      <rect x="760" y="78" width="100" height="56" rx="8" fill="#fff" stroke="#bfdbfe"/><text x="810" y="100" text-anchor="middle" font-size="12" fill="#1c1917" font-weight="700">decode</text><text x="810" y="118" text-anchor="middle" font-size="11" fill="#78716c">TP2 ×4 实例</text>
+      <text x="680" y="165" text-anchor="middle" font-size="12.5" fill="#059669">✓ 启动依赖　✓ 协同升级/扩缩（maxSkew）　✓ 免手写服务发现</text>
+      <text x="680" y="188" text-anchor="middle" font-size="12.5" fill="#059669">✓ gang 调度　✓ 独占拓扑　✓ 原地更新　✓ 每角色独立 HPA</text>
+    </svg>
+  </div>
+  <ul class="pts">
+    <li><b>一句话</b>：SGLang 项目开源的 K8s Operator（Go，Apache-2.0），把 PD 分离推理服务的部署拓扑、启动顺序、跨角色协同、服务发现、gang 调度全部声明式接管</li>
+    <li><b>14 页讲解路径</b>：痛点 → 核心抽象 → 部署模式 → 服务发现 → 实战 → 依赖/协同/原地更新 → 调度 → 控制器 → 生态 → 版本 → 总结</li>
+  </ul>
+  <div class="chips">
+    <span class="chip">📦 仓库：<a href="https://github.com/sgl-project/rbg">github.com/sgl-project/rbg</a></span>
+    <span class="chip">📚 文档：<a href="https://rolebasedgroup.github.io">rolebasedgroup.github.io</a></span>
+    <span class="chip">📄 详细版：<code>rbg-rolebasedgroup-explained.md</code></span>
+  </div>
+  <div class="footnote">源码锚定 commit <a href="https://github.com/sgl-project/rbg/commit/4acd5a791e9709f34c4bd5da569e6427896d21a5">4acd5a7</a>（2026-08-29）；全部结论来自该 commit 静态阅读 + 官方文档，未上机部署。←/→ 翻页</div>
+</div>
+</section>
+
+<!-- ============ 2 痛点 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">01 · 痛点</div>
+  <h2>原生 K8s 原语，编排不了一个 PD 分离服务</h2>
+  <div class="grid3">
+    <div class="mini no"><b>① 多角色拓扑</b>gateway → router → prefill → decode 是一个服务的四个角色。Deployment/StatefulSet 各管各的：谁先启动、谁跟谁配对，原生没有这个语义，只能 init container / Helm hook 人肉拼</div>
+    <div class="mini no"><b>② 性能敏感</b>GPU 亲和（NVLink → PCIe → RDMA → VPC）、跨角色共置，直接决定 KV 传输带宽。原生调度器对推理服务的拓扑语义一无所知</div>
+    <div class="mini no"><b>③ 跨角色操作不原子</b>滚动升级 prefill 全换完、decode 还是旧版 → 中间态版本漂移（KV 传输协议可能不兼容）；扩容 prefill 扩了 decode 没跟上 → 容量失衡</div>
+  </div>
+  <div class="fig">
+    <svg viewBox="0 0 900 170" xmlns="http://www.w3.org/2000/svg">
+      <rect x="40" y="30" width="820" height="115" rx="12" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="450" y="58" text-anchor="middle" font-size="13.5" fill="#1c1917" font-weight="700">一个 PD 分离推理服务在集群里的真实形态（多角色 × 多卡 × 异构）</text>
+      <rect x="70" y="80" width="110" height="44" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="125" y="106" text-anchor="middle" font-size="12.5" fill="#1c1917">router 路由</text>
+      <rect x="220" y="80" width="130" height="44" rx="8" fill="#eff6ff" stroke="#bfdbfe"/><text x="285" y="99" text-anchor="middle" font-size="12.5" fill="#1d4ed8" font-weight="700">prefill 池</text><text x="285" y="115" text-anchor="middle" font-size="11" fill="#78716c">2 实例 × TP4</text>
+      <rect x="390" y="80" width="130" height="44" rx="8" fill="#eff6ff" stroke="#bfdbfe"/><text x="455" y="99" text-anchor="middle" font-size="12.5" fill="#1d4ed8" font-weight="700">decode 池</text><text x="455" y="115" text-anchor="middle" font-size="11" fill="#78716c">4 实例 × TP2</text>
+      <rect x="560" y="80" width="150" height="44" rx="8" fill="#f0fdf4" stroke="#a7f3d0"/><text x="635" y="99" text-anchor="middle" font-size="12.5" fill="#059669" font-weight="700">KV 传输引擎</text><text x="635" y="115" text-anchor="middle" font-size="11" fill="#78716c">Mooncake / Dynamo</text>
+      <text x="770" y="106" font-size="22" fill="#d97706">…</text>
+    </svg>
+  </div>
+  <ul class="pts">
+    <li>RBG 的解法：整个服务声明成<b>一个对象</b> <code>RoleBasedGroup</code>，角色间协同是控制器语义，不是人肉胶水</li>
+    <li>来源：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/README.md">README「Why RBG?」</a></li>
+  </ul>
+</div>
+</section>
+
+<!-- ============ 3 核心抽象 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">02 · 核心抽象</div>
+  <h2>一个 CRD，四层对象 <span class="dim">RoleBasedGroup → Role → RoleInstanceSet → RoleInstance → Pod</span></h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 330" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah2" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#94a3b8"/></marker>
+      </defs>
+      <!-- group -->
+      <rect x="250" y="15" width="400" height="52" rx="12" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.6"/>
+      <text x="450" y="38" text-anchor="middle" font-size="14.5" fill="#1d4ed8" font-weight="700">RoleBasedGroup「pd-disagg-lws」</text>
+      <text x="450" y="57" text-anchor="middle" font-size="11.5" fill="#78716c">一个 CRD = 一个完整推理服务</text>
+      <!-- roles -->
+      <line x1="340" y1="67" x2="170" y2="105" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ah2)"/>
+      <line x1="450" y1="67" x2="450" y2="105" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ah2)"/>
+      <line x1="560" y1="67" x2="730" y2="105" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ah2)"/>
+      <rect x="80" y="108" width="180" height="58" rx="10" fill="#fff" stroke="#bfdbfe"/>
+      <text x="170" y="130" text-anchor="middle" font-size="13" fill="#1c1917" font-weight="700">Role: router</text>
+      <text x="170" y="150" text-anchor="middle" font-size="11.5" fill="#78716c">standalone · ×1</text>
+      <rect x="360" y="108" width="180" height="58" rx="10" fill="#fff" stroke="#bfdbfe"/>
+      <text x="450" y="130" text-anchor="middle" font-size="13" fill="#1c1917" font-weight="700">Role: prefill</text>
+      <text x="450" y="150" text-anchor="middle" font-size="11.5" fill="#78716c">leader-worker · ×2 · size 4</text>
+      <rect x="640" y="108" width="180" height="58" rx="10" fill="#fff" stroke="#bfdbfe"/>
+      <text x="730" y="130" text-anchor="middle" font-size="13" fill="#1c1917" font-weight="700">Role: decode</text>
+      <text x="730" y="150" text-anchor="middle" font-size="11.5" fill="#78716c">leader-worker · ×4 · size 2</text>
+      <!-- zoom chain -->
+      <text x="450" y="205" text-anchor="middle" font-size="12" fill="#78716c">▼ 以 prefill 角色为例，向下展开（每个角色都走这条链）</text>
+      <rect x="290" y="220" width="320" height="40" rx="10" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="450" y="245" text-anchor="middle" font-size="12.5" fill="#1c1917"><tspan font-weight="700">RoleInstanceSet</tspan>（每角色一个 · 有状态 workload）</text>
+      <rect x="290" y="275" width="320" height="40" rx="10" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="450" y="300" text-anchor="middle" font-size="12.5" fill="#1c1917"><tspan font-weight="700">RoleInstance ×2</tspan>（每副本一个 · pod 组，原地更新单元）</text>
+      <line x1="450" y1="260" x2="450" y2="272" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ah2)"/>
+      <text x="640" y="245" font-size="12" fill="#78716c">└─ 每个 RoleInstance：</text>
+      <text x="640" y="262" font-size="12" fill="#78716c">leader-0 + worker-0/1/2 共 4 个 pod</text>
+      <text x="640" y="279" font-size="12" fill="#78716c">（组件 = component）</text>
+    </svg>
+  </div>
+  <div class="grid2">
+    <div class="mini"><b>配角对象（控制器自动建）</b>每角色 headless Service（服务发现）· ControllerRevision（版本）· PodGroup（gang 调度）· ScalingAdapter（HPA 挂钩）· CoordinatedPolicy（独立 CRD，跨角色协同）</div>
+    <div class="mini"><b>出处</b><div class="src"><a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/reference/api.md">doc/reference/api.md</a> · <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/multiroles.md">doc/features/multiroles.md</a></div></div>
+  </div>
+</div>
+</section>
+
+<!-- ============ 4 部署模式 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">03 · 部署模式</div>
+  <h2>三种 pattern：一个 role 怎么组织自己的 pod</h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 210" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah3" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#94a3b8"/></marker>
+      </defs>
+      <!-- standalone -->
+      <rect x="30" y="20" width="255" height="170" rx="12" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="157" y="46" text-anchor="middle" font-size="13.5" fill="#1c1917" font-weight="700">standalonePattern</text>
+      <text x="157" y="64" text-anchor="middle" font-size="11.5" fill="#78716c">每实例 = 1 个 pod</text>
+      <rect x="110" y="85" width="95" height="36" rx="8" fill="#fff" stroke="#bfdbfe"/><text x="157" y="107" text-anchor="middle" font-size="12" fill="#1d4ed8">实例 0</text>
+      <rect x="110" y="135" width="95" height="36" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="157" y="157" text-anchor="middle" font-size="12" fill="#78716c">实例 1 …</text>
+      <text x="157" y="185" text-anchor="middle" font-size="11.5" fill="#059669">router / 单卡服务</text>
+      <!-- leader-worker -->
+      <rect x="322" y="20" width="255" height="170" rx="12" fill="#eff6ff" stroke="#bfdbfe"/>
+      <text x="450" y="46" text-anchor="middle" font-size="13.5" fill="#1d4ed8" font-weight="700">leaderWorkerPattern</text>
+      <text x="450" y="64" text-anchor="middle" font-size="11.5" fill="#78716c">每实例 = 1 leader + N−1 worker</text>
+      <rect x="340" y="85" width="80" height="36" rx="8" fill="#fff" stroke="#1d4ed8"/><text x="380" y="107" text-anchor="middle" font-size="11.5" fill="#1d4ed8" font-weight="700">leader-0</text>
+      <rect x="432" y="85" width="60" height="36" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="462" y="107" text-anchor="middle" font-size="11.5" fill="#78716c">w-0</text>
+      <rect x="502" y="85" width="60" height="36" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="532" y="107" text-anchor="middle" font-size="11.5" fill="#78716c">w-1</text>
+      <rect x="340" y="135" width="80" height="36" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="380" y="157" text-anchor="middle" font-size="11.5" fill="#78716c">leader-1</text>
+      <text x="480" y="157" text-anchor="middle" font-size="12" fill="#78716c">实例 1 …</text>
+      <text x="450" y="185" text-anchor="middle" font-size="11.5" fill="#059669">张量并行（TP）多卡推理</text>
+      <!-- custom -->
+      <rect x="615" y="20" width="255" height="170" rx="12" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="742" y="46" text-anchor="middle" font-size="13.5" fill="#1c1917" font-weight="700">customComponentsPattern</text>
+      <text x="742" y="64" text-anchor="middle" font-size="11.5" fill="#78716c">每实例 = 异构 pod 组</text>
+      <rect x="645" y="85" width="80" height="36" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="685" y="107" text-anchor="middle" font-size="11.5" fill="#78716c">engine</text>
+      <rect x="735" y="85" width="80" height="36" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="775" y="107" text-anchor="middle" font-size="11.5" fill="#78716c">sidecar</text>
+      <rect x="825" y="85" width="36" height="36" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="843" y="107" text-anchor="middle" font-size="11.5" fill="#78716c">…</text>
+      <text x="742" y="160" text-anchor="middle" font-size="11.5" fill="#059669">异构组件组合（组件名自定）</text>
+      <text x="742" y="180" text-anchor="middle" font-size="11.5" fill="#78716c">配 component-discovery 注解</text>
+    </svg>
+  </div>
+  <ul class="pts">
+    <li>同一个 RoleBasedGroup 里<b>不同角色可用不同 pattern</b>：router 用 standalone，prefill/decode 用 leader-worker——一个 YAML 混搭</li>
+    <li>leader-worker 是为大模型 TP 设计的：<code>size: 4</code> = 1 leader + 3 worker，配合注入的环境变量自动组网（下下页）</li>
+    <li>出处：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/patterns.md">doc/features/patterns.md</a></li>
+  </ul>
+</div>
+</section>
+
+<!-- ============ 5 服务发现 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">04 · 服务发现</div>
+  <h2>三件套免手写 DNS：headless Service + 环境变量注入 + 组件发现注解</h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 235" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah4" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#94a3b8"/></marker>
+      </defs>
+      <!-- router -->
+      <rect x="30" y="40" width="150" height="60" rx="10" fill="#fff" stroke="#e7e5e4"/>
+      <text x="105" y="65" text-anchor="middle" font-size="13" fill="#1c1917" font-weight="700">router 容器</text>
+      <text x="105" y="85" text-anchor="middle" font-size="11" fill="#78716c">启动参数直接写域名</text>
+      <!-- dns -->
+      <rect x="240" y="15" width="330" height="110" rx="10" fill="#eff6ff" stroke="#bfdbfe"/>
+      <text x="405" y="40" text-anchor="middle" font-size="13" fill="#1d4ed8" font-weight="700">headless Service（每角色自动建一个）</text>
+      <text x="405" y="66" text-anchor="middle" font-size="13" font-family="monospace" fill="#1c1917">s-pd-disagg-lws-prefill</text>
+      <text x="405" y="92" text-anchor="middle" font-size="12" font-family="monospace" fill="#78716c">pod DNS =</text>
+      <text x="405" y="112" text-anchor="middle" font-size="11.5" font-family="monospace" fill="#78716c">&lt;rbg&gt;-&lt;role&gt;-&lt;idx&gt;.s-&lt;rbg&gt;-&lt;role&gt;</text>
+      <!-- pods -->
+      <rect x="630" y="15" width="240" height="110" rx="10" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="750" y="40" text-anchor="middle" font-size="12.5" fill="#1c1917" font-weight="700">prefill 角色的 pod</text>
+      <rect x="650" y="55" width="90" height="30" rx="7" fill="#fff" stroke="#bfdbfe"/><text x="695" y="74" text-anchor="middle" font-size="10.5" fill="#1d4ed8">prefill-0 ⭐</text>
+      <rect x="760" y="55" width="90" height="30" rx="7" fill="#fff" stroke="#e7e5e4"/><text x="805" y="74" text-anchor="middle" font-size="10.5" fill="#78716c">prefill-1</text>
+      <text x="750" y="112" text-anchor="middle" font-size="11" fill="#78716c">⭐ = leader（leader-worker 模式）</text>
+      <line x1="180" y1="70" x2="235" y2="70" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ah4)"/>
+      <line x1="570" y1="70" x2="625" y2="70" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ah4)"/>
+      <!-- env injection -->
+      <rect x="30" y="150" width="840" height="70" rx="10" fill="#f0fdf4" stroke="#a7f3d0"/>
+      <text x="450" y="175" text-anchor="middle" font-size="13" fill="#059669" font-weight="700">② 控制器往每个 pod 注入 RBG_* 环境变量（创建时注入，免配置）</text>
+      <text x="450" y="200" text-anchor="middle" font-size="12" font-family="monospace" fill="#1c1917">RBG_GROUP_NAME · RBG_ROLE_NAME · RBG_ROLE_INDEX · RBG_LWP_LEADER_ADDRESS · RBG_LWP_GROUP_SIZE · RBG_LWP_WORKER_INDEX</text>
+    </svg>
+  </div>
+  <ul class="pts">
+    <li>服务名 <code>s-</code> 前缀是故意的：DNS-1035 要求服务名不能以数字开头（<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/v1alpha2/helper.go#L106-L119">helper.go:106-119</a>）</li>
+    <li>③ <code>customComponentsPattern</code> 还有组件发现注解（把同实例某组件的 FQDN/端口注入为环境变量）+ 端口分配器注解（<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/pkg/component-discovery/component_discovery.go#L34-L40">component_discovery.go</a>）</li>
+    <li>官方 README 称之为 <b>topology self-aware service discovery</b>：容器里不需要硬编码任何对端地址</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============ 6 实战 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">05 · 实战走读</div>
+  <h2>SGLang PD 分离：一个 YAML，三个角色，全部自动接线</h2>
+  <pre class="code"><span class="cmt"># examples/inference/pd-disagg-leader-worker.yaml（节选，角色间无任何手工 Service）</span>
+roles:
+- name: router                     <span class="cmt"># standalone × 1</span>
+  - --prefill "http://pd-disagg-lws-prefill-0<span class="hl">.s-pd-disagg-lws-prefill</span>:8000"   <span class="cmt"># ← headless DNS 寻址 prefill leader</span>
+  - --decode   "http://pd-disagg-lws-decode-0.s-pd-disagg-lws-decode:8000"
+
+- name: prefill                    <span class="cmt"># leader-worker × 2 实例，size 4（TP4）</span>
+  rolloutStrategy: { type: RollingUpdate, rollingUpdate: { type: InPlaceIfPossible, maxUnavailable: 1 } }
+  leaderWorkerPattern:
+    size: 4
+    template:                      <span class="cmt"># SGLang 启动参数全用注入变量：</span>
+      - --dist-init-addr $(<span class="hl">RBG_LWP_LEADER_ADDRESS</span>):6379
+      - --nnodes       $(<span class="hl">RBG_LWP_GROUP_SIZE</span>)      <span class="cmt"># = 4，组网自动完成</span>
+      - --node-rank    $(<span class="hl">RBG_LWP_WORKER_INDEX</span>)   <span class="cmt"># leader=0，worker=1..3</span>
+
+- name: decode                     <span class="cmt"># leader-worker × 4 实例，size 2（TP2）</span>
+  restartPolicyConfig: { type: None }   <span class="cmt"># 实例内生命周期交给 RBG 管</span></pre>
+  <div class="grid3">
+    <div class="mini"><b>router</b>standalone ×1 · 入口路由 + PD 分发 · 纯 headless DNS 寻址</div>
+    <div class="mini"><b>prefill</b>2 实例 × TP4（1 leader + 3 worker）· 独立 rollout 策略</div>
+    <div class="mini"><b>decode</b>4 实例 × TP2 · 与 prefill 异构配比（2:4）</div>
+  </div>
+  <div class="footnote">完整文件：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/pd-disagg-leader-worker.yaml">examples/inference/pd-disagg-leader-worker.yaml</a>；同目录还有聚合推理、单卡、Dynamo、Mooncake（SGLang + vLLM）样例 · 顶部注意 scalingAdapter 开启后 HPA 用的 RoleBasedGroupScalingAdapter 由控制器自动创建</div>
+</div>
+</section>
+
+<!-- ============ 7 角色依赖 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">06 · 启动顺序</div>
+  <h2>角色依赖：拓扑排序，分层推进 <span class="dim">不 ready 就不创建下一层</span></h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 240" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah5" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#94a3b8"/></marker>
+      </defs>
+      <text x="450" y="24" text-anchor="middle" font-size="12.5" fill="#78716c">SortRoles 拓扑排序 → 分层 reconcile：layer 0 全部 Ready 才轮到 layer 1</text>
+      <!-- layer 0 -->
+      <rect x="300" y="45" width="140" height="46" rx="10" fill="#f0fdf4" stroke="#a7f3d0"/>
+      <text x="370" y="65" text-anchor="middle" font-size="12.5" fill="#059669" font-weight="700">layer 0 · router</text>
+      <text x="370" y="82" text-anchor="middle" font-size="11" fill="#78716c">无依赖，先建</text>
+      <!-- layer 1 -->
+      <rect x="170" y="150" width="180" height="46" rx="10" fill="#eff6ff" stroke="#bfdbfe"/>
+      <text x="260" y="170" text-anchor="middle" font-size="12.5" fill="#1d4ed8" font-weight="700">layer 1 · prefill</text>
+      <text x="260" y="187" text-anchor="middle" font-size="11" fill="#78716c">dependencies: [router]</text>
+      <rect x="550" y="150" width="180" height="46" rx="10" fill="#eff6ff" stroke="#bfdbfe"/>
+      <text x="640" y="170" text-anchor="middle" font-size="12.5" fill="#1d4ed8" font-weight="700">layer 1 · decode</text>
+      <text x="640" y="187" text-anchor="middle" font-size="11" fill="#78716c">dependencies: [router]</text>
+      <line x1="340" y1="91" x2="280" y2="147" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ah5)"/>
+      <line x1="400" y1="91" x2="620" y2="147" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#ah5)"/>
+      <rect x="620" y="45" width="250" height="46" rx="10" fill="#fef2f2" stroke="#fecaca"/>
+      <text x="745" y="65" text-anchor="middle" font-size="12" fill="#dc2626" font-weight="700">依赖不 ready → 直接 return</text>
+      <text x="745" y="82" text-anchor="middle" font-size="11" fill="#78716c">下一层角色根本不会被创建（不是建出来挂着）</text>
+      <text x="105" y="235" font-size="12" fill="#78716c">controller 每轮 reconcile 重复检查，逐层推进</text>
+    </svg>
+  </div>
+  <ul class="pts">
+    <li>YAML 里就是一行：<code>dependencies: ["frontend"]</code>——backend 等 frontend Ready 后才创建</li>
+    <li>源码链：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/pkg/dependency/dependency.go#L43-L79">SortRoles（拓扑排序）</a> → <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/internal/controller/workloads/rolebasedgroup_controller.go#L475-L522">reconcile 主循环逐层 CheckDependencyReady</a></li>
+    <li>循环依赖、依赖不存在的角色名 → 校验直接报错（webhook + preCheck）</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============ 8 协同策略 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">07 · 跨角色协同</div>
+  <h2>CoordinatedPolicy：prefill 和 decode 锁步升级 <span class="dim">独立 CRD，管 maxSkew</span></h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 210" xmlns="http://www.w3.org/2000/svg">
+      <!-- no policy -->
+      <rect x="30" y="20" width="410" height="170" rx="12" fill="#fef2f2" stroke="#fecaca"/>
+      <text x="235" y="46" text-anchor="middle" font-size="13.5" fill="#dc2626" font-weight="700">没有协同策略</text>
+      <rect x="60" y="65" width="350" height="34" rx="6" fill="#fff" stroke="#e7e5e4"/>
+      <rect x="60" y="65" width="345" height="34" rx="6" fill="#bfdbfe" opacity="0.5"/><text x="78" y="86" font-size="11.5" fill="#1c1917">prefill：▓▓▓▓▓▓▓▓▓▓ 全部换到 v2</text>
+      <rect x="60" y="112" width="120" height="34" rx="6" fill="#fff" stroke="#e7e5e4"/>
+      <rect x="60" y="112" width="115" height="34" rx="6" fill="#bfdbfe" opacity="0.5"/><text x="78" y="133" font-size="11.5" fill="#1c1917">decode：▓▓ 刚换 2 个</text>
+      <text x="235" y="172" text-anchor="middle" font-size="12" fill="#dc2626">中间态版本漂移：KV 传输协议可能不兼容</text>
+      <!-- with policy -->
+      <rect x="460" y="20" width="410" height="170" rx="12" fill="#f0fdf4" stroke="#a7f3d0"/>
+      <text x="665" y="46" text-anchor="middle" font-size="13.5" fill="#059669" font-weight="700">maxSkew: "1%"</text>
+      <rect x="490" y="65" width="350" height="34" rx="6" fill="#fff" stroke="#e7e5e4"/>
+      <rect x="490" y="65" width="140" height="34" rx="6" fill="#bfdbfe" opacity="0.5"/><text x="508" y="86" font-size="11.5" fill="#1c1917">prefill：▓▓▓▓ 换到 40%</text>
+      <rect x="490" y="112" width="350" height="34" rx="6" fill="#fff" stroke="#e7e5e4"/>
+      <rect x="490" y="112" width="137" height="34" rx="6" fill="#bfdbfe" opacity="0.5"/><text x="508" y="133" font-size="11.5" fill="#1c1917">decode：▓▓▓▓ 换到 39.x%</text>
+      <line x1="655" y1="72" x2="655" y2="104" stroke="#d97706" stroke-width="2" stroke-dasharray="4 3"/>
+      <text x="665" y="172" text-anchor="middle" font-size="12" fill="#059669">进度差钳制在 1% 内，锁步推进；maxUnavailable 控制不可用量</text>
+    </svg>
+  </div>
+  <pre class="code"><span class="cmt"># 独立 CRD，挂在要协同的角色上（不侵入 RoleBasedGroup 本体）</span>
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: CoordinatedPolicy
+spec:
+  policies:
+    - name: prefill-decode-rollout
+      roles: [prefill, decode]
+      strategy:
+        rollingUpdate: { maxSkew: "1%", maxUnavailable: "10%" }</pre>
+  <ul class="pts">
+    <li>管两件事：<b>协同滚动更新</b>（maxSkew / maxUnavailable）和<b>协同扩缩</b>（角色按配对比例一起扩；进度推进可选 <code>OrderScheduled</code> 等档位——调度成功即算推进，快但风险高）</li>
+    <li>出处：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/coordinated-policy.md">doc/features/coordinated-policy.md</a></li>
+  </ul>
+</div>
+</section>
+
+<!-- ============ 9 原地更新 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">08 · 更新策略</div>
+  <h2>原地更新（In-place Update）：升级不换"壳" <span class="dim">pod 身份不变，只重启容器</span></h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 225" xmlns="http://www.w3.org/2000/svg">
+      <!-- recreate -->
+      <rect x="30" y="15" width="410" height="195" rx="12" fill="#fef2f2" stroke="#fecaca"/>
+      <text x="235" y="42" text-anchor="middle" font-size="13.5" fill="#dc2626" font-weight="700">RecreatePod（传统）</text>
+      <rect x="60" y="60" width="120" height="40" rx="8" fill="#fff" stroke="#e7e5e4"/><text x="120" y="78" text-anchor="middle" font-size="11" fill="#1c1917">pod-a1</text><text x="120" y="93" text-anchor="middle" font-size="10" fill="#78716c">node-7 · 10.x.1.1</text>
+      <text x="220" y="85" font-size="18" fill="#dc2626">✗</text>
+      <rect x="250" y="60" width="120" height="40" rx="8" fill="#fff" stroke="#fecaca"/><text x="310" y="78" text-anchor="middle" font-size="11" fill="#1c1917">pod-a2</text><text x="310" y="93" text-anchor="middle" font-size="10" fill="#78716c">node-3 · 10.x.9.7</text>
+      <text x="235" y="130" text-anchor="middle" font-size="11.5" fill="#78716c">pod 重建 → 重新调度 → 可能换节点</text>
+      <text x="235" y="150" text-anchor="middle" font-size="11.5" fill="#78716c">IP 变、GPU 重绑、拓扑全变</text>
+      <text x="235" y="180" text-anchor="middle" font-size="11" fill="#dc2626">RDMA 拓扑共置被打破</text>
+      <!-- inplace -->
+      <rect x="460" y="15" width="410" height="195" rx="12" fill="#f0fdf4" stroke="#a7f3d0"/>
+      <text x="665" y="42" text-anchor="middle" font-size="13.5" fill="#059669" font-weight="700">InPlaceIfPossible（默认推荐）</text>
+      <rect x="520" y="60" width="120" height="40" rx="8" fill="#fff" stroke="#a7f3d0"/><text x="580" y="78" text-anchor="middle" font-size="11" fill="#1c1917">pod-a1（不变）</text><text x="580" y="93" text-anchor="middle" font-size="10" fill="#78716c">node-7 · 10.x.1.1</text>
+      <text x="665" y="85" font-size="18" fill="#059669">→</text>
+      <rect x="700" y="60" width="130" height="40" rx="8" fill="#f0fdf4" stroke="#a7f3d0"/><text x="765" y="78" text-anchor="middle" font-size="11" fill="#1c1917">容器重启 RESTARTS+1</text><text x="765" y="93" text-anchor="middle" font-size="10" fill="#78716c">新镜像 v2</text>
+      <text x="665" y="130" text-anchor="middle" font-size="11.5" fill="#78716c">改镜像 → 只重启容器进程，pod 不重建</text>
+      <text x="665" y="150" text-anchor="middle" font-size="11.5" fill="#78716c">名字 / IP / 节点 / GPU 绑定全保留</text>
+      <text x="665" y="180" text-anchor="middle" font-size="11" fill="#059669">拓扑稳定，原地继续跑</text>
+    </svg>
+  </div>
+  <table class="tbl">
+    <tr><th>策略</th><th>行为</th></tr>
+    <tr><td><code>RecreatePod</code></td><td>重建 pod（传统行为）</td></tr>
+    <tr><td><code>InPlaceIfPossible</code></td><td>能原地就原地（改镜像→只重启容器），不行再重建 <b>← 推理负载默认选这个</b></td></tr>
+    <tr><td><code>InPlaceOnly</code></td><td>只允许原地，否则报错</td></tr>
+  </table>
+  <div class="footnote">作用单元是 RoleInstance（pod 组整体升级）；定义在 <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/v1alpha2/rolebasedgroup_types.go#L108-L116">rolebasedgroup_types.go:108-116</a> · 官方演示（改镜像后 RESTARTS+1、AGE 连续）见 <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/instance.md">doc/features/instance.md</a></div>
+</div>
+</section>
+
+<!-- ============ 10 调度两板斧 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">09 · 调度</div>
+  <h2>性能两板斧：gang 调度 + 独占拓扑</h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 235" xmlns="http://www.w3.org/2000/svg">
+      <!-- gang -->
+      <rect x="30" y="15" width="410" height="200" rx="12" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="235" y="42" text-anchor="middle" font-size="13.5" fill="#1c1917" font-weight="700">Gang 调度：全成或全不成</text>
+      <text x="235" y="62" text-anchor="middle" font-size="11" fill="#78716c">annotation: group-gang-scheduling: "true"</text>
+      <rect x="70" y="80" width="60" height="34" rx="7" fill="#f0fdf4" stroke="#a7f3d0"/><text x="100" y="101" text-anchor="middle" font-size="11" fill="#059669">✓ GPU</text>
+      <rect x="140" y="80" width="60" height="34" rx="7" fill="#f0fdf4" stroke="#a7f3d0"/><text x="170" y="101" text-anchor="middle" font-size="11" fill="#059669">✓ GPU</text>
+      <rect x="210" y="80" width="60" height="34" rx="7" fill="#f0fdf4" stroke="#a7f3d0"/><text x="240" y="101" text-anchor="middle" font-size="11" fill="#059669">✓ GPU</text>
+      <rect x="280" y="80" width="60" height="34" rx="7" fill="#f0fdf4" stroke="#a7f3d0"/><text x="310" y="101" text-anchor="middle" font-size="11" fill="#059669">✓ GPU</text>
+      <rect x="350" y="80" width="60" height="34" rx="7" fill="#fef2f2" stroke="#fecaca"/><text x="380" y="101" text-anchor="middle" font-size="11" fill="#dc2626">✗ 卡死</text>
+      <text x="235" y="140" text-anchor="middle" font-size="12" fill="#1c1917">8 卡 TP 组只调度上 7 卡 = 资源白占 + 死锁</text>
+      <text x="235" y="160" text-anchor="middle" font-size="12" fill="#059669">RBG 建 PodGroup（minMember = 全组 pod 总数）</text>
+      <text x="235" y="180" text-anchor="middle" font-size="12" fill="#059669">要么全部就位，要么全体等待（超时可配）</text>
+      <text x="235" y="203" text-anchor="middle" font-size="11" fill="#78716c">scheduler-plugins 与 Volcano 两种实现</text>
+      <!-- exclusive -->
+      <rect x="460" y="15" width="410" height="200" rx="12" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="665" y="42" text-anchor="middle" font-size="13.5" fill="#1c1917" font-weight="700">独占拓扑：同组共置</text>
+      <text x="665" y="62" text-anchor="middle" font-size="11" fill="#78716c">annotation: group-exclusive-topology: kubernetes.io/hostname</text>
+      <rect x="520" y="80" width="290" height="90" rx="10" fill="#fff" stroke="#bfdbfe"/>
+      <text x="665" y="102" text-anchor="middle" font-size="12" fill="#1d4ed8" font-weight="700">同一拓扑域（node / zone / region）</text>
+      <rect x="545" y="115" width="90" height="30" rx="7" fill="#eff6ff" stroke="#bfdbfe"/><text x="590" y="134" text-anchor="middle" font-size="10.5" fill="#1d4ed8">prefill</text>
+      <rect x="645" y="115" width="90" height="30" rx="7" fill="#eff6ff" stroke="#bfdbfe"/><text x="690" y="134" text-anchor="middle" font-size="10.5" fill="#1d4ed8">decode</text>
+      <rect x="745" y="115" width="40" height="30" rx="7" fill="#eff6ff" stroke="#bfdbfe"/><text x="765" y="134" text-anchor="middle" font-size="10.5" fill="#1d4ed8">…</text>
+      <text x="665" y="182" text-anchor="middle" font-size="11.5" fill="#78716c">靠 group-uid / group-unique-hash 标签做 pod 亲和</text>
+      <text x="665" y="202" text-anchor="middle" font-size="11.5" fill="#78716c">KV 传输走 RDMA 时，共置带宽直接决定架构是否划算</text>
+    </svg>
+  </div>
+  <ul class="pts">
+    <li>两条都是<b>一个注解</b>的事：声明在 RoleBasedGroup 上，控制器翻译成 PodGroup / pod 亲和规则，用户不用碰调度器配置</li>
+    <li>出处：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/gang-scheduling.md">doc/features/gang-scheduling.md</a> · <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/features/exclusive-topology.md">doc/features/exclusive-topology.md</a></li>
+  </ul>
+</div>
+</section>
+
+<!-- ============ 11 控制器 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">10 · 控制器</div>
+  <h2>reconcile 链条走读 <span class="dim">RBG → 依赖排序 → 逐角色 RoleInstanceSet → RoleInstance → Pod</span></h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 320" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah6" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#94a3b8"/></marker>
+      </defs>
+      <rect x="60" y="10" width="780" height="42" rx="10" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.4"/>
+      <text x="450" y="36" text-anchor="middle" font-size="13" fill="#1d4ed8" font-weight="700">Reconcile(RoleBasedGroup)　internal/controller/workloads/rolebasedgroup_controller.go:150</text>
+      <line x1="170" y1="52" x2="170" y2="76" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah6)"/>
+      <line x1="450" y1="52" x2="450" y2="76" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah6)"/>
+      <line x1="730" y1="52" x2="730" y2="76" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah6)"/>
+      <rect x="80" y="79" width="180" height="38" rx="8" fill="#f8f8f7" stroke="#e7e5e4"/><text x="170" y="98" text-anchor="middle" font-size="11.5" fill="#1c1917">preCheck（L298）</text><text x="170" y="112" text-anchor="middle" font-size="10" fill="#78716c">角色名/依赖合法性</text>
+      <rect x="340" y="79" width="220" height="38" rx="8" fill="#f8f8f7" stroke="#e7e5e4"/><text x="450" y="98" text-anchor="middle" font-size="11.5" fill="#1c1917">handleRevisions（L253）</text><text x="450" y="112" text-anchor="middle" font-size="10" fill="#78716c">ControllerRevision 版本快照</text>
+      <rect x="620" y="79" width="220" height="38" rx="8" fill="#f8f8f7" stroke="#e7e5e4"/><text x="730" y="98" text-anchor="middle" font-size="11.5" fill="#1c1917">reconcilePodGroup（L465）</text><text x="730" y="112" text-anchor="middle" font-size="10" fill="#78716c">gang 调度 PodGroup</text>
+      <line x1="450" y1="117" x2="450" y2="141" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah6)"/>
+      <rect x="250" y="144" width="400" height="42" rx="10" fill="#eff6ff" stroke="#bfdbfe"/>
+      <text x="450" y="163" text-anchor="middle" font-size="12.5" fill="#1d4ed8" font-weight="700">reconcileRoles（L475）</text>
+      <text x="450" y="179" text-anchor="middle" font-size="10.5" fill="#78716c">SortRoles 依赖拓扑排序（dependency.go:43）→ 分层</text>
+      <line x1="450" y1="186" x2="450" y2="210" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah6)"/>
+      <rect x="250" y="213" width="400" height="38" rx="8" fill="#fef9c3" stroke="#fde68a"/>
+      <text x="450" y="232" text-anchor="middle" font-size="11.5" fill="#1c1917">逐层：CheckDependencyReady（L499）</text>
+      <text x="450" y="246" text-anchor="middle" font-size="10" fill="#78716c">不 ready → 本轮 return，下一层角色不创建</text>
+      <line x1="450" y1="251" x2="450" y2="272" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah6)"/>
+      <rect x="60" y="275" width="240" height="38" rx="8" fill="#f0fdf4" stroke="#a7f3d0"/><text x="180" y="294" text-anchor="middle" font-size="11.5" fill="#059669" font-weight="700">RoleInstanceSet（每角色）</text><text x="180" y="308" text-anchor="middle" font-size="10" fill="#78716c">实例集合：扩缩/分区/滚动</text>
+      <rect x="330" y="275" width="240" height="38" rx="8" fill="#f0fdf4" stroke="#a7f3d0"/><text x="450" y="294" text-anchor="middle" font-size="11.5" fill="#059669" font-weight="700">RoleInstance（每副本）</text><text x="450" y="308" text-anchor="middle" font-size="10" fill="#78716c">pod 组：原地更新 / node binding</text>
+      <rect x="600" y="275" width="240" height="38" rx="8" fill="#f0fdf4" stroke="#a7f3d0"/><text x="720" y="294" text-anchor="middle" font-size="11.5" fill="#059669" font-weight="700">Pod</text><text x="720" y="308" text-anchor="middle" font-size="10" fill="#78716c">创建时注入 RBG_* 变量 + headless svc</text>
+      <line x1="300" y1="294" x2="328" y2="294" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah6)"/>
+      <line x1="570" y1="294" x2="598" y2="294" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ah6)"/>
+    </svg>
+  </div>
+  <ul class="pts">
+    <li>三层各管各的：RBG 控制器管<b>组</b>（依赖、gang、协同），RoleInstanceSet 管<b>角色</b>（实例集合），RoleInstance 管<b>实例</b>（pod 组）</li>
+    <li>每角色还顺带 reconcile 一个 <b>ScalingAdapter</b>（HPA 直接挂它，实现每角色独立伸缩）</li>
+    <li>完整链：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/internal/controller/workloads/rolebasedgroup_controller.go#L475-L580">rolebasedgroup_controller.go:475-580</a>（行号锚定 commit 4acd5a7）</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============ 12 生态 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">11 · 生态位</div>
+  <h2>每一层管一个维度：RBG 不是替代 LWS，是在它上面加一层</h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 150" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah12" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#94a3b8"/></marker>
+      </defs>
+      <rect x="40" y="45" width="180" height="60" rx="10" fill="#f8f8f7" stroke="#e7e5e4"/>
+      <text x="130" y="70" text-anchor="middle" font-size="12.5" fill="#1c1917" font-weight="700">Deployment / STS</text>
+      <text x="130" y="90" text-anchor="middle" font-size="11" fill="#78716c">单角色，无并行组语义</text>
+      <rect x="360" y="45" width="180" height="60" rx="10" fill="#eff6ff" stroke="#bfdbfe"/>
+      <text x="450" y="70" text-anchor="middle" font-size="12.5" fill="#1d4ed8" font-weight="700">LeaderWorkerSet (LWS)</text>
+      <text x="450" y="90" text-anchor="middle" font-size="11" fill="#78716c">单角色多卡（TP）组管理</text>
+      <rect x="680" y="45" width="180" height="60" rx="10" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.6"/>
+      <text x="770" y="70" text-anchor="middle" font-size="12.5" fill="#1d4ed8" font-weight="700">RBG</text>
+      <text x="770" y="90" text-anchor="middle" font-size="11" fill="#78716c">多角色 × 多卡 × 跨角色协同</text>
+      <line x1="220" y1="75" x2="358" y2="75" stroke="#94a3b8" stroke-width="2" marker-end="url(#ah12)"/>
+      <line x1="540" y1="75" x2="678" y2="75" stroke="#94a3b8" stroke-width="2" marker-end="url(#ah12)"/>
+      <text x="289" y="62" text-anchor="middle" font-size="10.5" fill="#78716c">+ 多卡组</text>
+      <text x="609" y="62" text-anchor="middle" font-size="10.5" fill="#78716c">+ 多角色/协同</text>
+      <text x="450" y="130" text-anchor="middle" font-size="11.5" fill="#78716c">RBG 致谢并复用 LWS 代码；v1alpha2 起用自己的 RoleInstanceSet 取代对 LWS CRD 的依赖</text>
+    </svg>
+  </div>
+  <div class="grid3">
+    <div class="mini"><b>SGLang</b>同门项目，RBG 头号场景就是 SGLang PD 分离部署</div>
+    <div class="mini"><b>NVIDIA Dynamo</b>数据中心推理编排栈，官方提供 Dynamo 运行时集成样例</div>
+    <div class="mini"><b>Mooncake</b>KV cache 传输/复用引擎；SGLang 与 vLLM 的集成样例都有</div>
+    <div class="mini"><b>rbg-planner</b>SLA 驱动 autoscaler：ARIMA 负载预测 + TTFT/ITL 目标，按角色扩缩</div>
+    <div class="mini"><b>inference-engine-runtime</b>Python sidecar：LoRA 管理、统一 Prometheus、拓扑管理</div>
+    <div class="mini"><b>llmctl / kubectl-rbg</b>CLI：服务/模型管理、benchmark 编排、Optuna 参数搜索</div>
+  </div>
+  <div class="footnote">生态项目列表见 <a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/README.md">README「Ecosystem Projects」</a>（rolebasedgroup GitHub org 下）· Dynamo/Mooncake 样例：<a href="https://github.com/sgl-project/rbg/tree/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/ecosystem">examples/inference/ecosystem/</a></div>
+</div>
+</section>
+
+<!-- ============ 13 版本 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">12 · 版本与迁移</div>
+  <h2>v0.4 → v0.7：一年四级跳 <span class="dim">v1alpha2 已 stable</span></h2>
+  <div class="fig">
+    <svg viewBox="0 0 900 130" xmlns="http://www.w3.org/2000/svg">
+      <line x1="60" y1="70" x2="850" y2="70" stroke="#bfdbfe" stroke-width="3"/>
+      <circle cx="110" cy="70" r="7" fill="#f8f8f7" stroke="#78716c"/><text x="110" y="48" text-anchor="middle" font-size="11.5" fill="#1c1917" font-weight="700">v0.4.0</text><text x="110" y="95" text-anchor="middle" font-size="10" fill="#78716c">2025-09 · RBGS 伸缩</text><text x="110" y="109" text-anchor="middle" font-size="10" fill="#78716c">Volcano podgroup</text>
+      <circle cx="310" cy="70" r="7" fill="#f8f8f7" stroke="#78716c"/><text x="310" y="48" text-anchor="middle" font-size="11.5" fill="#1c1917" font-weight="700">v0.5.0</text><text x="310" y="95" text-anchor="middle" font-size="10" fill="#78716c">2025-12 · 原生 InstanceSet</text><text x="310" y="109" text-anchor="middle" font-size="10" fill="#78716c">原地更新 · Mooncake</text>
+      <circle cx="510" cy="70" r="7" fill="#f8f8f7" stroke="#78716c"/><text x="510" y="48" text-anchor="middle" font-size="11.5" fill="#1c1917" font-weight="700">v0.6.0</text><text x="510" y="95" text-anchor="middle" font-size="10" fill="#78716c">2026-02 · 协同扩缩</text><text x="510" y="109" text-anchor="middle" font-size="10" fill="#78716c">有状态 InstanceSet</text>
+      <circle cx="740" cy="70" r="9" fill="#1d4ed8"/><text x="740" y="48" text-anchor="middle" font-size="11.5" fill="#1d4ed8" font-weight="700">v0.7.0</text><text x="740" y="95" text-anchor="middle" font-size="10" fill="#1d4ed8">2026-06 · v1alpha2 stable</text><text x="740" y="109" text-anchor="middle" font-size="10" fill="#1d4ed8">CLI 多节点 · CoordinatedPolicy</text>
+    </svg>
+  </div>
+  <div class="grid2">
+    <div class="mini warn"><b>⚠ 迁移注意</b>v1alpha1 及其 Deployment/StatefulSet/LeaderWorkerSet workload 类型已被 v1alpha2 + RoleInstanceSet 取代。chart 值 <code>deprecatedWorkloadTypes.enabled</code>：<b>true</b>（默认，两代共存，存量部署必须保持）/<b>false</b>（彻底拒绝废弃类型，仅限全新安装——已在跑的集群没有官方支持的关闭路径，对象会无人 reconcile）</div>
+    <div class="mini"><b>依赖变轻</b>v0.7.0 起不再要求安装 LWS CRD（自带 RoleInstanceSet）；K8s 要求降到 ≥ v1.22；转换 webhook 处理 v1alpha1 ↔ v1alpha2</div>
+  </div>
+  <ul class="pts">
+    <li>官方迁移指南（v1alpha1 → RoleInstanceSet）承诺后续版本提供，存量用户先保持 true 等文档</li>
+    <li>来源：<a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/README.md">README「Latest News」「Deprecated workload types」「Version Compatibility」</a></li>
+  </ul>
+</div>
+</section>
+
+<!-- ============ 14 总结 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">13 · 总结</div>
+  <h2>三句话 + 证据索引</h2>
+  <div class="grid3">
+    <div class="mini ok"><b>① 是什么</b>SGLang 项目的 K8s Operator：一个 RoleBasedGroup CRD 声明整条多角色推理链路（router/prefill/decode/…），角色依赖、协同更新、服务发现、gang 调度全是控制器语义</div>
+    <div class="mini warn"><b>② 换来什么</b>部署从「N 个 YAML + Helm hook + 人肉 DNS 约定」压缩成「一个 CRD + 一组注解」；代价是接受一个新的 workload 抽象层（RoleInstanceSet 等 v1alpha2 API）</div>
+    <div class="mini no"><b>③ 什么时候用</b>多角色推理拓扑（PD 分离 / router+engine / engine+KV 传输）、TP 多卡组、需要跨角色协同升级或配对扩缩——单体推理一个 Deployment 就够，不要为了用而用</div>
+  </div>
+  <ul class="pts">
+    <li>SGLang / Dynamo / Mooncake 生态用户是第一受益人：官方例子 + planner + runtime + CLI 全套现成</li>
+  </ul>
+  <div class="kicker" style="margin-top:18px;">证据索引 · 每条结论的出处（点击直达 GitHub，锚定 commit 4acd5a7）</div>
+  <div class="grid4">
+    <div class="mini"><b>服务名 s- 前缀规则</b>DNS-1035 不许数字开头<div class="src"><a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/v1alpha2/helper.go#L106-L119">api/workloads/v1alpha2/helper.go:106-119</a></div></div>
+    <div class="mini"><b>依赖拓扑排序</b>SortRoles / dependencyOrder<div class="src"><a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/pkg/dependency/dependency.go#L43-L79">pkg/dependency/dependency.go:43-79</a></div></div>
+    <div class="mini"><b>reconcile 主链</b>preCheck→revisions→PodGroup→roles<div class="src"><a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/internal/controller/workloads/rolebasedgroup_controller.go#L475-L580">rolebasedgroup_controller.go:475-580</a></div></div>
+    <div class="mini"><b>RBG_* 环境变量全表</b>LWP 三件套在此定义<div class="src"><a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/constants/env.go#L60-L67">api/workloads/constants/env.go:60-67</a></div></div>
+    <div class="mini"><b>组件发现 + 端口分配注解</b>FQDN/端口注入为环境变量<div class="src"><a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/pkg/component-discovery/component_discovery.go#L34-L40">pkg/component-discovery/component_discovery.go:34-40</a></div></div>
+    <div class="mini"><b>更新策略三档</b>Recreate / InPlaceIfPossible / InPlaceOnly<div class="src"><a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/api/workloads/v1alpha2/rolebasedgroup_types.go#L108-L116">rolebasedgroup_types.go:108-116</a></div></div>
+    <div class="mini"><b>PD 分离完整例子</b>router+prefill(TP4)+decode(TP2)<div class="src"><a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/examples/inference/pd-disagg-leader-worker.yaml">examples/inference/pd-disagg-leader-worker.yaml</a></div></div>
+    <div class="mini"><b>特性文档</b>模式/依赖/协同/gang/拓扑/原地更新<div class="src"><a href="https://github.com/sgl-project/rbg/blob/4acd5a791e9709f34c4bd5da569e6427896d21a5/doc/TOC.md">doc/（TOC 见 doc/TOC.md）</a></div></div>
+  </div>
+  <div class="chips">
+    <span class="chip">📄 详细版：<code>rbg-rolebasedgroup-explained.md</code></span>
+    <span class="chip">📦 仓库：<a href="https://github.com/sgl-project/rbg">github.com/sgl-project/rbg</a></span>
+    <span class="chip">📚 文档站：<a href="https://rolebasedgroup.github.io">rolebasedgroup.github.io</a></span>
+  </div>
+  <div class="footnote">本讲解为源码 + 文档静态阅读（2026-08，commit 4acd5a7，未上机部署）；调度时序、性能收益等行为细节以官方文档为准。←/→ 或方向键翻页 · <a href="index.html">返回目录</a></div>
+</div>
+</section>
+
+</div>
+
+<div class="nav">
+  <button id="prev" aria-label="上一页">←</button>
+  <span class="counter" id="counter">1 / 14</span>
+  <button id="next" aria-label="下一页">→</button>
+</div>
+<div class="hint">← / → 翻页</div>
+
+<script>
+(function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var i = 0;
+  var counter = document.getElementById('counter');
+  var progress = document.querySelector('.progress');
+  function go(n) {
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach(function (s, k) { s.classList.toggle('active', k === i); });
+    counter.textContent = (i + 1) + ' / ' + slides.length;
+    progress.style.width = ((i + 1) / slides.length * 100) + '%';
+    var inner = slides[i].querySelector('.inner');
+    if (inner) inner.scrollTop = 0;
+    history.replaceState(null, '', '#p' + (i + 1));
+  }
+  document.getElementById('prev').onclick = function () { go(i - 1); };
+  document.getElementById('next').onclick = function () { go(i + 1); };
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); go(i + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); go(i - 1); }
+    else if (e.key === 'Home') { go(0); }
+    else if (e.key === 'End') { go(slides.length - 1); }
+  });
+  var m = location.hash.match(/^#p(\d+)$/);
+  go(m ? parseInt(m[1], 10) - 1 : 0);
+})();
+</script>
+</body>
+</html>
