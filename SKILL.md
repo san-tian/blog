@@ -1,6 +1,6 @@
 ---
 name: blog
-version: 1.3.0
+version: 1.4.0
 description: "技术 blog 写作与发布。当用户要写技术文章/blog/讲解文档/复盘笔记，或要把草稿整理成 Markdown/HTML 发布时使用。文章仓库与 skill 已合并到私有 Gitea 组织仓库 pex_org/blog（http://100.78.161.108:3000/pex_org/blog），push 后自动部署到网页。"
 metadata:
   requires: []
@@ -74,6 +74,7 @@ main 分支更新后自动部署：Gitea webhook（push 事件）→ NAS `blog-s
 9. **不写复盘/教训章节**：文章末尾不要加"复盘：每一步纠正踩在什么取舍上"这种元叙事小节。文章只讲技术本身。
 10. **数据来源标注在对应表格底下**：任何含实测数据的表格、benchmark 结果、性能数字，必须在表格正下方用 blockquote 标注数据来源——命令、脚本路径、实测时间、环境（机器/镜像/版本）。数据要可复现、可追溯，不能让读者猜数字从哪来。
 11. **信息/数据可追溯，附上来源**：任何外部事实——功能描述、架构细节、参数默认值、能力对比、第三方数据——都必须附来源（官方文档 URL、GitHub 文件路径、论文 arXiv 号），就近标注（表格下方 blockquote 或行内链接）。区分「有来源的事实」和「推断/待核实」：后者用 ⚠️ 或「待核实」标注，不写无来源的断言。
+12. **引用代码附 GitHub 超链接**：引用代码/commit 时尽可能给可点击的链接——commit 用 `https://github.com/<org>/<repo>/commit/<sha>`，文件:行号用 `https://github.com/<org>/<repo>/blob/<sha>/<path>#L起-L止`，**锚定 commit SHA、不锚分支名**（分支会漂移，SHA 永远指向当时的代码）。所在 fork 用实际仓库（如 `MindLab-Research/sglang`、`san-tian/sglang`），上游用 `sglang-org/sglang`；未推送的本地 commit 链不了，标注「本地仓库」即可。
 
 ## 格式
 
@@ -81,6 +82,20 @@ main 分支更新后自动部署：Gitea webhook（push 事件）→ NAS `blog-s
 - 需要分享/展示时再生成 HTML（蓝白简约主题，代码块语法高亮，inline CSS 自包含）
 - 文件名用 kebab-case 英文，不用中文：`pd-decode-kvcache-offload.md`
 - 每发一篇 HTML 文章，在 `index.html` 目录页加一个入口
+- 排查/讲解类文章的 HTML 用逐页卡片（PPT 式）呈现，规则见下节
+
+## 排查/讲解类文章：逐页卡片（PPT 式）呈现
+
+复杂排查报告、机制讲解类文章（含多个机制 / 失效模式 / 推导链）的 HTML 版**不用长文排版**，用逐页卡片（幻灯片）形式。参考实现：`dsa-fused-kv-store-dcp-regression.html`。
+
+**硬性要求：**
+
+1. **每页一个卡片，一页只讲一件事**：kicker（阶段/页码）+ 标题 + ≤3 条要点 + 一张主视觉（SVG 示意图 / 代码卡 / 对照表）+ 脚注（证据 file:line 或 ⚠ 标注）。每页内容不要太多。
+2. **示意图优先，文字只做补充**：机制、数据流、时序、失效模式都用图讲（SVG 框图 / 箭头图 / 时间线 / 表格）——「图多字少」在卡片形式下的强化版。
+3. **导航**：←/→ 键盘翻页 + 右下角按钮 + 顶部进度条 + `#p页码` hash 定位。
+4. **漏斗式叙事 + 页型骨架**（10–15 页）：封面（一句话结论 + 排查路径预览）→ 背景 → 现象（观察组合 + 读出的线索）→ 排查路径总览（漏斗图，每层一个问题）→ 逐层收敛定位（①什么变了 → ②数据/契约长什么样 → ③正确写法是什么 → ④新代码做了吗 → ⑤错误落在哪/何时，每页顶部带排查进度条）→ 修复 → 证据索引（卡片网格）→ 三句话总结。读者能跟着漏斗一层层知道「问题发生在哪」——背景、现象、逐层排除、根因、位置，不要跳步。
+5. **两版并存**：`.md` 保留为详细证据版（完整推导 + 证据表），HTML 卡片版是主要阅读入口；两版顶部互相链接；`index.html` 入口指向 HTML 版。
+6. **证据卡片可点击**：证据索引里每条 file:line / commit 都按写作流程第 12 条附 GitHub 超链接，读者一键直达源码。
 
 ## 配色方案（蓝白简约）
 
@@ -118,6 +133,8 @@ main 分支更新后自动部署：Gitea webhook（push 事件）→ NAS `blog-s
 
 复制 `glm52-llm-d-agentic-serving.html` 的 `<style>` 块作为模板：颜色变量、代码块高亮（`.tok-cmt`）、卡片样式（`.callout-summary`、`.background`）、表格样式都已正确实现。新文章以此为骨架，只改 body 内容即可。
 
+排查/讲解类（PPT 式卡片）HTML 复制 `dsa-fused-kv-store-dcp-regression.html` 的骨架：slide 结构、SVG 示意图（映射/时间线/对照图）、导航 JS、mini-card 证据网格。
+
 ### 调用样式
 
 - `.background`：左侧橙色/蓝色边框的解释性块（背景、定义）
@@ -130,6 +147,7 @@ main 分支更新后自动部署：Gitea webhook（push 事件）→ NAS `blog-s
 | 文件 | 主题 |
 |---|---|
 | `pd-decode-kvcache-offload.md` | PD 分离架构里 decode 二级 KV 缓存机制与路径 A/B 对比 |
+| `dsa-fused-kv-store-dcp-regression.html` | DSA×DCP 乱码根因排查：逐页卡片式报告（卡片形式的模板实现） |
 | `why-decode-needs-no-l2-cache.html` | 上面那篇的 HTML 版，标题《为什么 PD 分离中，decode 不需要二级缓存？》 |
 
 ## 关键原则
@@ -140,3 +158,6 @@ main 分支更新后自动部署：Gitea webhook（push 事件）→ NAS `blog-s
 - **单一 source of truth**：所有编辑只在 `~/blog` 这个 clone 里进行，不引入额外同步层，避免双 source of truth 分歧
 - **配色一致**：所有 HTML 文章用同一套蓝白主题，不各搞一套
 - **信息/数据可追溯**：外部事实（功能、参数、数字、对比）都要附来源（文档 / GitHub / 论文），推断或待核实的明确标注，不写无来源的断言
+- **图多字少**：big pictures, few words——能用一张图、一个表格、一段类比讲清的概念，别堆成几段文字；机制先给直觉和结构（图/类比），再谈细节
+- **排查报告卡片化**：复杂排查/讲解类文章的 HTML 用逐页卡片（PPT 式）——每页一个卡片、一张图、少量要点，详见「排查/讲解类文章」一节
+- **代码引用可点击**：commit / 文件引用尽可能附 GitHub 超链接（锚 SHA），读者一键直达源码

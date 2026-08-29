@@ -17,6 +17,8 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
     background: var(--bg); color: var(--text); line-height: 1.7; font-size: 16px;
   }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
   .progress { position: fixed; top: 0; left: 0; height: 3px; background: var(--accent); width: 0; transition: width .3s; z-index: 20; }
   .deck { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 56px 20px 90px; }
   .slide { display: none; width: 100%; }
@@ -24,15 +26,15 @@
   @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
   .inner {
     width: min(980px, 100%); background: var(--card); border: 1px solid var(--border);
-    border-radius: 18px; padding: 44px 54px 36px; box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    border-radius: 18px; padding: 42px 52px 34px; box-shadow: 0 1px 3px rgba(0,0,0,.05);
     max-height: calc(100vh - 130px); overflow-y: auto;
   }
   .kicker { color: var(--accent); font-size: 13px; letter-spacing: .14em; font-weight: 700; margin-bottom: 8px; }
-  .inner h2 { font-size: 27px; font-weight: 700; color: #111; margin: 0 0 16px; line-height: 1.35; }
+  .inner h2 { font-size: 26px; font-weight: 700; color: #111; margin: 0 0 14px; line-height: 1.35; }
   .inner h2 .dim { color: var(--text-dim); font-weight: 500; font-size: .62em; }
-  .pts { margin: 10px 0; padding-left: 1.35em; font-size: 16.5px; }
+  .pts { margin: 10px 0; padding-left: 1.35em; font-size: 16px; }
   .pts li { margin: 7px 0; }
-  .pts code, td code, .footnote code, .mini-card code { font-family: "JetBrains Mono","Fira Code",Consolas,Menlo,monospace; background: var(--inline-code-bg); color: #2563eb; padding: 1px 6px; border-radius: 4px; font-size: .88em; }
+  .pts code, td code, .footnote code, .mini code, .chip code { font-family: "JetBrains Mono","Fira Code",Consolas,Menlo,monospace; background: var(--inline-code-bg); color: #2563eb; padding: 1px 6px; border-radius: 4px; font-size: .88em; }
   .fig { margin: 20px auto; text-align: center; }
   .fig svg { width: 100%; height: auto; max-width: 900px; }
   .fig .figcap { font-size: 13px; color: var(--text-dim); margin-top: 6px; }
@@ -51,7 +53,7 @@
   .chip.ok { border-color: #a7f3d0; background: #f0fdf4; }
   .chip.no { border-color: #fecaca; background: #fef2f2; }
   .chip.warn { border-color: #fde68a; background: #fffbeb; }
-  .footnote { font-size: 13px; color: var(--text-dim); border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 20px; line-height: 1.6; }
+  .footnote { font-size: 13px; color: var(--text-dim); border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 20px; line-height: 1.7; }
   table.tbl { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
   table.tbl th, table.tbl td { border: 1px solid var(--border); padding: 7px 12px; text-align: left; }
   table.tbl th { background: var(--card-2); font-weight: 600; }
@@ -60,7 +62,7 @@
   .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 16px 0; }
   .mini { background: var(--card-2); border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px; font-size: 13.5px; line-height: 1.6; }
   .mini b { display: block; color: #111; margin-bottom: 3px; font-size: 14px; }
-  .mini .src { color: var(--text-dim); font-size: 12px; font-family: "JetBrains Mono",Consolas,monospace; }
+  .mini .src { color: var(--text-dim); font-size: 12px; font-family: "JetBrains Mono",Consolas,monospace; word-break: break-all; }
   .mini.no { border-color: #fecaca; background: #fef2f2; }
   .mini.ok { border-color: #a7f3d0; background: #f0fdf4; }
   .mini.warn { border-color: #fde68a; background: #fffbeb; }
@@ -69,8 +71,18 @@
   .fbox b { font-size: 13.5px; color: #111; }
   .fbox small { color: var(--text-dim); font-size: 12px; }
   .farrow { display: flex; align-items: center; padding: 0 8px; color: var(--text-dim); font-size: 20px; }
+  .fbox.ok { border-color: #a7f3d0; background: #f0fdf4; }
+  .fbox.no { border-color: #fecaca; background: #fef2f2; }
   .bar656 { display: flex; width: 100%; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); font-size: 13px; margin: 14px 0; }
   .bar656 div { padding: 12px 8px; text-align: center; }
+  .funnel { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; font-size: 12.5px; margin: 0 0 14px; }
+  .funnel .step { padding: 3px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--card-2); color: var(--text-dim); white-space: nowrap; }
+  .funnel .step.done { color: #1d4ed8; border-color: #bfdbfe; background: #eff6ff; }
+  .funnel .step.cur { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+  .funnel .sep { color: #cbd5e1; font-size: 11px; }
+  .fl { margin: 0 auto 9px; padding: 11px 22px; border-radius: 12px; border: 1px solid; font-size: 14.5px; line-height: 1.7; }
+  .fl b { color: #111; }
+  .fl .q { color: var(--text-dim); font-size: 13px; display: block; }
   .nav { position: fixed; bottom: 18px; right: 22px; display: flex; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 7px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.10); z-index: 20; }
   .nav button { border: 1px solid var(--border); background: var(--card-2); color: var(--text); border-radius: 999px; width: 34px; height: 34px; font-size: 16px; cursor: pointer; }
   .nav button:hover { background: var(--inline-code-bg); }
@@ -91,21 +103,113 @@
 <div class="inner">
   <div class="kicker">排查报告 · 源码静态核对 · 无上机实验</div>
   <h2>indexer KV share（DSA 融合写 kernel）<br>为什么「只能兼容 dcp=8」？</h2>
-  <p style="font-size:17.5px; margin: 6px 0 4px;">根因一句话：<b>新 kernel 丢掉了 DCP 的「虚拟 id → 物理行」映射，把虚拟 id 当物理行号直接写</b>——先错位、后越界。它对任何 dcp&gt;1 都不正确，dcp=8 的「正常」只是没跑到越界拐点。</p>
-  <div class="grid4">
-    <div class="mini no"><b>dcp=4 + 优化</b>开头正常 → 突然乱码</div>
-    <div class="mini warn"><b>dcp=8 + 优化</b>暂未复现（水位没到，不是兼容）</div>
-    <div class="mini ok"><b>关掉优化</b>dcp=4/8 都正常（回到 DCP 感知旧路径）</div>
-    <div class="mini"><b>dcp=1</b>数学上唯一正确（v//1 == v）</div>
+  <p style="font-size:17px; margin: 6px 0 4px;">结论一句话：<b>新 kernel 丢掉了 DCP 的「虚拟 id → 物理行」映射，把虚拟 id 当物理行号直接写</b>——先错位、后越界。它对任何 dcp&gt;1 都不正确，dcp=8 的「正常」只是没跑到越界拐点。</p>
+  <div class="funnel" style="margin-top:18px;">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step">① 变量隔离</span><span class="sep">→</span>
+    <span class="step">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step">③ 全库契约</span><span class="sep">→</span>
+    <span class="step">④ 根因</span><span class="sep">→</span>
+    <span class="step">⑤ 定位</span><span class="sep">→</span>
+    <span class="step">修复</span>
   </div>
-  <div class="footnote">排查对象：commit <code>0a60805df4</code>（DSA fused quant+store，indexer KV share 优化）· 详细证据版见同目录 <code>dsa-fused-kv-store-dcp-regression.md</code> · ←/→ 翻页</div>
+  <p style="font-size:13.5px; color:var(--text-dim); margin:6px 0 0;">排查按这个漏斗逐层收敛：先锁定「什么变了」，再问「DCP 下 loc 是什么」「正确写法是什么」，最后对比出新 kernel 少做了什么、错误落在哪。</p>
+  <div class="footnote">排查对象：<a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a>（DSA fused quant+store，indexer KV share 优化）· 详细证据版见同目录 <code>dsa-fused-kv-store-dcp-regression.md</code> · ←/→ 翻页</div>
 </div>
 </section>
 
-<!-- ============ 2 改了什么 ============ -->
+<!-- ============ 2 背景 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">1 · 这次 commit 改了什么</div>
+  <div class="kicker">背景 · 这是什么系统、这次优化动了什么</div>
+  <h2>fp8 下 indexer 与 attention 共用一行 656B 的 KV</h2>
+  <div class="chips" style="margin:6px 0 10px;">
+    <span class="chip"><b>两个读者</b>：indexer 的 topk 打分 ↓ &nbsp;·&nbsp; 稀疏 attention ↓</span>
+  </div>
+  <div class="bar656">
+    <div style="flex:512; background:#dbeafe; border-right:1px solid var(--border);"><b>k_nope fp8</b><br>512 B</div>
+    <div style="flex:16; min-width:90px; background:#fde68a; border-right:1px solid var(--border);"><b>scales</b><br>16 B</div>
+    <div style="flex:128; background:#ddd6fe;"><b>k_rope bf16</b><br>128 B</div>
+  </div>
+  <div style="text-align:center; font-size:14px; color:var(--text-dim);">一份 KV，两边读 —— 即 "<b>indexer KV share</b>"（GLM-5.2 + <code>--kv-cache-dtype fp8_e4m3</code>：512 + 16 + 128 = 656）</div>
+  <ul class="pts">
+    <li>布局公式 <code>kv_lora_rank + kv_lora_rank//128*4 + qk_rope*2</code>（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L2235-L2250">kv_cache_configurator.py:2235-2250</a>）；行内偏移硬编码在 <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L15-L24">fused_dsa_quant_store.py:15-24</a></li>
+    <li>这次优化（<a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a>）把这一行的<b>写入</b>从「量化 + 写回」两步融合成一个 kernel——性能目的本身合理（省一次 launch + 中间 tensor，字节级无损）</li>
+    <li>DCP（decode context parallelism）：token 的 KV 按轮转分布在 dcp 个 rank 上，每 rank 只有一份本地池</li>
+  </ul>
+  <div class="footnote">「关掉优化」= 回到 bf16 KV / 旧写路径（DCP 感知），所以怎么开 dcp 都正常——这是后面「变量隔离」的线索。</div>
+</div>
+</section>
+
+<!-- ============ 3 现象 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">现象 · 三个变量：dcp 值 / 优化开关 / 时间</div>
+  <h2>观察到的四种组合</h2>
+  <div class="grid4">
+    <div class="mini no"><b>dcp=4 + 优化</b>开头正常 → 突然乱码</div>
+    <div class="mini warn"><b>dcp=8 + 优化</b>暂未复现</div>
+    <div class="mini ok"><b>dcp=4/8 + 关掉优化</b>都正常</div>
+    <div class="mini"><b>dcp=1</b>（对照）虚拟域=物理域，数学上正确</div>
+  </div>
+  <h3 style="font-size:16.5px; margin:22px 0 8px; color:#111;">从现象读出三条线索</h3>
+  <div class="grid3">
+    <div class="mini"><b>线索 1：变量隔离</b>关掉优化就正常 ⇒ 问题范围锁定在这个 commit 改动的东西</div>
+    <div class="mini"><b>线索 2：时间形态</b>不是立刻坏，而是「开头正常 → 跑一段时间突然乱码」⇒ 内存状态积累型（错位写 / 越界写）特征</div>
+    <div class="mini warn"><b>线索 3（误导项）</b>dcp=8 暂未复现 ⇒ 后面会看到这是「没跑到拐点」的假象，不是兼容</div>
+  </div>
+  <div class="footnote">排查顺序：先沿线索 1 锁定「什么变了」（下一页），再沿线索 2 定位「错误落在哪、何时发生」。</div>
+</div>
+</section>
+
+<!-- ============ 4 排查路径总览（漏斗） ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">排查路径 · 从宽到窄的五层收敛</div>
+  <h2>narrow down：每一层只回答一个问题</h2>
+  <div style="margin:18px 0 6px;">
+    <div class="fl" style="width:100%; background:#dbeafe; border-color:#93c5fd;">
+      <span class="q">① 什么变了？（唯一变量）</span>
+      <b>只有写路径</b>：量化+写回两步 → 融合 kernel 一步（2 files，+181/−12，读侧零改动）
+    </div>
+    <div class="fl" style="width:88%; background:#eff6ff; border-color:#bfdbfe;">
+      <span class="q">② DCP 下写入的 loc 是什么？</span>
+      <b>虚拟 id</b>（0 ~ size×dcp），不是物理行号——物理池每 rank 只有 size 行
+    </div>
+    <div class="fl" style="width:76%; background:#fffbeb; border-color:#fde68a;">
+      <span class="q">③ 正确写法是什么？（全库契约）</span>
+      <b>归属过滤（v % dcp == rank）+ 行号换算（v // dcp）</b>——所有 KV 写路径都这么做
+    </div>
+    <div class="fl" style="width:64%; background:#fef2f2; border-color:#fecaca;">
+      <span class="q">④ 新 kernel 做了吗？</span>
+      <b>两样都没做</b>（连 slot 0 跳过也丢了）→ 根因锁定
+    </div>
+    <div class="fl" style="width:54%; background:#fee2e2; border-color:#dc2626;">
+      <span class="q">⑤ 错误落在哪？何时发生？</span>
+      <b>v&lt;size 错位写 · v≥size 越界写 · 拐点 = 水位过 size</b>
+    </div>
+  </div>
+  <div class="chips" style="margin-top:14px;">
+    <span class="chip no">dcp=4 乱码 = ⑤ 两种模式都发生</span>
+    <span class="chip warn">dcp=8「正常」= 没跑到拐点</span>
+    <span class="chip ok">关掉优化 = 回到契约路径</span>
+  </div>
+  <div class="footnote">下面 5 页按这个漏斗逐层展开，每页顶部有排查进度条。</div>
+</div>
+</section>
+
+<!-- ============ 5 收敛① 变量隔离 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step cur">① 变量隔离</span><span class="sep">→</span>
+    <span class="step">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step">③ 全库契约</span><span class="sep">→</span>
+    <span class="step">④ 根因</span><span class="sep">→</span>
+    <span class="step">⑤ 定位</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">收敛 ① · 什么变了</div>
   <h2>只动了「写路径」：两步 → 一步 <span class="dim">读侧零改动</span></h2>
   <div class="flow">
     <div class="fbox" style="flex:1.2"><b>k_nope bf16 (512) + k_rope bf16 (64)</b><small>每 token 的 KV 载荷</small></div>
@@ -116,7 +220,7 @@
     <div class="farrow">→</div>
     <div class="fbox" style="flex:1"><b>KV 池</b><small>每 rank size 行</small></div>
   </div>
-  <p style="text-align:center; color:var(--text-dim); font-size:14px; margin:4px 0;">▼ 被 <code>0a60805df4</code> 替换为 ▼</p>
+  <p style="text-align:center; color:var(--text-dim); font-size:14px; margin:4px 0;">▼ 被 <a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> 替换为 ▼</p>
   <div class="flow">
     <div class="fbox" style="flex:1.2"><b>k_nope bf16 + k_rope bf16</b><small>同上</small></div>
     <div class="farrow">→</div>
@@ -125,45 +229,32 @@
     <div class="fbox" style="flex:1"><b>KV 池</b><small>每 rank size 行</small></div>
   </div>
   <div class="chips">
-    <span class="chip">diffstat：<b>2 files，+181/−12</b>（fused_dsa_quant_store.py 新增 173 行 + memory_pool.py 接入）</span>
-    <span class="chip">读路径、布局 656B 公式：<b>零改动</b></span>
+    <span class="chip">diffstat：<b>2 files，+181/−12</b>（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py">fused_dsa_quant_store.py</a> 新增 173 行 + <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4204-L4216">memory_pool.py 接入</a>）</span>
+    <span class="chip">读路径、656B 布局：<b>零改动</b></span>
   </div>
-  <div class="footnote">性能目的本身合理（量化+写回融合、字节级无损）；错在融合时没带上旧 kernel 的 DCP 映射。<code>git show 0a60805df4 --stat</code></div>
+  <div class="footnote">结合线索 1（关掉就正常）：怀疑范围收敛到「这一个 kernel 的写入行为」。下一步：DCP 下这个写入的 loc 到底是什么？</div>
 </div>
 </section>
 
-<!-- ============ 3 656B 布局 ============ -->
+<!-- ============ 6 收敛② 虚拟 id ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">2 · 背景：这份 KV 是共享的</div>
-  <h2>fp8 下 indexer 与 attention 共用一行 656B 的 KV <span class="dim">= "indexer KV share"</span></h2>
-  <div class="bar656">
-    <div style="flex:512; background:#dbeafe; border-right:1px solid var(--border);"><b>k_nope fp8</b><br>512 B</div>
-    <div style="flex:16; min-width:90px; background:#fde68a; border-right:1px solid var(--border);"><b>scales</b><br>16 B</div>
-    <div style="flex:128; background:#ddd6fe;"><b>k_rope bf16</b><br>128 B</div>
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step cur">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step">③ 全库契约</span><span class="sep">→</span>
+    <span class="step">④ 根因</span><span class="sep">→</span>
+    <span class="step">⑤ 定位</span>
   </div>
-  <div style="text-align:center; font-size:14.5px; color:var(--text-dim);">行内偏移硬编码于 <code>fused_dsa_quant_store.py:15-24</code>：512 + 16 + 128 = <b style="color:var(--text)">656</b></div>
-  <ul class="pts">
-    <li><b>indexer 的 topk 打分</b>和<b>稀疏 attention</b>读同一行 → 读写两端都要行号正确</li>
-    <li>布局公式：<code>kv_lora_rank + kv_lora_rank//128*4 + qk_rope*2</code>（<code>kv_cache_configurator.py:2235-2250</code>）</li>
-    <li>「关掉优化」= 回到 bf16 KV / 旧写路径（DCP 感知），所以怎么开 dcp 都正常</li>
-  </ul>
-  <div class="footnote">GLM-5.2 + <code>--kv-cache-dtype fp8_e4m3</code>：kv_lora_rank=512、qk_rope_head_dim=64。</div>
-</div>
-</section>
-
-<!-- ============ 4 DCP 虚拟 id ============ -->
-<section class="slide">
-<div class="inner">
-  <div class="kicker">3 · DCP 基础：loc 是「虚拟 id」，不是物理行号</div>
-  <h2>allocator 发虚拟 id，物理行号要除以 dcp</h2>
+  <div class="kicker" style="margin-top:2px;">收敛 ② · DCP 下写入的 loc 是什么</div>
+  <h2>loc 是「虚拟 id」，不是物理行号</h2>
   <div class="fig">
     <svg viewBox="0 0 880 330" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <marker id="ab" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L8,4.5 L0,9" fill="none" stroke="#1d4ed8" stroke-width="1.6"/></marker>
       </defs>
       <text x="20" y="22" font-size="13" fill="#78716c">allocator 虚拟 id（dcp=4 示意，取一页前 16 个槽；实际一页 = 64×dcp = 256 槽）</text>
-      <!-- 16 slot squares -->
       <g font-size="15" font-weight="700" text-anchor="middle">
         <rect x="20"  y="36" width="46" height="46" rx="8" fill="#bfdbfe" stroke="#1d4ed8"/><text x="43"  y="65" fill="#1e3a8a">0</text>
         <rect x="74"  y="36" width="46" height="46" rx="8" fill="#bbf7d0" stroke="#059669"/><text x="97"  y="65" fill="#064e3b">1</text>
@@ -183,7 +274,6 @@
         <rect x="830" y="36" width="46" height="46" rx="8" fill="#ddd6fe" stroke="#6d28d9"/><text x="853" y="65" fill="#4c1d95">15</text>
       </g>
       <text x="20" y="108" font-size="13" fill="#78716c">颜色 = 归属 rank（v % dcp）；同一 rank 的池里只存自己颜色的 token</text>
-      <!-- formula chips -->
       <g font-size="14" text-anchor="middle">
         <rect x="100" y="128" width="150" height="36" rx="10" fill="#ffffff" stroke="#e7e5e4"/><text x="175" y="151" fill="#1c1917">v = 13</text>
         <rect x="300" y="128" width="250" height="36" rx="10" fill="#f0fdf4" stroke="#059669"/><text x="425" y="151" fill="#065f46">归属 rank = 13 % 4 = 1</text>
@@ -191,7 +281,6 @@
         <path d="M252 146 L296 146" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ab)"/>
         <path d="M552 146 L596 146" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ab)"/>
       </g>
-      <!-- rank1 pool -->
       <text x="20" y="216" font-size="13.5" fill="#1c1917" font-weight="600">rank 1 的物理池（每 rank 只有 size 行）</text>
       <g font-size="12.5" text-anchor="middle">
         <rect x="20"  y="228" width="95" height="42" rx="8" fill="#ffffff" stroke="#cbd5e1"/><text x="67"  y="247" fill="#78716c">row 0</text><text x="67" y="263" font-size="11" fill="#94a3b8">← v=1</text>
@@ -208,15 +297,23 @@
     </svg>
     <div class="figcap">虚拟 id 与物理行的关系：归属 rank = v % dcp，物理行 = v // dcp</div>
   </div>
-  <div class="footnote">allocator 容量 = size×dcp、虚拟页 = 64×dcp（<code>kv_cache_configurator.py:1775-1783</code>）；物理池每 rank 只有 size 行（<code>memory_pool.py:4105-4113</code>）；读侧契约同样按 v//dcp（<code>dcp_kernels.py:98-105</code>）。</div>
+  <div class="footnote">allocator 容量 = size×dcp、虚拟页 = 64×dcp（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L1775-L1783">kv_cache_configurator.py:1775-1783</a>）；物理池每 rank 只有 size 行（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4105-L4113">memory_pool.py:4105-4113</a>）。</div>
 </div>
 </section>
 
-<!-- ============ 5 契约 ============ -->
+<!-- ============ 7 收敛③ 全库契约 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">4 · 全库契约：KV 写路径都要做 mask + divide</div>
-  <h2>旧路径（被替换的那个）就是这么写的</h2>
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step cur">③ 全库契约</span><span class="sep">→</span>
+    <span class="step">④ 根因</span><span class="sep">→</span>
+    <span class="step">⑤ 定位</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">收敛 ③ · 正确写法是什么</div>
+  <h2>全库契约：KV 写路径都要做 mask + divide</h2>
   <pre class="code"><span class="cmt"># mla_buffer.py:39-43 —— set_mla_kv_buffer_kernel（commit 之前 fp8 路径必经）</span>
 loc = tl.load(loc_ptr + pid_loc).to(tl.int64)
 <span class="hl">is_valid = (loc != reserved_skip_index) &amp; (loc % DCP_WORLD_SIZE == DCP_RANK)  <span class="cmt">① 归属过滤：只写自己的 token</span></span>
@@ -227,19 +324,27 @@ tl.store(dst_ptr + safe_loc * buffer_stride + offs, src, mask=mask &amp; is_vali
 <span class="cmt"># DCP 参数来自真实运行时配置，不是写死（mla_buffer.py:173-174）</span>
 DCP_RANK=get_parallel().attn_dcp_rank,  DCP_WORLD_SIZE=get_parallel().attn_dcp_size</pre>
   <div class="chips">
-    <span class="chip ok"><b>读侧</b>也按 v//dcp（dcp_kernels.py:98-105）</span>
-    <span class="chip ok"><b>set_kv_buffer</b> 同样过滤（memory_pool.py:4172-4176）</span>
-    <span class="chip ok"><b>trtllm 写路径</b>显式传 dcp 参数（trtllm_mla_backend.py:1030-1033）</span>
+    <span class="chip ok"><b>读侧</b>也按 v//dcp（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dcp_kernels.py#L98-L105">dcp_kernels.py:98-105</a>）</span>
+    <span class="chip ok"><b>set_kv_buffer</b> 同样过滤（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4172-L4176">memory_pool.py:4172-4176</a>）</span>
+    <span class="chip ok"><b>trtllm 写路径</b>显式传 dcp 参数（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/layers/attention/trtllm_mla_backend.py#L1030-L1033">trtllm_mla_backend.py:1030-1033</a>）</span>
   </div>
-  <div class="footnote">契约原话就在调用点注释里：「<code>loc is widened under DCP; the kernel divides by the world size itself</code>」（<code>memory_pool.py:4240</code>）——OOB 检查窗口也特意放宽到 size×dcp，因为<b>约定 kernel 来做换算</b>。</div>
+  <div class="footnote">契约原话就在调用点注释里：「<code>loc is widened under DCP; the kernel divides by the world size itself</code>」（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4240-L4245">memory_pool.py:4240</a>）——OOB 检查窗口特意放宽到 size×dcp，因为<b>约定 kernel 来做换算</b>。</div>
 </div>
 </section>
 
-<!-- ============ 6 新 kernel 缺失 ============ -->
+<!-- ============ 8 收敛④ 根因 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">5 · 新 kernel：三样都没有</div>
-  <h2>fused_dsa_quant_store 直接把 loc 当行号写</h2>
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step cur">④ 根因</span><span class="sep">→</span>
+    <span class="step">⑤ 定位</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">收敛 ④ · 新 kernel 做了吗</div>
+  <h2>根因：fused_dsa_quant_store 三样都没做</h2>
   <pre class="code"><span class="cmt"># fused_dsa_quant_store.py:51, 60-61, 70-71</span>
 cache_loc = tl.load(loc_ptr + token_id).to(tl.int64)                <span class="cmt"># 虚拟 id，原样使用</span>
 tl.store(nope_buf_ptr  + <span class="bad">cache_loc</span> * nope_buf_stride_0  + offs, y_q)       <span class="cmt"># 行号 = v ✗</span>
@@ -251,17 +356,25 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <div class="mini no"><b>③ 无 slot 0 跳过</b>旧 kernel 的 <code>reserved_skip_index</code>（padding 预留槽）也丢了</div>
   </div>
   <div class="chips">
-    <span class="chip no">kernel 签名（:31-47）与 launch（:104-120）<b>没有任何 dcp 参数</b></span>
-    <span class="chip no">调用点直接透传 loc（memory_pool.py:4204-4216）</span>
+    <span class="chip no">kernel 签名（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L31-L47">:31-47</a>）与 launch（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L104-L120">:104-120</a>）<b>没有任何 dcp 参数</b></span>
+    <span class="chip no">调用点直接透传 loc（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4204-L4216">memory_pool.py:4204-4216</a>）</span>
   </div>
-  <div class="footnote">commit 之前同一位置走 <code>quantize_k_cache_separate + set_mla_kv_buffer_triton</code>（DCP 感知）：见 <code>git show 0a60805df4^</code>。commit 自带的字节级一致性测试只在 dcp=1 下等价（loc 语义一变就测不出来）。</div>
+  <div class="footnote">commit 之前同一位置走 <code>quantize_k_cache_separate + set_mla_kv_buffer_triton</code>（DCP 感知）：见 <a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> 的 parent。commit 自带的字节级一致性测试只在 dcp=1 下等价（loc 语义一变就测不出来）。</div>
 </div>
 </section>
 
-<!-- ============ 7 失效：错位/越界 ============ -->
+<!-- ============ 9 定位·空间 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">6 · 失效机制</div>
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step done">④ 根因</span><span class="sep">→</span>
+    <span class="step cur">⑤ 定位 · 空间</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">定位 ⑤-A · 错误写在哪个行号</div>
   <h2>应写 v//dcp，实写 v：错位 + 越界</h2>
   <div class="fig">
     <svg viewBox="0 0 1040 330" xmlns="http://www.w3.org/2000/svg">
@@ -271,14 +384,12 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
         <marker id="ay" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L8,4.5 L0,9" fill="none" stroke="#d97706" stroke-width="1.8"/></marker>
       </defs>
       <text x="20" y="22" font-size="13" fill="#78716c">rank 1 的 token（dcp=4，池 size=8 行 示意）：应写 v//4，新 kernel 实写 v</text>
-      <!-- token chips -->
       <g font-size="14" font-weight="700" text-anchor="middle">
         <rect x="20"  y="40" width="88" height="38" rx="9" fill="#fffbeb" stroke="#d97706"/><text x="64"  y="64" fill="#92400e">v = 1</text>
         <rect x="128" y="40" width="88" height="38" rx="9" fill="#fffbeb" stroke="#d97706"/><text x="172" y="64" fill="#92400e">v = 5</text>
         <rect x="236" y="40" width="88" height="38" rx="9" fill="#fef2f2" stroke="#dc2626"/><text x="280" y="64" fill="#991b1b">v = 9</text>
         <rect x="344" y="40" width="88" height="38" rx="9" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/><text x="388" y="64" fill="#991b1b">v = 13</text>
       </g>
-      <!-- pool cells rows 0..13 -->
       <g font-size="12.5" text-anchor="middle">
         <rect x="20"  y="150" width="64" height="54" rx="7" fill="#ffffff" stroke="#cbd5e1"/><text x="52"  y="181" fill="#78716c">row 0</text>
         <rect x="90"  y="150" width="64" height="54" rx="7" fill="#fde68a" stroke="#d97706"/><text x="122" y="173" fill="#92400e">row 1</text><text x="122" y="190" font-size="10.5" fill="#92400e">实写 v=1</text>
@@ -298,12 +409,10 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
       </g>
       <text x="20" y="145" font-size="12.5" fill="#78716c">本 rank 物理池（size = 8 行）</text>
       <text x="620" y="145" font-size="12.5" fill="#dc2626" font-weight="700">越界：池只有 8 行，v≥8 写进相邻内存（其他 layer 的 KV buffer 等）</text>
-      <!-- arrows -->
       <path d="M388 82 C 380 115, 300 120, 272 146" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#ag)"/>
       <path d="M404 82 C 560 105, 900 105, 972 146" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#ar)"/>
       <path d="M172 82 C 176 110, 330 115, 396 146" fill="none" stroke="#d97706" stroke-width="2" marker-end="url(#ay)"/>
       <path d="M262 82 C 240 112, 210 118, 198 146" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#ag)"/>
-      <!-- legend -->
       <g font-size="13">
         <rect x="20" y="248" width="16" height="16" rx="4" fill="#a7f3d0" stroke="#059669"/><text x="44" y="261" fill="#1c1917">应写（v // dcp）</text>
         <rect x="190" y="248" width="16" height="16" rx="4" fill="#fde68a" stroke="#d97706"/><text x="214" y="261" fill="#1c1917">实写·错位（v &lt; size）</text>
@@ -323,15 +432,22 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 8 拐点 ============ -->
+<!-- ============ 10 定位·时间 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">7 · 为什么「开头正常、突然乱码」</div>
-  <h2>allocator 从低位顺序发页：越过 size = 拐点</h2>
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step done">④ 根因</span><span class="sep">→</span>
+    <span class="step cur">⑤ 定位 · 时间</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">定位 ⑤-B · 错误何时开始发生</div>
+  <h2>allocator 从低位顺序发页：越过 size = 拐点 <span class="dim">解释「开头正常、突然乱码」</span></h2>
   <div class="fig">
     <svg viewBox="0 0 880 250" xmlns="http://www.w3.org/2000/svg">
       <defs><marker id="aa" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L8,4.5 L0,9" fill="none" stroke="#78716c" stroke-width="1.6"/></marker></defs>
-      <!-- id space bar -->
       <rect x="20" y="60" width="460" height="62" rx="8" fill="#fef3c7" stroke="#d97706"/>
       <rect x="486" y="60" width="374" height="62" rx="8" fill="#fee2e2" stroke="#dc2626"/>
       <text x="250" y="86" font-size="14.5" fill="#92400e" text-anchor="middle" font-weight="600">v &lt; size：写入错位行（还在池内）</text>
@@ -342,7 +458,6 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
       <text x="484" y="32" font-size="13" fill="#dc2626" text-anchor="middle" font-weight="700">size（每 rank 物理行数）</text>
       <text x="24" y="146" font-size="12" fill="#78716c">虚拟 id：0</text>
       <text x="856" y="146" font-size="12" fill="#78716c" text-anchor="end">size×dcp</text>
-      <!-- water arrow -->
       <line x1="40" y1="185" x2="820" y2="185" stroke="#78716c" stroke-width="2" marker-end="url(#aa)"/>
       <circle cx="360" cy="185" r="7" fill="#1d4ed8"/>
       <text x="360" y="170" font-size="12.5" fill="#1d4ed8" text-anchor="middle">当前水位（累计分配 token 数）</text>
@@ -358,11 +473,20 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 9 dcp=8 ============ -->
+<!-- ============ 11 复盘 dcp=8 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">8 · 那为什么 dcp=8 「没事」？</div>
-  <h2>拐点与 dcp 值无关 —— dcp=8 只是没跑到</h2>
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step done">④ 根因</span><span class="sep">→</span>
+    <span class="step done">⑤ 定位</span><span class="sep">→</span>
+    <span class="step cur">复盘 · dcp=8</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">复盘 · 线索 3 的解释</div>
+  <h2>那为什么 dcp=8 「没事」？<span class="dim">拐点与 dcp 值无关 —— 只是没跑到</span></h2>
   <div class="fig">
     <svg viewBox="0 0 880 235" xmlns="http://www.w3.org/2000/svg">
       <line x1="40" y1="195" x2="840" y2="195" stroke="#cbd5e1" stroke-width="2"/>
@@ -370,13 +494,11 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
       <line x1="520" y1="40" x2="520" y2="195" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 4"/>
       <text x="520" y="30" font-size="13" fill="#dc2626" text-anchor="middle" font-weight="700">size（越界拐点，与 dcp 无关）</text>
       <text x="606" y="58" font-size="11.5" fill="#dc2626">越界区 →</text>
-      <!-- dcp=4 track -->
       <line x1="60" y1="95" x2="520" y2="95" stroke="#059669" stroke-width="4"/>
       <line x1="520" y1="95" x2="740" y2="95" stroke="#dc2626" stroke-width="4"/>
       <circle cx="740" cy="95" r="8" fill="#dc2626"/>
       <text x="66" y="82" font-size="13.5" fill="#1c1917" font-weight="700">dcp=4 实验</text>
       <text x="756" y="100" font-size="12.5" fill="#dc2626">跑到拐点后 → 乱码（已观测）</text>
-      <!-- dcp=8 track -->
       <line x1="60" y1="150" x2="400" y2="150" stroke="#059669" stroke-width="4"/>
       <circle cx="400" cy="150" r="8" fill="#d97706"/>
       <text x="66" y="137" font-size="13.5" fill="#1c1917" font-weight="700">dcp=8 实验</text>
@@ -392,11 +514,11 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 10 修复 ============ -->
+<!-- ============ 12 修复 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">9 · 修复</div>
-  <h2>把旧 kernel 的两行映射补回来</h2>
+  <div class="kicker">修复 · 把旧 kernel 的两行映射补回来</div>
+  <h2>方案 A：kernel 内补 DCP（推荐）</h2>
   <pre class="code"><span class="cmt"># fused_dsa_quant_store kernel 内（对齐 mla_buffer.py:39-43 的既有写法）</span>
   loc = tl.load(loc_ptr + token_id).to(tl.int64)
 <span class="add">+ is_valid = (loc != reserved_skip_index) &amp; (loc % DCP_WORLD_SIZE == DCP_RANK)</span>
@@ -409,41 +531,41 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <div class="mini"><b>方案 B（保守）</b><code>dcp_enabled()</code> 时回退旧两步路径（quantize + set_mla_kv_buffer_triton），fused 仅用于 dcp=1</div>
   </div>
   <div class="chips">
-    <span class="chip warn">附带：<b>HIP fp8 分支</b>（set_mla_kv_buffer_fp8_quant_kernel）同样没有 DCP 换算——AMD 上开 DCP+fp8 share 会踩同坑（存量，非本 commit 引入）</span>
-    <span class="chip warn">rebase 到生产分支时，读侧那批 DCP 修复（_localize_index_k_cache_locals 等，37231e4884）需一并核对</span>
+    <span class="chip warn">附带：<b>HIP fp8 分支</b>（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/kvcache/mla_buffer.py#L206-L208">set_mla_kv_buffer_fp8_quant_kernel</a>）同样没有 DCP 换算——AMD 上开 DCP+fp8 share 会踩同坑（存量，非本 commit 引入）</span>
+    <span class="chip warn">rebase 到生产分支时，读侧那批 DCP 修复（_localize_index_k_cache_locals 等，<a href="https://github.com/MindLab-Research/sglang/commit/37231e4884">37231e4884</a>）需一并核对</span>
   </div>
   <div class="footnote">验证建议：dcp=4 长时压测，监控累计分配越过 size 后的输出质量；对照 dcp=1 应全程正常。</div>
 </div>
 </section>
 
-<!-- ============ 11 证据索引 ============ -->
+<!-- ============ 13 证据索引 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">10 · 证据索引</div>
-  <h2>每条结论的源码出处 <span class="dim">（分支 kernel/dsa-fused-quant-store，HEAD=0a60805df4）</span></h2>
+  <div class="kicker">证据索引 · 每条结论的源码出处（点击直达 GitHub）</div>
+  <h2>12 条证据 <span class="dim">（fork san-tian/sglang @ 0a60805df4；生产分支 commit 在 MindLab-Research/sglang）</span></h2>
   <div class="grid3">
-    <div class="mini"><b>allocator 发虚拟 id</b>容量 size×dcp、页 64×dcp<div class="src">kv_cache_configurator.py:1775-1783</div></div>
-    <div class="mini"><b>物理池每 rank 仅 size 行</b>torch.zeros((size+64, 1, 656))<div class="src">memory_pool.py:4105-4113</div></div>
-    <div class="mini ok"><b>旧 kernel 有 mask+divide</b>v%dcp==rank；safe_loc=v//dcp<div class="src">mla_buffer.py:39-43, 173-174</div></div>
-    <div class="mini ok"><b>契约注释原话</b>"kernel divides by the world size itself"，OOB 窗口放宽到 size×dcp<div class="src">memory_pool.py:4240-4245</div></div>
-    <div class="mini ok"><b>读侧契约 v//dcp</b>create_mla_kv_page_table_for_dcp<div class="src">dcp_kernels.py:98-105</div></div>
-    <div class="mini ok"><b>其他写路径都守约</b>set_kv_buffer 过滤；trtllm 显式传 dcp 参数<div class="src">memory_pool.py:4172-4176 · trtllm_mla_backend.py:1030-1033</div></div>
-    <div class="mini no"><b>新 kernel 原样写 loc</b>cache_loc 无过滤、无除法、无 slot0 跳过<div class="src">fused_dsa_quant_store.py:51, 60-71</div></div>
-    <div class="mini no"><b>kernel 无任何 dcp 参数</b>签名与 launch 均无 DCP_RANK/WORLD_SIZE<div class="src">fused_dsa_quant_store.py:31-47, 104-120</div></div>
-    <div class="mini no"><b>调用点直接透传 loc</b>fused_dsa_quant_store(..., dst_buffer, loc)<div class="src">memory_pool.py:4204-4216</div></div>
-    <div class="mini"><b>commit 前走 DCP 感知路径</b>quantize + set_mla_kv_buffer_triton<div class="src">git show 0a60805df4^:memory_pool.py</div></div>
-    <div class="mini"><b>只改写侧，读侧零改动</b>2 files, +181/−12<div class="src">git show 0a60805df4 --stat</div></div>
-    <div class="mini warn"><b>同类 bug 前科</b>生产分支 index_k 虚拟 id 未转换 → 错位 → 乱码<div class="src">commit 37231e4884（b300-glm52）</div></div>
+    <div class="mini"><b>allocator 发虚拟 id</b>容量 size×dcp、页 64×dcp<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L1775-L1783">kv_cache_configurator.py:1775-1783</a></div></div>
+    <div class="mini"><b>物理池每 rank 仅 size 行</b>torch.zeros((size+64, 1, 656))<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4105-L4113">memory_pool.py:4105-4113</a></div></div>
+    <div class="mini ok"><b>旧 kernel 有 mask+divide</b>v%dcp==rank；safe_loc=v//dcp<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/kvcache/mla_buffer.py#L39-L43">mla_buffer.py:39-43</a> · <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/kvcache/mla_buffer.py#L173-L174">173-174</a></div></div>
+    <div class="mini ok"><b>契约注释原话</b>"kernel divides by the world size itself"<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4240-L4245">memory_pool.py:4240-4245</a></div></div>
+    <div class="mini ok"><b>读侧契约 v//dcp</b>create_mla_kv_page_table_for_dcp<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dcp_kernels.py#L98-L105">dcp_kernels.py:98-105</a></div></div>
+    <div class="mini ok"><b>其他写路径都守约</b>set_kv_buffer 过滤；trtllm 显式传 dcp 参数<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4172-L4176">memory_pool.py:4172-4176</a> · <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/layers/attention/trtllm_mla_backend.py#L1030-L1033">trtllm_mla_backend.py:1030-1033</a></div></div>
+    <div class="mini no"><b>新 kernel 原样写 loc</b>cache_loc 无过滤、无除法、无 slot0 跳过<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L51-L71">fused_dsa_quant_store.py:51-71</a></div></div>
+    <div class="mini no"><b>kernel 无任何 dcp 参数</b>签名与 launch 均无 DCP_RANK/WORLD_SIZE<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L31-L47">fused_dsa_quant_store.py:31-47</a> · <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py#L104-L120">104-120</a></div></div>
+    <div class="mini no"><b>调用点直接透传 loc</b>fused_dsa_quant_store(..., dst_buffer, loc)<div class="src"><a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4204-L4216">memory_pool.py:4204-4216</a></div></div>
+    <div class="mini"><b>commit 前走 DCP 感知路径</b>quantize + set_mla_kv_buffer_triton<div class="src"><a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> 的 parent（^）</div></div>
+    <div class="mini"><b>只改写侧，读侧零改动</b>2 files, +181/−12<div class="src"><a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> --stat</div></div>
+    <div class="mini warn"><b>同类 bug 前科</b>生产分支 index_k 虚拟 id 未转换 → 错位 → 乱码<div class="src"><a href="https://github.com/MindLab-Research/sglang/commit/37231e4884">commit 37231e4884</a>（b300-glm52）</div></div>
   </div>
-  <div class="footnote">656B 布局：kv_cache_configurator.py:2235-2250 + fused_dsa_quant_store.py:15-24 · 详细推导与诚实标注见 <code>dsa-fused-kv-store-dcp-regression.md</code></div>
+  <div class="footnote">656B 布局：<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/kv_cache_configurator.py#L2235-L2250">kv_cache_configurator.py:2235-2250</a> · 详细推导与诚实标注见 <code>dsa-fused-kv-store-dcp-regression.md</code></div>
 </div>
 </section>
 
-<!-- ============ 12 总结 ============ -->
+<!-- ============ 14 总结 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">11 · 总结</div>
-  <h2>三句话</h2>
+  <div class="kicker">总结 · 三句话</div>
+  <h2>narrow down 到终点</h2>
   <div class="grid3">
     <div class="mini no"><b>① 根因</b>fused_dsa_quant_store 丢掉了所有其他 KV 写路径都有的 DCP 映射（归属过滤 + v//dcp），把虚拟 id 当物理行号直接写</div>
     <div class="mini warn"><b>② 现象</b>v&lt;size 错位写、v≥size 越界写 → 「开头正常、突然乱码」；拐点=累计分配&gt;size，与 dcp 值无关 → dcp=8 是没跑到拐点的假象</div>
@@ -455,8 +577,8 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
   </ul>
   <div class="chips">
     <span class="chip">📄 详细证据版：<code>dsa-fused-kv-store-dcp-regression.md</code></span>
-    <span class="chip">🔍 源码 commit：<code>0a60805df4</code></span>
-    <span class="chip">🧾 同类前科：<code>37231e4884</code>（生产分支 fix(dcp)）</span>
+    <span class="chip">🔍 源码 commit：<a href="https://github.com/san-tian/sglang/commit/0a60805df4">0a60805df4</a></span>
+    <span class="chip">🧾 同类前科：<a href="https://github.com/MindLab-Research/sglang/commit/37231e4884">37231e4884</a>（生产分支 fix(dcp)）</span>
   </div>
   <div class="footnote">本报告为源码静态排查（2026-08-27，无上机实验）；读侧 C++ kernel 无法静态核实处已在 md 版用 ⚠ 标注。←/→ 或方向键翻页 · <a href="index.html">返回目录</a></div>
 </div>
@@ -466,7 +588,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 
 <div class="nav">
   <button id="prev" aria-label="上一页">←</button>
-  <span class="counter" id="counter">1 / 12</span>
+  <span class="counter" id="counter">1 / 14</span>
   <button id="next" aria-label="下一页">→</button>
 </div>
 <div class="hint">← / → 翻页</div>
