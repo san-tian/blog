@@ -105,7 +105,7 @@
 
   <a class="post" href="rbg-rolebasedgroup-explained.html">
     <div class="title">RBG（RoleBasedGroup）讲解：在 K8s 上把多角色 LLM 推理服务当『一个有机体』编排（卡片版）</div>
-    <div class="desc">14 页讲解 SGLang 项目的 Kubernetes Operator <code>sgl-project/rbg</code>（v0.7.0，源码锚定 commit 4acd5a7）：PD 分离这类多角色推理服务（router → prefill → decode）为什么用原生 Deployment/StatefulSet 编排不了，RBG 怎么用一个 CRD 接管部署拓扑（RoleBasedGroup → Role → RoleInstanceSet → RoleInstance 四层对象）、三种部署模式、免手写服务发现（每角色 headless Service <code>s-&lt;rbg&gt;-&lt;role&gt;</code> + RBG_LWP_* 环境变量注入）、角色依赖拓扑排序、CoordinatedPolicy 跨角色锁步升级（maxSkew）、原地更新、gang 调度与独占拓扑；含 SGLang PD 分离实战 YAML 走读（TP4 prefill + TP2 decode 全自动接线）、控制器 reconcile 链条源码走读、生态位（LWS/Dynamo/Mooncake/rbg-planner）与 v1alpha1→v1alpha2 迁移注意。每条结论附 GitHub 超链接，详细版见同仓 rbg-rolebasedgroup-explained.md。</div>
+    <div class="desc">16 页由浅入深讲解 SGLang 项目的 Kubernetes Operator <code>sgl-project/rbg</code>（v0.7.0，源码锚定 commit 4acd5a7）：它是用来做什么的（nginx 最小例 + PD 分离头号场景）→ 有什么效果（七件人肉活变声明式）→ 能实现什么功能（多角色混搭/三种部署模式/服务发现三件套/启动依赖/CoordinatedPolicy 锁步升级/原地更新/gang 调度/独占拓扑/每角色 HPA/生态）→ 怎么部署（helm 安装→nginx 例子→看对象→SGLang PD 实战）→ 什么设计架构（四层对象/reconcile 链/版本演进与 v1alpha2 迁移）；开头附零基础术语卡。每条结论附 GitHub 超链接，详细版见同仓 rbg-rolebasedgroup-explained.md。</div>
     <div class="meta">
       <span class="tag agent">🤖 AI-assisted</span>
       <span class="tag">kubernetes</span>
