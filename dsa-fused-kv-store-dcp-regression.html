@@ -444,10 +444,164 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
   <div class="footnote"><b>与 indexer share 的关系</b>：indexer share = 这行 656B 的 KV 同时被 indexer（选路打分）和 attention（计算）共享——这个概念<b>早就存在，不是本 commit 加的</b>。本 commit 只动了「往这行 KV 写入」的 kernel（两步融合成一步），融合时丢了 DCP 换算。所以 bug 在「写路径」，不在「共享」本身。</div>
 </div>
 </section>
+<!-- ============ 12 正确写回 kernel 全貌 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step cur">④ 根因</span><span class="sep">→</span>
+    <span class="step">⑤ 定位</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">正确写回 kernel · 完整代码 + 每个变量</div>
+  <h2>set_mla_kv_buffer_kernel（mla_buffer.py:12-78）</h2>
+  <pre class="code"><span class="cmt"># 旧两步路径的「写回」kernel：把量化好的 KV 写进 cache，先做 DCP 换算</span>
+def set_mla_kv_buffer_kernel(
+    kv_buffer_ptr,
+    cache_k_nope_ptr,
+    cache_k_rope_ptr,
+    loc_ptr,
+    reserved_skip_index,
+    buffer_stride: tl.constexpr,
+    nope_stride: tl.constexpr,
+    rope_stride: tl.constexpr,
+    nope_dim: tl.constexpr,
+    rope_dim: tl.constexpr,
+    BLOCK: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    DCP_WORLD_SIZE: tl.constexpr,
+    USE_GDC: tl.constexpr = False,
+):
+    pid_loc = tl.program_id(0)
+    pid_blk = tl.program_id(1)
+
+    base = pid_blk * BLOCK
+    offs = base + tl.arange(0, BLOCK)
+    total_dim = nope_dim + rope_dim
+    mask = offs &lt; total_dim
+
+    if USE_GDC:
+        tl.extra.cuda.gdc_wait()
+
+    loc = tl.load(loc_ptr + pid_loc).to(tl.int64)
+    <span class="hl">is_valid = (loc != reserved_skip_index) &amp; (loc % DCP_WORLD_SIZE == DCP_RANK)</span>
+    safe_loc = tl.where(is_valid, loc, 0)
+    <span class="hl">safe_loc = safe_loc // DCP_WORLD_SIZE</span>
+    dst_ptr = kv_buffer_ptr + safe_loc * buffer_stride + offs
+
+    # Three-way branch to handle boundary correctly while preserving fast path
+    if base + BLOCK &lt;= nope_dim:
+        # Fast path: entire block is in nope region
+        src = tl.load(
+            cache_k_nope_ptr + pid_loc * nope_stride + offs,
+            mask=mask,
+        )
+    elif base &gt;= nope_dim:
+        # Fast path: entire block is in rope region
+        offs_rope = offs - nope_dim
+        src = tl.load(
+            cache_k_rope_ptr + pid_loc * rope_stride + offs_rope,
+            mask=mask,
+        )
+    else:
+        # Boundary case: block spans nope/rope boundary (e.g., FP8 with nope_dim=528)
+        # Handle each offset individually to avoid negative indexing
+        is_nope = offs &lt; nope_dim
+        is_rope = (offs &gt;= nope_dim) &amp; (offs &lt; (nope_dim + rope_dim))
+
+        src_nope = tl.load(
+            cache_k_nope_ptr + pid_loc * nope_stride + offs,
+            mask=mask &amp; is_nope,
+            other=0,
+        )
+        src_rope = tl.load(
+            cache_k_rope_ptr + pid_loc * rope_stride + (offs - nope_dim),
+            mask=mask &amp; is_rope,
+            other=0,
+        )
+
+        src = tl.where(is_nope, src_nope, src_rope)
+
+    <span class="hl">tl.store(dst_ptr, src, mask=mask &amp; is_valid)</span></pre>
+  <table class="tbl">
+    <tr><th style="width:24%">变量</th><th>是什么 / 干嘛的</th></tr>
+<tr><td><code>kv_buffer_ptr</code></td><td>目标 KV cache 的基址：一大块连续显存，每个 token 占一行</td></tr><tr><td><code>cache_k_nope_ptr</code></td><td>源：这个 token 的 key 主成分（nope）部分，512 维，已量化成 fp8（连 16 字节 scale 共 528）</td></tr><tr><td><code>cache_k_rope_ptr</code></td><td>源：这个 token 的 key 位置编码（rope）部分，64 维 bf16（128 字节）</td></tr><tr><td><code>loc_ptr</code></td><td>每个 token 的目标<b>槽位号</b>数组：第 i 个元素 = 第 i 个 token 写到几号槽</td></tr><tr><td><code>reserved_skip_index</code></td><td>预留槽号（=0）：slot 0 是 CUDA graph 的 padding 槽，写它没有意义，所以跳过</td></tr><tr><td><code>buffer_stride</code></td><td>KV cache 一行有多少元素（=656），算目标行偏移用</td></tr><tr><td><code>nope_stride / rope_stride</code></td><td>源张量一行有多少元素，算源地址行偏移用</td></tr><tr><td><code>nope_dim / rope_dim</code></td><td>nope / rope 部分的长度（fp8 下 528 / 128 字节）</td></tr><tr><td><code>BLOCK</code></td><td>tile 大小：kernel 一次处理多少个元素</td></tr><tr><td><code>DCP_RANK</code></td><td>本卡在 DCP 里的编号（0 ~ dcp-1），决定「哪个槽归我」</td></tr><tr><td><code>DCP_WORLD_SIZE</code></td><td>DCP 一共几张卡（dcp=4/8），用于取余/整除</td></tr><tr><td><code>USE_GDC</code></td><td>GDC（GPU 上的 launch 依赖同步），性能开关，与正确性无关</td></tr><tr><td><code>pid_loc</code></td><td>本线程负责第几个 token（grid 第 0 维）</td></tr><tr><td><code>pid_blk</code></td><td>本线程负责行内第几个块（grid 第 1 维）</td></tr><tr><td><code>base / offs</code></td><td>块内元素偏移：本块负责行的 [base, base+BLOCK) 这段</td></tr><tr><td><code>total_dim</code></td><td>nope_dim + rope_dim = 656，一行总长</td></tr><tr><td><code>mask</code></td><td>行内哪些偏移有效（offs &lt; total_dim），防止越界读写</td></tr><tr><td><code>loc</code></td><td>读出的槽位号。<b>DCP 下是全局虚拟 id</b>（0 ~ size×dcp），不是本卡行号</td></tr><tr><td><code>is_valid</code></td><td><b>归属过滤</b>：这个槽是不是本卡该写的（loc % dcp == rank）且不是预留槽</td></tr><tr><td><code>safe_loc</code></td><td>除以 dcp 后的<b>本卡物理行号</b>（虚拟 id → 本卡行）</td></tr><tr><td><code>dst_ptr</code></td><td>目标地址 = 基址 + 行号×行宽 + 行内偏移</td></tr><tr><td><code>src</code></td><td>要写入的数据（按偏移取 nope 或 rope，边界块两段拼起来）</td></tr><tr><td><code>is_nope / is_rope</code></td><td>边界块里区分「这段属于 nope 还是 rope」的标记</td></tr>
+  </table>
+  <div class="footnote">DCP 参数由 dispatch 处传入真实配置（mla_buffer.py:173-174：<code>DCP_RANK=get_parallel().attn_dcp_rank, DCP_WORLD_SIZE=get_parallel().attn_dcp_size</code>）。代码里没有 lock（锁）——写回是并行 scatter，每个 token 写自己的槽，靠「归属过滤」保证一个槽只被一张卡写一次。</div>
+</div>
+</section>
+
+<!-- ============ 13 错误 fused kernel 全貌 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step cur">④ 根因</span><span class="sep">→</span>
+    <span class="step">⑤ 定位</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">错误 fused kernel · 完整代码 + 每个变量</div>
+  <h2>_fused_dsa_quant_store_kernel（fused_dsa_quant_store.py:31-72）</h2>
+  <pre class="code"><span class="cmt"># 本 commit 的 fused kernel：量化+写回一步，但没有 DCP 换算</span>
+def _fused_dsa_quant_store_kernel(
+    k_nope_ptr,
+    k_rope_ptr,
+    nope_buf_ptr,
+    scale_buf_ptr,
+    rope_buf_ptr,
+    loc_ptr,
+    k_nope_stride_0: int,
+    k_rope_stride_0: int,
+    nope_buf_stride_0: int,
+    scale_buf_stride_0: int,
+    rope_buf_stride_0: int,
+    GROUP_SIZE: tl.constexpr,
+    DIM_NOPE: tl.constexpr,
+    DIM_ROPE: tl.constexpr,
+    NUM_NOPE_BLOCKS: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+):
+    token_id = tl.program_id(0)
+    block_id = tl.program_id(1)
+    <span class="bad">cache_loc = tl.load(loc_ptr + token_id).to(tl.int64)</span>
+
+    if block_id &lt; NUM_NOPE_BLOCKS:
+        # Quantize this nope block with its own per-block scale.
+        # DIM_NOPE % GROUP_SIZE == 0, so no mask is needed here.
+        offs = block_id * GROUP_SIZE + tl.arange(0, GROUP_SIZE)
+        y = tl.load(k_nope_ptr + token_id * k_nope_stride_0 + offs).to(tl.float32)
+        y_s = tl.max(tl.abs(y)) / FP8_MAX
+        y_q = tl.clamp(y / y_s, -FP8_MAX, FP8_MAX).to(nope_buf_ptr.dtype.element_ty)
+        tl.store(nope_buf_ptr + cache_loc * nope_buf_stride_0 + offs, y_q)
+        tl.store(scale_buf_ptr + cache_loc * scale_buf_stride_0 + block_id, y_s)
+    else:
+        # Copy the rope part as bf16 (no quantization, position-sensitive).
+        rope_block = block_id - NUM_NOPE_BLOCKS
+        offs = rope_block * GROUP_SIZE + tl.arange(0, GROUP_SIZE)
+        mask = offs &lt; DIM_ROPE
+        data = tl.load(
+            k_rope_ptr + token_id * k_rope_stride_0 + offs, mask=mask, other=0.0
+        )
+        tl.store(
+            rope_buf_ptr + cache_loc * rope_buf_stride_0 + offs, data, mask=mask
+        )</pre>
+  <table class="tbl">
+    <tr><th style="width:28%">变量</th><th>是什么 / 干嘛的</th></tr>
+<tr><td><code>k_nope_ptr</code></td><td>源：nope 部分（bf16 512 维，<b>未量化</b>，kernel 内现量化）</td></tr><tr><td><code>k_rope_ptr</code></td><td>源：rope 部分（bf16 64 维）</td></tr><tr><td><code>nope_buf_ptr</code></td><td>目标 buffer 的 nope 区视图（fp8，行内偏移 0~512）</td></tr><tr><td><code>scale_buf_ptr</code></td><td>目标 buffer 的 scale 区视图（fp32，行内偏移 512~528）</td></tr><tr><td><code>rope_buf_ptr</code></td><td>目标 buffer 的 rope 区视图（bf16，行内偏移 528~656）</td></tr><tr><td><code>loc_ptr</code></td><td>每个 token 的槽位号数组</td></tr><tr><td><code>k_nope_stride_0 / k_rope_stride_0</code></td><td>源张量的行步长</td></tr><tr><td><code>nope_buf_stride_0 / scale_buf_stride_0 / rope_buf_stride_0</code></td><td>目标三区的行步长（同一块 buffer 的三个视图，值相同）</td></tr><tr><td><code>GROUP_SIZE</code></td><td>量化块大小 = 128：每 128 个元素算一个 scale</td></tr><tr><td><code>DIM_NOPE / DIM_ROPE</code></td><td>nope 维度 = 512；rope 维度 = 64</td></tr><tr><td><code>NUM_NOPE_BLOCKS</code></td><td>nope 分块数 = 512/128 = 4</td></tr><tr><td><code>FP8_MAX</code></td><td>fp8 e4m3fn 最大有限值 = 448（对称格式，max = -min）</td></tr><tr><td><code>token_id</code></td><td>本线程负责第几个 token</td></tr><tr><td><code>block_id</code></td><td>本线程负责第几个块：0~3 是 4 个 nope 量化块，4 是 rope 拷贝块</td></tr><tr><td><code>offs</code></td><td>块内元素偏移</td></tr><tr><td><code>cache_loc</code></td><td>读出的槽位号 = 虚拟 id，<b>被直接当行号用 —— bug 就在这里</b>（缺 % dcp 过滤 + // dcp 换算）</td></tr><tr><td><code>y</code></td><td>读出的 nope 值（转成 fp32 以便算 scale）</td></tr><tr><td><code>y_s</code></td><td>本块量化 scale = max(|y|) / 448</td></tr><tr><td><code>y_q</code></td><td>量化后的 fp8 值 = clamp(y / y_s, ±448)</td></tr><tr><td><code>data</code></td><td>rope 数据，bf16 原样拷贝（不量化，位置敏感）</td></tr><tr><td><code>mask</code></td><td>rope 块内有效偏移（offs &lt; 64，因为 64 不是 128 的倍数）</td></tr>
+  </table>
+  <div class="footnote">对比旧 kernel：这里没有 <code>loc % DCP_WORLD_SIZE == DCP_RANK</code>（归属过滤）、没有 <code>loc // DCP_WORLD_SIZE</code>（行号换算），也没有 <code>reserved_skip_index</code> 跳过——所以 <code>cache_loc</code>（虚拟 id）被直接当行号。</div>
+</div>
+</section>
 
 
 
-<!-- ============ 12 定位·空间 ============ -->
+
+
+<!-- ============ 14 定位·空间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -516,7 +670,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 13 定位·时间 ============ -->
+<!-- ============ 15 定位·时间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -558,7 +712,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 14 现象核对 ① 开头正常 ============ -->
+<!-- ============ 16 现象核对 ① 开头正常 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -595,7 +749,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 15 现象核对 ② 几小时后 ============ -->
+<!-- ============ 17 现象核对 ② 几小时后 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -618,7 +772,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 16 现象核对 ③ 不是所有请求 ============ -->
+<!-- ============ 18 现象核对 ③ 不是所有请求 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -655,7 +809,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 17 现象核对 ④ 关掉就好了 ============ -->
+<!-- ============ 19 现象核对 ④ 关掉就好了 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -686,7 +840,7 @@ tl.store(nope_buf_ptr + cache_loc * stride + offs, y_q)                      <sp
 </div>
 </section>
 
-<!-- ============ 18 现象核对 ⑤ dcp=8 没炸 ============ -->
+<!-- ============ 20 现象核对 ⑤ dcp=8 没炸 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -708,7 +862,7 @@ tl.store(nope_buf_ptr + cache_loc * stride + offs, y_q)                      <sp
 </div>
 </section>
 
-<!-- ============ 19 修复 ============ -->
+<!-- ============ 21 修复 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">修复 · 把旧 kernel 的两行映射补回来</div>
@@ -732,7 +886,7 @@ tl.store(nope_buf_ptr + cache_loc * stride + offs, y_q)                      <sp
 </div>
 </section>
 
-<!-- ============ 20 证据索引 ============ -->
+<!-- ============ 22 证据索引 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">证据索引 · 每条结论的源码出处（点击直达 GitHub）</div>
@@ -758,7 +912,7 @@ tl.store(nope_buf_ptr + cache_loc * stride + offs, y_q)                      <sp
 </div>
 </section>
 
-<!-- ============ 21 总结 ============ -->
+<!-- ============ 23 总结 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">总结 · 三句话</div>
@@ -785,7 +939,7 @@ tl.store(nope_buf_ptr + cache_loc * stride + offs, y_q)                      <sp
 
 <div class="nav">
   <button id="prev" aria-label="上一页">←</button>
-  <span class="counter" id="counter">1 / 21</span>
+  <span class="counter" id="counter">1 / 23</span>
   <button id="next" aria-label="下一页">→</button>
 </div>
 <div class="hint">← / → 翻页</div>
