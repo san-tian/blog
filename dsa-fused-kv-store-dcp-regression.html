@@ -533,6 +533,11 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 <div class="cl"><span class="ln">77</span><span class="cc"></span></div>
 <div class="cl"><span class="ln">78</span><span class="cc">    tl.store(dst_ptr, src, mask=mask &amp; is_valid)</span><span class="bub key">写入，mask 掉非本卡的</span></div>
   </div>
+  <div class="grid3">
+    <div class="mini"><b>① 为什么滤「本卡 + 非预留」</b>DCP 把 KV 轮转分到 dcp 张卡，每个 token 只该被它的 owner 卡存一份；slot 0 是 padding 预留槽，写它没意义</div>
+    <div class="mini"><b>② 为什么归零</b>GPU 是 SIMT，无效 token 不能 return 跳过；归零给它一个池内安全地址（第 0 行），「不写」靠 store 的 mask=is_valid 完成</div>
+    <div class="mini"><b>③ 为什么整除</b>loc 是全局编号（0~size×dcp），本卡只有 size 行；轮转下卡 r 的第 k 个 token 全局号 = k×dcp+r，本卡行 = loc // dcp</div>
+  </div>
   <div class="footnote">黄色气泡 = DCP 关键行；入参（kv_buffer_ptr / loc_ptr / DCP_RANK / DCP_WORLD_SIZE…）在它们被真正读取的那一行解释。DCP 参数由 dispatch 传入真实配置（mla_buffer.py:173-174）。代码里没有 lock——写回是并行 scatter，靠「归属过滤」保证一个槽只被一张卡写一次。</div>
 </div>
 </section>
