@@ -514,7 +514,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 13 现象核对 1/2：时间与范围 ============ -->
+<!-- ============ 13 现象核对 ① 开头正常 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -526,40 +526,145 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <span class="step done">⑤ 定位</span><span class="sep">→</span>
     <span class="step cur">现象核对</span>
   </div>
-  <div class="kicker" style="margin-top:2px;">现象核对 1/2 · 时间与范围</div>
-  <h2>三个现象，都指向同一个原因</h2>
-  <div class="grid3">
-    <div class="mini"><b>现象① 开头正常</b>越界写不是一开始就有：v&lt;size 时错位写仍在池内，读写用同一套编号（原始 v）时暂时自洽 → 早期输出正常</div>
-    <div class="mini warn"><b>现象② 几小时后才出问题</b>越界写要等累计分配越过 size（池填到约 1/dcp），大池高负载下几小时才过线 → 拐点前一直正常</div>
-    <div class="mini warn"><b>现象③ 不是所有请求都出问题</b>越界写踩的是相邻内存里恰好在那的请求数据；只有高位虚拟 id（v≥size）的请求、或数据被踩掉的请求才乱码 → 零星而非全体</div>
+  <div class="kicker" style="margin-top:2px;">现象核对 ①/5 · 开头正常</div>
+  <h2>为什么服务开头一切正常？</h2>
+  <div class="fig">
+    <svg viewBox="0 0 880 205" xmlns="http://www.w3.org/2000/svg">
+      <defs><marker id="pw" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L8,4.5 L0,9" fill="none" stroke="#1d4ed8" stroke-width="1.8"/></marker></defs>
+      <line x1="40" y1="158" x2="840" y2="158" stroke="#cbd5e1" stroke-width="2"/>
+      <text x="440" y="188" font-size="12.5" fill="#78716c" text-anchor="middle">服务运行时间 →</text>
+      <line x1="560" y1="36" x2="560" y2="158" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 4"/>
+      <text x="560" y="26" font-size="13" fill="#dc2626" text-anchor="middle" font-weight="700">拐点：水位越过 size</text>
+      <rect x="40" y="66" width="500" height="46" rx="8" fill="#f0fdf4" stroke="#059669"/>
+      <text x="290" y="94" font-size="14" fill="#065f46" text-anchor="middle" font-weight="700">开头：所有 v &lt; size，写入都在池内，无越界 → 正常</text>
+      <rect x="575" y="66" width="265" height="46" rx="8" fill="#fee2e2" stroke="#dc2626"/>
+      <text x="707" y="94" font-size="14" fill="#991b1b" text-anchor="middle" font-weight="700">越过 size 后：越界写 → 乱码</text>
+      <path d="M50 132 C 200 118, 420 100, 780 108" fill="none" stroke="#1d4ed8" stroke-width="2.5" marker-end="url(#pw)"/>
+      <text x="60" y="148" font-size="12" fill="#1d4ed8">水位（累计分配的虚拟 id 数）</text>
+    </svg>
   </div>
-  <div class="footnote">三个现象都由「越界写 + 水位拐点」一个原因解释，无需引入第二种原因。「逻辑错误」会全体立刻崩，与「几小时 + 零星」不符——这反过来说明是越界写。</div>
-</div>
-</section>
-
-<!-- ============ 14 现象核对 2/2：控制变量 ============ -->
-<section class="slide">
-<div class="inner">
-  <div class="funnel">
-    <span class="step done">现象</span><span class="sep">→</span>
-    <span class="step done">① 变量隔离</span><span class="sep">→</span>
-    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
-    <span class="step done">③ 全库契约</span><span class="sep">→</span>
-    <span class="step done">④ 根因</span><span class="sep">→</span>
-    <span class="step done">⑤ 定位</span><span class="sep">→</span>
-    <span class="step cur">现象核对</span>
-  </div>
-  <div class="kicker" style="margin-top:2px;">现象核对 2/2 · 控制变量</div>
-  <h2>删掉就好、dcp=8 没炸：也都符合</h2>
   <div class="grid2">
-    <div class="mini ok"><b>现象④ 删掉优化就好了</b>回退旧两步路径（quantize_k_cache_separate + set_mla_kv_buffer_triton），DCP 换算（loc % dcp == rank + loc // dcp）恢复 → 写对行号 → 正常。这是「变量隔离」的正面证据</div>
-    <div class="mini warn"><b>现象⑤ dcp=8 没炸</b>越界阈值与 dcp 值无关（都是累计分配 &gt; size），dcp=8 不免疫；更可能只是那组没跑够时间到水位、或跑的不是这份代码（生产分支无 fused kernel）</div>
+    <div class="mini"><b>拐点前（v &lt; size）</b>越界写还没发生：虚拟 id 从低位顺序发，早期分配的 v 都小于 size，写入全部落在池内</div>
+    <div class="mini"><b>所以开头正常</b>错位写（写 row v 而非 v//dcp）在此阶段不产生可见故障——读写用同一套原始编号时自洽，输出照常</div>
   </div>
-  <div class="footnote">五个现象全部由「写侧丢失 DCP 换算」这一个根因解释，无一构成反例——这些现象不削弱现有证据，反而互相印证。</div>
+  <div class="footnote">⚠ v&lt;size 阶段「错位写」是否立刻影响输出，取决于读侧用哪套编号（本分支 DSA 读路径无换算代码，见 md 版）；但「开头正常」与「越界有水位拐点」一致。</div>
 </div>
 </section>
 
-<!-- ============ 15 修复 ============ -->
+<!-- ============ 14 现象核对 ② 几小时后 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step done">④ 根因</span><span class="sep">→</span>
+    <span class="step done">⑤ 定位</span><span class="sep">→</span>
+    <span class="step cur">现象核对</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">现象核对 ②/5 · 几小时后</div>
+  <h2>为什么是「几小时」而不是立刻？</h2>
+  <div class="grid3">
+    <div class="mini"><b>越界条件</b>写入行号 v ≥ size（虚拟 id 超过本 rank 池的行数）</div>
+    <div class="mini"><b>何时满足</b>累计分配越过 size：每 rank 池只有 size 行、虚拟空间是 size×dcp，所以<b>池填到约 1/dcp</b>就开始越界</div>
+    <div class="mini warn"><b>时间尺度</b>越界时刻 ≈ size ÷ 持续占用速率——size 越大（百万级 token）、负载越低，耗时越长，大池高负载下通常以小时计</div>
+  </div>
+  <div class="footnote">关键：越界不是「运行越久越容易出」，而是「水位必须越过 size」。只要没到拐点，跑多久都正常；一旦越过，才开始零星乱码。阈值（累计分配 &gt; size）与 dcp 值无关。</div>
+</div>
+</section>
+
+<!-- ============ 15 现象核对 ③ 不是所有请求 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step done">④ 根因</span><span class="sep">→</span>
+    <span class="step done">⑤ 定位</span><span class="sep">→</span>
+    <span class="step cur">现象核对</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">现象核对 ③/5 · 不是所有请求</div>
+  <h2>为什么只有一部分请求乱码？</h2>
+  <div class="fig">
+    <svg viewBox="0 0 880 210" xmlns="http://www.w3.org/2000/svg">
+      <defs><marker id="pm" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L8,4.5 L0,9" fill="none" stroke="#dc2626" stroke-width="1.8"/></marker></defs>
+      <text x="20" y="22" font-size="13" fill="#78716c">GPU 显存里，KV 池按 layer 连续排布（每个 layer 一个 size 行的 buffer）</text>
+      <g font-size="13" text-anchor="middle">
+        <rect x="20" y="52" width="200" height="62" rx="8" fill="#eff6ff" stroke="#1d4ed8"/><text x="120" y="78" fill="#1e40af" font-weight="700">layer N 的 buffer</text><text x="120" y="96" font-size="11" fill="#1e40af">（size 行，写到这就满了）</text>
+        <rect x="230" y="52" width="200" height="62" rx="8" fill="#fef2f2" stroke="#dc2626"/><text x="330" y="78" fill="#991b1b" font-weight="700">layer N+1 的 buffer</text><text x="330" y="96" font-size="11" fill="#991b1b">被越界写踩到</text>
+        <rect x="440" y="52" width="200" height="62" rx="8" fill="#f5f5f4" stroke="#d6d3d1"/><text x="540" y="78" fill="#44403c" font-weight="600">layer N+2 的 buffer</text><text x="540" y="96" font-size="11" fill="#78716c">没被踩到</text>
+        <rect x="650" y="52" width="210" height="62" rx="8" fill="#f5f5f4" stroke="#d6d3d1"/><text x="755" y="78" fill="#44403c" font-weight="600">其他请求的数据</text><text x="755" y="96" font-size="11" fill="#78716c">没被踩到</text>
+      </g>
+      <path d="M120 122 C 150 142, 260 142, 320 118" fill="none" stroke="#dc2626" stroke-width="2.5" marker-end="url(#pm)"/>
+      <text x="130" y="146" font-size="12.5" fill="#dc2626" font-weight="700">越界写（v ≥ size）从 layer N 尾部溢出</text>
+      <text x="20" y="188" font-size="12.5" fill="#78716c">只有「恰好被踩到的那段内存」对应的请求才乱码——所以是零星，不是全体。</text>
+    </svg>
+  </div>
+  <div class="grid2">
+    <div class="mini"><b>越界写踩的是相邻内存</b>后续 layer 的 buffer、其他请求的数据——不是写坏整个池</div>
+    <div class="mini warn"><b>反证</b>若根因是「逻辑错误」（每个请求都算错），会全体、立刻崩；「几小时 + 零星」恰恰指向越界写破坏内存</div>
+  </div>
+  <div class="footnote">这与「越界写」的物理行为一致：写的是「不该写的那块内存」，破坏范围由溢出量决定，天然零星。</div>
+</div>
+</section>
+
+<!-- ============ 16 现象核对 ④ 关掉就好了 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step done">④ 根因</span><span class="sep">→</span>
+    <span class="step done">⑤ 定位</span><span class="sep">→</span>
+    <span class="step cur">现象核对</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">现象核对 ④/5 · 关掉 Indexer Share 就好了</div>
+  <h2>为什么关掉就好了？</h2>
+  <pre class="code"><span class="cmt"># 关掉 = 回退这个 commit = 用回旧两步路径，写 kernel 里有 DCP 换算：</span>
+is_valid = (loc != reserved_skip_index) &amp; (loc % DCP_WORLD_SIZE == DCP_RANK)   <span class="cmt">① 归属过滤：只写自己 rank 的 token</span>
+safe_loc = tl.where(is_valid, loc, 0)
+safe_loc = safe_loc // DCP_WORLD_SIZE                                         <span class="cmt">② 虚拟 id → 本卡物理行</span>
+tl.store(dst_ptr + safe_loc * stride + offs, src, mask=… &amp; is_valid)
+
+<span class="cmt"># 开着 = fused_dsa_quant_store，直接拿虚拟 id 当行号写：</span>
+cache_loc = tl.load(loc_ptr + token_id)                                       <span class="bad">✗ 无过滤、无换算</span>
+tl.store(nope_buf_ptr + cache_loc * stride + offs, y_q)                      <span class="bad">✗ 行号错 + v≥size 越界</span></pre>
+  <div class="grid2">
+    <div class="mini ok"><b>旧 kernel（关掉后）</b>把虚拟 id 换算成本卡行号（v // dcp），且只写自己 rank 的 token → 行号永远 &lt; size，<b>永不越界</b></div>
+    <div class="mini no"><b>新 kernel（开着）</b><code>cache_loc = loc</code> 原样当行号 → 行号错，v≥size 时越界写相邻内存</div>
+  </div>
+  <div class="footnote">关掉/恢复的唯一变量就是「写 kernel」——所以「关掉就好了」是「变量隔离」的正面证据，与代码 diff（旧 kernel 有 mask+divide、新 kernel 没有）完全对得上。</div>
+</div>
+</section>
+
+<!-- ============ 17 现象核对 ⑤ dcp=8 没炸 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="funnel">
+    <span class="step done">现象</span><span class="sep">→</span>
+    <span class="step done">① 变量隔离</span><span class="sep">→</span>
+    <span class="step done">② 虚拟 id</span><span class="sep">→</span>
+    <span class="step done">③ 全库契约</span><span class="sep">→</span>
+    <span class="step done">④ 根因</span><span class="sep">→</span>
+    <span class="step done">⑤ 定位</span><span class="sep">→</span>
+    <span class="step cur">现象核对</span>
+  </div>
+  <div class="kicker" style="margin-top:2px;">现象核对 ⑤/5 · dcp=8 没炸</div>
+  <h2>为什么 dcp=8 没复现？</h2>
+  <div class="grid2">
+    <div class="mini warn"><b>阈值与 dcp 无关</b>越界条件都是「累计分配 &gt; size」，dcp=4 与 dcp=8 的拐点位置相同——dcp=8 不免疫</div>
+    <div class="mini warn"><b>两种可能</b>① 那组没跑够几小时、没到水位（结合现象②，没到拐点永远正常）；② 跑的不是这份代码（生产分支 b300-glm52 没有 fused kernel，走旧 DCP-aware 路径）</div>
+  </div>
+  <div class="footnote">需确认 dcp=8 的部署分支/环境：若是生产环境（未 deploy 本 commit），则与 dcp 值无关，纯粹是「生产没装这个 bug」。这不影响「写侧是本 commit 引入」的结论。</div>
+</div>
+</section>
+
+<!-- ============ 18 修复 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">修复 · 把旧 kernel 的两行映射补回来</div>
@@ -583,7 +688,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 16 证据索引 ============ -->
+<!-- ============ 19 证据索引 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">证据索引 · 每条结论的源码出处（点击直达 GitHub）</div>
@@ -609,7 +714,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 17 总结 ============ -->
+<!-- ============ 20 总结 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">总结 · 三句话</div>
@@ -636,7 +741,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 
 <div class="nav">
   <button id="prev" aria-label="上一页">←</button>
-  <span class="counter" id="counter">1 / 17</span>
+  <span class="counter" id="counter">1 / 20</span>
   <button id="next" aria-label="下一页">→</button>
 </div>
 <div class="hint">← / → 翻页</div>
