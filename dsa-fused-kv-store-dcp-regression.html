@@ -87,9 +87,16 @@
   .canno .cl { display: flex; align-items: baseline; gap: 10px; white-space: nowrap; line-height: 1.75; }
   .canno .ln { color: #cbd5e1; font-size: 11px; min-width: 2.1em; text-align: right; flex: none; user-select: none; font-family: "JetBrains Mono",Consolas,monospace; }
   .canno .cc { font-family: "JetBrains Mono","Fira Code",Consolas,Menlo,monospace; font-size: 13px; white-space: pre; }
-  .canno .bub { flex: none; background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 999px; padding: 0 10px; font-size: 11.5px; white-space: nowrap; }
+  .canno .bub { flex: none; background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 999px; padding: 0 10px; font-size: 11.5px; white-space: nowrap; cursor: pointer; user-select: none; }
+  .canno .bub:hover { filter: brightness(0.94); }
   .canno .bub.key { background: #fef9c3; border-color: #fde68a; color: #92400e; }
   .canno .bub.bad { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+  .canno details.ann { margin: 0; }
+  .canno details.ann > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 10px; white-space: nowrap; }
+  .canno details.ann > summary::-webkit-details-marker { display: none; }
+  .canno details.ann[open] > summary .cc { color: #111; }
+  .canno .exp { margin: 3px 0 8px 2.4em; padding: 8px 14px; background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; font-size: 13.5px; color: var(--text); white-space: normal; line-height: 1.7; max-width: 760px; }
+  .canno .exp b { color: #111; }
   .nav { position: fixed; bottom: 18px; right: 22px; display: flex; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 7px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.10); z-index: 20; }
   .nav button { border: 1px solid var(--border); background: var(--card-2); color: var(--text); border-radius: 999px; width: 34px; height: 34px; font-size: 16px; cursor: pointer; }
   .nav button:hover { background: var(--inline-code-bg); }
@@ -462,8 +469,9 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <span class="step cur">④ 根因</span><span class="sep">→</span>
     <span class="step">⑤ 定位</span>
   </div>
-  <div class="kicker" style="margin-top:2px;">正确写回 kernel · 变量在运行代码里的首次使用处注解</div>
+  <div class="kicker" style="margin-top:2px;">正确写回 kernel · 每行可折叠详细解释</div>
   <h2>set_mla_kv_buffer_kernel（mla_buffer.py:12-78）</h2>
+  <p style="font-size:13.5px; color:var(--text-dim); margin:4px 0 8px;">点每一行的 ⓘ 气泡展开详细解释（含基础概念）。黄色 = DCP 关键行。</p>
   <div class="canno">
 <div class="cl"><span class="ln">12</span><span class="cc">def set_mla_kv_buffer_kernel(</span></div>
 <div class="cl"><span class="ln">13</span><span class="cc">    kv_buffer_ptr,</span></div>
@@ -481,33 +489,33 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 <div class="cl"><span class="ln">25</span><span class="cc">    DCP_WORLD_SIZE: tl.constexpr,</span></div>
 <div class="cl"><span class="ln">26</span><span class="cc">    USE_GDC: tl.constexpr = False,</span></div>
 <div class="cl"><span class="ln">27</span><span class="cc">):</span></div>
-<div class="cl"><span class="ln">28</span><span class="cc">    pid_loc = tl.program_id(0)</span><span class="bub">管第几个 token</span></div>
-<div class="cl"><span class="ln">29</span><span class="cc">    pid_blk = tl.program_id(1)</span><span class="bub">管行内第几个块</span></div>
+<details class="ann"><summary><span class="ln">28</span><span class="cc">    pid_loc = tl.program_id(0)</span><span class="bub">ⓘ 线程→第几个 token</span></summary><div class="exp">pid_loc 是这个「线程」负责的第几个 token。背景：GPU 上同时跑成千上万个线程，每个线程执行同一份代码、处理不同的数据；kernel 启动时把它们排成网格（grid），tl.program_id(0) 返回这个线程在网格第 0 维的编号。这里第 0 维是 token 维，所以 pid_loc = 第几个 token。每个 token 占 KV cache 一行，一个线程负责写一行。</div></details>
+<details class="ann"><summary><span class="ln">29</span><span class="cc">    pid_blk = tl.program_id(1)</span><span class="bub">ⓘ 行内第几个块</span></summary><div class="exp">pid_blk 是这个线程负责「这一行里的第几个块」。一行 KV 有 656 个元素，太长，切成若干块（每块 BLOCK 个元素）让更多线程并行处理同一行。网格第 1 维是块维，pid_blk = 行内第几块。一个线程的身份 =（第几个 token，行内第几块）。</div></details>
 <div class="cl"><span class="ln">30</span><span class="cc"></span></div>
-<div class="cl"><span class="ln">31</span><span class="cc">    base = pid_blk * BLOCK</span><span class="bub">块起始偏移（BLOCK=块大小）</span></div>
-<div class="cl"><span class="ln">32</span><span class="cc">    offs = base + tl.arange(0, BLOCK)</span><span class="bub">块内元素偏移</span></div>
-<div class="cl"><span class="ln">33</span><span class="cc">    total_dim = nope_dim + rope_dim</span><span class="bub">一行总长 656（nope_dim+rope_dim）</span></div>
-<div class="cl"><span class="ln">34</span><span class="cc">    mask = offs &lt; total_dim</span><span class="bub">有效偏移掩码</span></div>
+<details class="ann"><summary><span class="ln">31</span><span class="cc">    base = pid_blk * BLOCK</span><span class="bub">ⓘ 块起始位置</span></summary><div class="exp">base = 这个块在这一行 656 个元素里的起始位置。BLOCK 是块大小（一次处理多少个元素），第 pid_blk 个块从 pid_blk×BLOCK 开始。例：BLOCK=128，pid_blk=0 从 0 开始，pid_blk=1 从 128 开始。</div></details>
+<details class="ann"><summary><span class="ln">32</span><span class="cc">    offs = base + tl.arange(0, BLOCK)</span><span class="bub">ⓘ 块内元素偏移</span></summary><div class="exp">offs = 这个块要处理的每个元素的「行内偏移」（一组数字）。tl.arange(0, BLOCK) 生成 [0,1,2,…,BLOCK-1]，加 base 就是本块负责的那段位置。之后读/写都用 offs 定位行内具体元素。</div></details>
+<details class="ann"><summary><span class="ln">33</span><span class="cc">    total_dim = nope_dim + rope_dim</span><span class="bub">ⓘ 一行总长 656</span></summary><div class="exp">total_dim = 一行 KV 的总长度 656。KV cache 每行存一个 token 的 key，拆两部分：nope（主成分，512 维，压成 fp8 后 512 字节 + 16 字节 scale = 528）和 rope（位置编码，64 维 bf16 = 128 字节），合起来 656。nope_dim / rope_dim 就是这两段的长度。</div></details>
+<details class="ann"><summary><span class="ln">34</span><span class="cc">    mask = offs &lt; total_dim</span><span class="bub">ⓘ 有效偏移掩码</span></summary><div class="exp">mask = 标记「哪些偏移还在这一行范围内」。BLOCK 未必是 656 的整数倍，最后一块会超出 656；mask 把超出的位置标成 False，后面读/写时跳过，防止越界。</div></details>
 <div class="cl"><span class="ln">35</span><span class="cc"></span></div>
-<div class="cl"><span class="ln">36</span><span class="cc">    if USE_GDC:</span><span class="bub">是否开 GDC（性能开关）</span></div>
+<details class="ann"><summary><span class="ln">36</span><span class="cc">    if USE_GDC:</span><span class="bub">ⓘ GDC 开关</span></summary><div class="exp">USE_GDC = 是否开启 GDC（GPU 的「发射依赖同步」优化）。跟写 KV 的对错无关，纯性能开关：开了就在写前先等上游依赖数据就绪（gdc_wait）。可忽略。</div></details>
 <div class="cl"><span class="ln">37</span><span class="cc">        tl.extra.cuda.gdc_wait()</span></div>
 <div class="cl"><span class="ln">38</span><span class="cc"></span></div>
-<div class="cl"><span class="ln">39</span><span class="cc">    loc = tl.load(loc_ptr + pid_loc).to(tl.int64)</span><span class="bub key">槽位号=虚拟 id（读 loc_ptr）</span></div>
-<div class="cl"><span class="ln">40</span><span class="cc">    is_valid = (loc != reserved_skip_index) &amp; (loc % DCP_WORLD_SIZE == DCP_RANK)</span><span class="bub key">归属过滤：本卡的槽且非预留槽 reserved_skip_index</span></div>
-<div class="cl"><span class="ln">41</span><span class="cc">    safe_loc = tl.where(is_valid, loc, 0)</span><span class="bub">无效先归 0</span></div>
-<div class="cl"><span class="ln">42</span><span class="cc">    safe_loc = safe_loc // DCP_WORLD_SIZE</span><span class="bub key">虚拟 id // DCP_WORLD_SIZE = 本卡行</span></div>
-<div class="cl"><span class="ln">43</span><span class="cc">    dst_ptr = kv_buffer_ptr + safe_loc * buffer_stride + offs</span><span class="bub">目标地址=基址 kv_buffer_ptr+行号×行宽 buffer_stride</span></div>
+<details class="ann"><summary><span class="ln">39</span><span class="cc">    loc = tl.load(loc_ptr + pid_loc).to(tl.int64)</span><span class="bub key">ⓘ 槽位号=虚拟 id</span></summary><div class="exp">loc = 这个 token 要写进 KV cache 的「槽位号」。loc_ptr 是个数组，第 pid_loc 个元素就是第 pid_loc 个 token 的目标槽位号；tl.load 把它从显存读出来。关键：在 DCP（多卡分摊 KV）下，这个槽位号是「全局虚拟编号」（0 ~ size×dcp），不是本卡 buffer 的行号——所以下面必须做归属过滤 + 整除换算。这也是整个 bug 的根源位置。</div></details>
+<details class="ann"><summary><span class="ln">40</span><span class="cc">    is_valid = (loc != reserved_skip_index) &amp; (loc % DCP_WORLD_SIZE == DCP_RANK)</span><span class="bub key">ⓘ 归属过滤</span></summary><div class="exp">is_valid = 这个 token 的写入是否有效，两个条件同时满足才写：① loc % dcp == rank（归属过滤）：DCP 把 KV 轮转分到 dcp 张卡（dcp=4 时卡 0 存 0,4,8…、卡 1 存 1,5,9…），每个 token 只该被它的 owner 卡存一份——不滤的话每张卡会把所有 token 都写一遍，本地 buffer 装不下、数据也重复。loc % dcp 就是「这个槽归哪张卡」。② loc != reserved_skip_index（非预留槽）：slot 0 是预留槽，CUDA graph 把 padding 的 dummy token 的 loc 设成 0，这些占位写没真实数据，跳过以免污染真实 KV。&amp; 是「按位与」，两个都 True 结果才 True。</div></details>
+<details class="ann"><summary><span class="ln">41</span><span class="cc">    safe_loc = tl.where(is_valid, loc, 0)</span><span class="bub">ⓘ 无效归 0</span></summary><div class="exp">safe_loc = tl.where(is_valid, loc, 0)：把无效 token 的行号先归到 0。为什么不能直接跳过：GPU 是 SIMT，同一个 warp（32 线程一组）里的线程必须一起执行同一条指令，不能让某些线程 return 跳过。所以无效 token 也得继续算地址，最后再「不写」。归零 = 给它一个池内安全地址（第 0 行），防止 loc 里是垃圾值/负数时算出越界指针；真正「不写」靠最后 store 的 mask=is_valid 完成。</div></details>
+<details class="ann"><summary><span class="ln">42</span><span class="cc">    safe_loc = safe_loc // DCP_WORLD_SIZE</span><span class="bub key">ⓘ 虚拟id→本卡行</span></summary><div class="exp">safe_loc = loc // dcp：把「全局虚拟编号」换算成「本卡物理行号」。为什么整除：全局编号 0 ~ size×dcp，但本卡 buffer 只有 size 行；轮转下卡 r 的第 k 个 token 全局号 = k×dcp + r，所以本卡行号 = loc // dcp。例：dcp=4、卡 1，全局编号 13 → 13%4=1（归卡 1）→ 13//4=3（卡 1 第 3 行）。</div></details>
+<details class="ann"><summary><span class="ln">43</span><span class="cc">    dst_ptr = kv_buffer_ptr + safe_loc * buffer_stride + offs</span><span class="bub">ⓘ 目标地址</span></summary><div class="exp">dst_ptr = 最终要写入的内存地址。指针 = 内存地址（像门牌号）。kv_buffer_ptr 是 KV cache 这块内存的起始地址；safe_loc（行号）× buffer_stride（一行 656 元素）偏移到目标行；再 + offs 偏移到行内元素。三者相加 =「第 safe_loc 行、第 offs 个元素」的地址。</div></details>
 <div class="cl"><span class="ln">44</span><span class="cc"></span></div>
 <div class="cl"><span class="ln">45</span><span class="cc">    # Three-way branch to handle boundary correctly while preserving fast path</span></div>
 <div class="cl"><span class="ln">46</span><span class="cc">    if base + BLOCK &lt;= nope_dim:</span></div>
 <div class="cl"><span class="ln">47</span><span class="cc">        # Fast path: entire block is in nope region</span></div>
-<div class="cl"><span class="ln">48</span><span class="cc">        src = tl.load(</span><span class="bub">要写的数据（读 cache_k_nope_ptr）</span></div>
+<details class="ann"><summary><span class="ln">48</span><span class="cc">        src = tl.load(</span><span class="bub">ⓘ 要写的数据(nope)</span></summary><div class="exp">src = 要写进 cache 的数据。这是「三路分支」快路径之一：当整个块都落在 nope 区（base+BLOCK ≤ nope_dim）时，直接从 nope 源 cache_k_nope_ptr 按偏移读出。另两种情况（整块在 rope 区 / 块跨边界）在下面两个分支处理。</div></details>
 <div class="cl"><span class="ln">49</span><span class="cc">            cache_k_nope_ptr + pid_loc * nope_stride + offs,</span></div>
 <div class="cl"><span class="ln">50</span><span class="cc">            mask=mask,</span></div>
 <div class="cl"><span class="ln">51</span><span class="cc">        )</span></div>
 <div class="cl"><span class="ln">52</span><span class="cc">    elif base &gt;= nope_dim:</span></div>
 <div class="cl"><span class="ln">53</span><span class="cc">        # Fast path: entire block is in rope region</span></div>
-<div class="cl"><span class="ln">54</span><span class="cc">        offs_rope = offs - nope_dim</span><span class="bub">rope 段内相对偏移</span></div>
+<details class="ann"><summary><span class="ln">54</span><span class="cc">        offs_rope = offs - nope_dim</span><span class="bub">ⓘ rope段内偏移</span></summary><div class="exp">offs_rope = rope 段内的相对偏移。整块都在 rope 区时，offs 是整行偏移，但 rope 源是独立张量（从 0 开始），减掉 nope_dim 得到 rope 段内偏移。</div></details>
 <div class="cl"><span class="ln">55</span><span class="cc">        src = tl.load(</span></div>
 <div class="cl"><span class="ln">56</span><span class="cc">            cache_k_rope_ptr + pid_loc * rope_stride + offs_rope,</span></div>
 <div class="cl"><span class="ln">57</span><span class="cc">            mask=mask,</span></div>
@@ -515,15 +523,15 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 <div class="cl"><span class="ln">59</span><span class="cc">    else:</span></div>
 <div class="cl"><span class="ln">60</span><span class="cc">        # Boundary case: block spans nope/rope boundary (e.g., FP8 with nope_dim=528)</span></div>
 <div class="cl"><span class="ln">61</span><span class="cc">        # Handle each offset individually to avoid negative indexing</span></div>
-<div class="cl"><span class="ln">62</span><span class="cc">        is_nope = offs &lt; nope_dim</span><span class="bub">这段属于 nope（nope_dim 内）</span></div>
-<div class="cl"><span class="ln">63</span><span class="cc">        is_rope = (offs &gt;= nope_dim) &amp; (offs &lt; (nope_dim + rope_dim))</span><span class="bub">这段属于 rope</span></div>
+<details class="ann"><summary><span class="ln">62</span><span class="cc">        is_nope = offs &lt; nope_dim</span><span class="bub">ⓘ nope段标记</span></summary><div class="exp">is_nope = 这个位置属于 nope 段（offs &lt; nope_dim）。当块横跨 nope/rope 边界时，前半段读 nope 源、后半段读 rope 源，用这个标记区分。</div></details>
+<details class="ann"><summary><span class="ln">63</span><span class="cc">        is_rope = (offs &gt;= nope_dim) &amp; (offs &lt; (nope_dim + rope_dim))</span><span class="bub">ⓘ rope段标记</span></summary><div class="exp">is_rope = 这个位置属于 rope 段（其余部分）。和 is_nope 一起在边界块里分段。</div></details>
 <div class="cl"><span class="ln">64</span><span class="cc"></span></div>
-<div class="cl"><span class="ln">65</span><span class="cc">        src_nope = tl.load(</span><span class="bub">nope 源片段（nope_stride 步长）</span></div>
+<details class="ann"><summary><span class="ln">65</span><span class="cc">        src_nope = tl.load(</span><span class="bub">ⓘ nope源片段</span></summary><div class="exp">src_nope = 从 nope 源按 nope_stride 步长读出的片段（只边界块的 nope 部分，mask &amp; is_nope 保证只读 nope）。</div></details>
 <div class="cl"><span class="ln">66</span><span class="cc">            cache_k_nope_ptr + pid_loc * nope_stride + offs,</span></div>
 <div class="cl"><span class="ln">67</span><span class="cc">            mask=mask &amp; is_nope,</span></div>
 <div class="cl"><span class="ln">68</span><span class="cc">            other=0,</span></div>
 <div class="cl"><span class="ln">69</span><span class="cc">        )</span></div>
-<div class="cl"><span class="ln">70</span><span class="cc">        src_rope = tl.load(</span><span class="bub">rope 源片段（读 cache_k_rope_ptr）</span></div>
+<details class="ann"><summary><span class="ln">70</span><span class="cc">        src_rope = tl.load(</span><span class="bub">ⓘ rope源片段</span></summary><div class="exp">src_rope = 从 rope 源 cache_k_rope_ptr 按 rope_stride 读出的片段（边界块的 rope 部分）。</div></details>
 <div class="cl"><span class="ln">71</span><span class="cc">            cache_k_rope_ptr + pid_loc * rope_stride + (offs - nope_dim),</span></div>
 <div class="cl"><span class="ln">72</span><span class="cc">            mask=mask &amp; is_rope,</span></div>
 <div class="cl"><span class="ln">73</span><span class="cc">            other=0,</span></div>
@@ -531,14 +539,9 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 <div class="cl"><span class="ln">75</span><span class="cc"></span></div>
 <div class="cl"><span class="ln">76</span><span class="cc">        src = tl.where(is_nope, src_nope, src_rope)</span></div>
 <div class="cl"><span class="ln">77</span><span class="cc"></span></div>
-<div class="cl"><span class="ln">78</span><span class="cc">    tl.store(dst_ptr, src, mask=mask &amp; is_valid)</span><span class="bub key">写入，mask 掉非本卡的</span></div>
+<details class="ann"><summary><span class="ln">78</span><span class="cc">    tl.store(dst_ptr, src, mask=mask &amp; is_valid)</span><span class="bub key">ⓘ 写入(mask)</span></summary><div class="exp">tl.store = 把 src 写进 dst_ptr 指向的地址。mask = mask &amp; is_valid 是关键：行内偏移有效 且 这个 token 是本卡的、非预留，同时满足才真正写。所以前面给无效 token 算了地址（归 0），这里用 mask 挡掉、不真正写。</div></details>
   </div>
-  <div class="grid3">
-    <div class="mini"><b>① 为什么滤「本卡 + 非预留」</b>DCP 把 KV 轮转分到 dcp 张卡，每个 token 只该被它的 owner 卡存一份；slot 0 是 padding 预留槽，写它没意义</div>
-    <div class="mini"><b>② 为什么归零</b>GPU 是 SIMT，无效 token 不能 return 跳过；归零给它一个池内安全地址（第 0 行），「不写」靠 store 的 mask=is_valid 完成</div>
-    <div class="mini"><b>③ 为什么整除</b>loc 是全局编号（0~size×dcp），本卡只有 size 行；轮转下卡 r 的第 k 个 token 全局号 = k×dcp+r，本卡行 = loc // dcp</div>
-  </div>
-  <div class="footnote">黄色气泡 = DCP 关键行；入参（kv_buffer_ptr / loc_ptr / DCP_RANK / DCP_WORLD_SIZE…）在它们被真正读取的那一行解释。DCP 参数由 dispatch 传入真实配置（mla_buffer.py:173-174）。代码里没有 lock——写回是并行 scatter，靠「归属过滤」保证一个槽只被一张卡写一次。</div>
+  <div class="footnote">DCP 参数由 dispatch 传入真实配置（mla_buffer.py:173-174）。代码里没有 lock（锁）——写回是并行 scatter，靠「归属过滤」保证一个槽只被一张卡写一次。</div>
 </div>
 </section>
 
@@ -553,8 +556,9 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <span class="step cur">④ 根因</span><span class="sep">→</span>
     <span class="step">⑤ 定位</span>
   </div>
-  <div class="kicker" style="margin-top:2px;">错误 fused kernel · 变量在运行代码里的首次使用处注解</div>
+  <div class="kicker" style="margin-top:2px;">错误 fused kernel · 每行可折叠详细解释</div>
   <h2>_fused_dsa_quant_store_kernel（fused_dsa_quant_store.py:31-72）</h2>
+  <p style="font-size:13.5px; color:var(--text-dim); margin:4px 0 8px;">点每一行的 ⓘ 气泡展开详细解释（含基础概念）。红色 = bug 所在。</p>
   <div class="canno">
 <div class="cl"><span class="ln">31</span><span class="cc">def _fused_dsa_quant_store_kernel(</span></div>
 <div class="cl"><span class="ln">32</span><span class="cc">    k_nope_ptr,</span></div>
@@ -574,32 +578,32 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 <div class="cl"><span class="ln">46</span><span class="cc">    NUM_NOPE_BLOCKS: tl.constexpr,</span></div>
 <div class="cl"><span class="ln">47</span><span class="cc">    FP8_MAX: tl.constexpr,</span></div>
 <div class="cl"><span class="ln">48</span><span class="cc">):</span></div>
-<div class="cl"><span class="ln">49</span><span class="cc">    token_id = tl.program_id(0)</span><span class="bub">管第几个 token</span></div>
-<div class="cl"><span class="ln">50</span><span class="cc">    block_id = tl.program_id(1)</span><span class="bub">0~3 nope块 / 4 rope块</span></div>
-<div class="cl"><span class="ln">51</span><span class="cc">    cache_loc = tl.load(loc_ptr + token_id).to(tl.int64)</span><span class="bub bad">槽位号=虚拟 id，直接当行号（读 loc_ptr）</span></div>
+<details class="ann"><summary><span class="ln">49</span><span class="cc">    token_id = tl.program_id(0)</span><span class="bub">ⓘ 线程→第几个 token</span></summary><div class="exp">token_id = 这个线程负责第几个 token（同旧 kernel 的 pid_loc，只是换了个名字）。</div></details>
+<details class="ann"><summary><span class="ln">50</span><span class="cc">    block_id = tl.program_id(1)</span><span class="bub">ⓘ 第几个块</span></summary><div class="exp">block_id = 这个线程负责第几个块。这里一个 token 分 5 块：0~3 是 4 个 nope 量化块（每 128 维一块），4 是 rope 拷贝块。</div></details>
+<details class="ann"><summary><span class="ln">51</span><span class="cc">    cache_loc = tl.load(loc_ptr + token_id).to(tl.int64)</span><span class="bub bad">ⓘ 槽位号直接当行号</span></summary><div class="exp">cache_loc = 这个 token 的槽位号（从 loc_ptr 读出）= 全局虚拟 id。⚠ bug 在这里：它被直接拿去当「行号」（下面 store 都用 cache_loc 乘行宽），而旧 kernel 这里会先做归属过滤（loc % dcp == rank）和整除换算（loc // dcp）。少了这两步，虚拟 id 被当物理行号，v ≥ size 时越界。</div></details>
 <div class="cl"><span class="ln">52</span><span class="cc"></span></div>
 <div class="cl"><span class="ln">53</span><span class="cc">    if block_id &lt; NUM_NOPE_BLOCKS:</span></div>
 <div class="cl"><span class="ln">54</span><span class="cc">        # Quantize this nope block with its own per-block scale.</span></div>
 <div class="cl"><span class="ln">55</span><span class="cc">        # DIM_NOPE % GROUP_SIZE == 0, so no mask is needed here.</span></div>
-<div class="cl"><span class="ln">56</span><span class="cc">        offs = block_id * GROUP_SIZE + tl.arange(0, GROUP_SIZE)</span><span class="bub">块内偏移（GROUP_SIZE=128）</span></div>
-<div class="cl"><span class="ln">57</span><span class="cc">        y = tl.load(k_nope_ptr + token_id * k_nope_stride_0 + offs).to(tl.float32)</span><span class="bub">nope 值转 fp32（读 k_nope_ptr）</span></div>
-<div class="cl"><span class="ln">58</span><span class="cc">        y_s = tl.max(tl.abs(y)) / FP8_MAX</span><span class="bub">量化 scale = max|y| / FP8_MAX(448)</span></div>
-<div class="cl"><span class="ln">59</span><span class="cc">        y_q = tl.clamp(y / y_s, -FP8_MAX, FP8_MAX).to(nope_buf_ptr.dtype.element_ty)</span><span class="bub">量化后 fp8 值</span></div>
-<div class="cl"><span class="ln">60</span><span class="cc">        tl.store(nope_buf_ptr + cache_loc * nope_buf_stride_0 + offs, y_q)</span><span class="bub">nope 区（fp8，偏移0）</span></div>
-<div class="cl"><span class="ln">61</span><span class="cc">        tl.store(scale_buf_ptr + cache_loc * scale_buf_stride_0 + block_id, y_s)</span><span class="bub">scale 区（fp32，偏移512）</span></div>
+<details class="ann"><summary><span class="ln">56</span><span class="cc">        offs = block_id * GROUP_SIZE + tl.arange(0, GROUP_SIZE)</span><span class="bub">ⓘ 块内偏移</span></summary><div class="exp">offs = 块内元素偏移。GROUP_SIZE=128 是量化块大小，第 block_id 块覆盖 [block_id×128, (block_id+1)×128)。</div></details>
+<details class="ann"><summary><span class="ln">57</span><span class="cc">        y = tl.load(k_nope_ptr + token_id * k_nope_stride_0 + offs).to(tl.float32)</span><span class="bub">ⓘ nope转fp32</span></summary><div class="exp">y = 从 nope 源（k_nope_ptr，bf16）读出的这个 token 的 nope 值，转成 fp32。fp32（32 位浮点）精度比 bf16 高，转它是因为下面要算 scale（max|y|），高精度算更稳。</div></details>
+<details class="ann"><summary><span class="ln">58</span><span class="cc">        y_s = tl.max(tl.abs(y)) / FP8_MAX</span><span class="bub">ⓘ 量化scale</span></summary><div class="exp">y_s = 这个 128 维块的量化 scale。量化 = 把 bf16/fp32 值压成 fp8（8 位浮点，省一半内存）：取块内绝对值最大的值 max|y|，除以 fp8 最大可表示值 448（FP8_MAX；fp8 e4m3fn 是对称格式，max = -min = 448），得到 scale。存的时候每个值除以 scale 就能塞进 fp8 范围。</div></details>
+<details class="ann"><summary><span class="ln">59</span><span class="cc">        y_q = tl.clamp(y / y_s, -FP8_MAX, FP8_MAX).to(nope_buf_ptr.dtype.element_ty)</span><span class="bub">ⓘ 量化后fp8</span></summary><div class="exp">y_q = 量化后的 fp8 值 = 每个值除以 scale，再 clamp 到 ±448 范围，转成 fp8 类型。</div></details>
+<details class="ann"><summary><span class="ln">60</span><span class="cc">        tl.store(nope_buf_ptr + cache_loc * nope_buf_stride_0 + offs, y_q)</span><span class="bub">ⓘ 写nope区</span></summary><div class="exp">把量化后的 y_q 写进 KV cache 的 nope 区（fp8，行内偏移 0~512）。注意：行号用的是 cache_loc（= 虚拟 id，没换算），这是 bug——v≥size 时写穿 buffer。</div></details>
+<details class="ann"><summary><span class="ln">61</span><span class="cc">        tl.store(scale_buf_ptr + cache_loc * scale_buf_stride_0 + block_id, y_s)</span><span class="bub">ⓘ 写scale区</span></summary><div class="exp">把 scale 写进 scale 区（fp32，行内偏移 512~528）。每 128 维一个 scale，这个块的 scale 存在第 block_id 个位置。</div></details>
 <div class="cl"><span class="ln">62</span><span class="cc">    else:</span></div>
 <div class="cl"><span class="ln">63</span><span class="cc">        # Copy the rope part as bf16 (no quantization, position-sensitive).</span></div>
-<div class="cl"><span class="ln">64</span><span class="cc">        rope_block = block_id - NUM_NOPE_BLOCKS</span><span class="bub">rope 块编号（NUM_NOPE_BLOCKS=4）</span></div>
+<details class="ann"><summary><span class="ln">64</span><span class="cc">        rope_block = block_id - NUM_NOPE_BLOCKS</span><span class="bub">ⓘ rope块编号</span></summary><div class="exp">rope_block = rope 块的编号。block_id = 4（= NUM_NOPE_BLOCKS）时进这个分支，rope_block = 0，即处理第 0 个 rope 块。</div></details>
 <div class="cl"><span class="ln">65</span><span class="cc">        offs = rope_block * GROUP_SIZE + tl.arange(0, GROUP_SIZE)</span></div>
-<div class="cl"><span class="ln">66</span><span class="cc">        mask = offs &lt; DIM_ROPE</span><span class="bub">rope 有效偏移（&lt; DIM_ROPE=64）</span></div>
-<div class="cl"><span class="ln">67</span><span class="cc">        data = tl.load(</span><span class="bub">rope bf16 原样（读 k_rope_ptr）</span></div>
+<details class="ann"><summary><span class="ln">66</span><span class="cc">        mask = offs &lt; DIM_ROPE</span><span class="bub">ⓘ rope有效偏移</span></summary><div class="exp">mask = rope 有效偏移。rope 是 64 维，但块大小 128，所以 [64,128) 这段无效，mask 标出来防止越界读写。</div></details>
+<details class="ann"><summary><span class="ln">67</span><span class="cc">        data = tl.load(</span><span class="bub">ⓘ rope原样拷贝</span></summary><div class="exp">data = 从 rope 源（k_rope_ptr）读出的 rope 数据。rope 是位置编码，对位置敏感、量化会损失精度，所以保持 bf16 原样拷贝、不量化。</div></details>
 <div class="cl"><span class="ln">68</span><span class="cc">            k_rope_ptr + token_id * k_rope_stride_0 + offs, mask=mask, other=0.0</span></div>
 <div class="cl"><span class="ln">69</span><span class="cc">        )</span></div>
 <div class="cl"><span class="ln">70</span><span class="cc">        tl.store(</span></div>
-<div class="cl"><span class="ln">71</span><span class="cc">            rope_buf_ptr + cache_loc * rope_buf_stride_0 + offs, data, mask=mask</span><span class="bub">rope 区（bf16，偏移528）</span></div>
+<details class="ann"><summary><span class="ln">71</span><span class="cc">            rope_buf_ptr + cache_loc * rope_buf_stride_0 + offs, data, mask=mask</span><span class="bub">ⓘ 写rope区</span></summary><div class="exp">把 rope 数据写进 rope 区（bf16，行内偏移 528~656）。同样行号用的是 cache_loc（虚拟 id），也错了。</div></details>
 <div class="cl"><span class="ln">72</span><span class="cc">        )</span></div>
   </div>
-  <div class="footnote">红色气泡 = bug 所在。对比旧 kernel：这里没有 <code>loc % DCP_WORLD_SIZE == DCP_RANK</code>（归属过滤）、没有 <code>loc // DCP_WORLD_SIZE</code>（行号换算）、没有 <code>reserved_skip_index</code> 跳过——所以 <code>cache_loc</code>（虚拟 id）被直接当行号。</div>
+  <div class="footnote">对比旧 kernel：这里没有 <code>loc % DCP_WORLD_SIZE == DCP_RANK</code>（归属过滤）、没有 <code>loc // DCP_WORLD_SIZE</code>（行号换算）、没有 <code>reserved_skip_index</code> 跳过——所以 <code>cache_loc</code>（虚拟 id）被直接当行号。</div>
 </div>
 </section>
 
