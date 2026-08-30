@@ -416,8 +416,8 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
   <div class="kicker" style="margin-top:2px;">根因对照 · 一次 KV 写入的两条路径</div>
   <h2>正确：先换算再写 · 错误：直接写虚拟 id</h2>
   <div class="grid2">
-    <div class="mini ok"><b>✓ 正确（旧两步路径）</b>量化 → 写回两步；写回 kernel（set_mla_kv_buffer_triton）里有 DCP 换算：<br><code>is_valid = loc % dcp == rank</code>（只写自己 rank）<br><code>row = loc // dcp</code>（虚拟 id → 本卡行）<br>→ row &lt; size，永不越界</div>
-    <div class="mini no"><b>✗ 错误（本 commit 的 fused kernel）</b>量化 + 写回一步；kernel（fused_dsa_quant_store）里：<br><code>cache_loc = loc</code>（虚拟 id 原样当行号）<br>无 % dcp 过滤、无 // dcp<br>→ 行号 = v，v≥size 时越界</div>
+    <div class="mini ok"><b>✓ 正确（旧两步路径 · mla_buffer.py:21-24）</b><br><code>is_valid = (loc != reserved_skip_index) &amp;<br>&nbsp;&nbsp;(loc % DCP_WORLD_SIZE == DCP_RANK)</code><br><code>safe_loc = loc // DCP_WORLD_SIZE</code><br>→ 虚拟 id 换成本卡行，row &lt; size，永不越界</div>
+    <div class="mini no"><b>✗ 错误（本 commit · fused_dsa_quant_store.py:22,31）</b><br><code>cache_loc = tl.load(loc_ptr + token_id)</code><br><code>tl.store(nope_buf_ptr + cache_loc*stride + offs, y_q)</code><br>→ 虚拟 id 原样当行号，无 % dcp、无 // dcp，v≥size 越界</div>
   </div>
   <div class="fig">
     <svg viewBox="0 0 880 190" xmlns="http://www.w3.org/2000/svg">
