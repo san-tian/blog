@@ -97,6 +97,8 @@
   .canno details.ann[open] > summary .cc { color: #111; }
   .canno .exp { margin: 3px 0 8px 2.4em; padding: 8px 14px; background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; font-size: 13.5px; color: var(--text); white-space: normal; line-height: 1.7; max-width: 760px; }
   .canno .exp b { color: #111; }
+  details.chain > summary { cursor: pointer; font-weight: 600; color: var(--accent); list-style: none; }
+  details.chain > summary::-webkit-details-marker { display: none; }
   .nav { position: fixed; bottom: 18px; right: 22px; display: flex; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 7px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.10); z-index: 20; }
   .nav button { border: 1px solid var(--border); background: var(--card-2); color: var(--text); border-radius: 999px; width: 34px; height: 34px; font-size: 16px; cursor: pointer; }
   .nav button:hover { background: var(--inline-code-bg); }
@@ -843,6 +845,34 @@ tl.store(nope_buf_ptr + cache_loc * stride + offs, y_q)                      <sp
     <div class="mini ok"><b>旧 kernel（关掉/回退后）</b>把虚拟 id 换算成本卡行号（v // dcp），且只写自己 rank 的 token → 行号永远 &lt; size，<b>永不越界</b></div>
     <div class="mini no"><b>新 kernel（开着）</b><code>cache_loc = loc</code> 原样当行号 → 行号错，v≥size 时越界写相邻内存</div>
   </div>
+  <details class="chain" style="margin:12px 0;">
+    <summary>🔍 代码链路：为什么「fp8→bf16」会走到 else 分支（点开）</summary>
+    <div style="margin-top:10px;">
+      <pre class="code"><span class="cmt"># ① --kv-cache-dtype 字符串 → torch dtype（kv_cache_dtype.py:53-61）</span>
+"fp8_e4m3"  →  torch.float8_e4m3fn     <span class="cmt"># 开 indexer share</span>
+"bf16"      →  torch.bfloat16          <span class="cmt"># 关 indexer share</span>
+
+<span class="cmt"># ② 这个 flag 由 dtype 决定（memory_pool.py:4074-4077）</span>
+self.dsa_kv_cache_store_fp8 = (
+    use_dsa
+    and dtype == torch.float8_e4m3fn     <span class="cmt">← bf16 时这里是 False</span>
+    and override_kv_cache_dim is not None
+)
+
+<span class="cmt"># ③ _write_mla_kv_buffer 按 flag 三分支（memory_pool.py:4194-4226）</span>
+if _is_hip and ... fp8:                 <span class="cmt"># HIP 专用</span>
+    set_mla_kv_buffer_triton_fp8_quant(...)
+elif self.dsa_kv_cache_store_fp8:       <span class="cmt"># fp8 布局</span>
+    fused_dsa_quant_store(...)          <span class="bad">← bug 在这</span>
+else:                                   <span class="cmt"># bf16 布局 ← 关掉后走这里</span>
+    set_mla_kv_buffer_triton(...)       <span class="cmt">← DCP 换算在这</span></pre>
+      <table class="tbl">
+        <tr><th>kv-cache-dtype</th><th>dtype</th><th>dsa_kv_cache_store_fp8</th><th>分支</th><th>kernel</th></tr>
+        <tr><td>fp8_e4m3</td><td>float8_e4m3fn</td><td>True</td><td>elif</td><td>fused_dsa_quant_store ✗</td></tr>
+        <tr><td>bf16</td><td>bfloat16</td><td><b>False</b></td><td><b>else</b></td><td>set_mla_kv_buffer_triton ✓</td></tr>
+      </table>
+    </div>
+  </details>
   <div class="footnote">澄清：indexer share（fp8 共享 KV 布局）是更早就有的 feature，本 commit 只是把它的写路径融合了。所以「关掉 indexer share」（换 bf16）和「回退 commit」（fp8 退回两步）是<b>两个不同动作</b>，但殊途同归——都绕开 fused kernel、回到带 DCP 换算的 <code>set_mla_kv_buffer_triton</code>，所以都好。</div>
 </div>
 </section>
