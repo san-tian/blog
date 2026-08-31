@@ -116,10 +116,18 @@
 
 ```text
 背景: 失败请求在 dwd 也有行——网关记了请求（request_body 正常，完整历史），上游失败（response_body 是错误 JSON 如 {"error":{"code":502,"message":"Upstream access forbidden…"}}，解析不出 choices → resp_choices NULL；实测单小时 502×13/400×1）
-现状 ❌: session 有 3 次请求，第 3 次失败（resp 空）
-        → MAX_BY(req_messages, ts) 取第 3 次的历史，但它的 resp 拼不上 → 缺口
-修复后 ✅: 行级 WHERE 排除无应答请求 → 取第 2 次请求 + 第 2 次应答
-        → 少最后一轮，但结构完整闭环；全 session 失败 → 整行消失
+
+3 次请求的 session（客户端每次重发全量历史——每行的 req_messages 都是当时点的全量快照）：
+  ts=100: req=[user₁]                          resp=assistant₁
+  ts=200: req=[user₁, a₁, user₂]               resp=assistant₂
+  ts=300: req=[user₁, a₁, user₂, a₂, user₃]    resp=NULL（上游 502）
+
+现状 ❌: MAX_BY(req_messages, ts) → ts=300 的全量历史（第 1+2 轮 + user₃——历史不缺）
+        MAX_BY(resp_choices, ts) → NULL（那行恰好是 NULL，不会回退到第 2 轮的应答）
+        → 对话以 user₃ 结尾、没有任何应答（有问无答）→ 不闭环
+修复后 ✅: 行级 WHERE 排除无应答请求 → 只剩 ts=100/200，两个 MAX_BY 都落在 ts=200
+        取到 [user₁, a₁, user₂] + a₂（同一行，天然配对）→ 2 轮完整闭环
+        user₃ 整轮丢（它没得到应答，保留就是有问无答的尾巴）；全 session 失败 → 整行消失
 ```
 
 ---

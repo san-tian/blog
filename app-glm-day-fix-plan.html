@@ -232,10 +232,18 @@
 <p>（输入为什么是空的：responses 4 条 = 续话客户端最后请求 input 空——历史在服务端；chat 2 条 = 最后请求 body 解析不出，与「最后请求失败」同构，都是 MAX_BY 取到有问题的最后一行。修好 P0-1 行级过滤后，chat 那 2 条可能被救回——回退到最后一次有效交换——或消失。）</p>
 <p><strong>最后请求失败</strong>（无应答；量待修后对账 V4）</p>
 <pre><code class="language-text">背景: 失败请求在 dwd 也有行——网关记了请求（request_body 正常，完整历史），上游失败（response_body 是错误 JSON 如 {&quot;error&quot;:{&quot;code&quot;:502,&quot;message&quot;:&quot;Upstream access forbidden…&quot;}}，解析不出 choices → resp_choices NULL；实测单小时 502×13/400×1）
-现状 ❌: session 有 3 次请求，第 3 次失败（resp 空）
-        → MAX_BY(req_messages, ts) 取第 3 次的历史，但它的 resp 拼不上 → 缺口
-修复后 ✅: 行级 WHERE 排除无应答请求 → 取第 2 次请求 + 第 2 次应答
-        → 少最后一轮，但结构完整闭环；全 session 失败 → 整行消失
+
+3 次请求的 session（客户端每次重发全量历史——每行的 req_messages 都是当时点的全量快照）：
+  ts=100: req=[user₁]                          resp=assistant₁
+  ts=200: req=[user₁, a₁, user₂]               resp=assistant₂
+  ts=300: req=[user₁, a₁, user₂, a₂, user₃]    resp=NULL（上游 502）
+
+现状 ❌: MAX_BY(req_messages, ts) → ts=300 的全量历史（第 1+2 轮 + user₃——历史不缺）
+        MAX_BY(resp_choices, ts) → NULL（那行恰好是 NULL，不会回退到第 2 轮的应答）
+        → 对话以 user₃ 结尾、没有任何应答（有问无答）→ 不闭环
+修复后 ✅: 行级 WHERE 排除无应答请求 → 只剩 ts=100/200，两个 MAX_BY 都落在 ts=200
+        取到 [user₁, a₁, user₂] + a₂（同一行，天然配对）→ 2 轮完整闭环
+        user₃ 整轮丢（它没得到应答，保留就是有问无答的尾巴）；全 session 失败 → 整行消失
 </code></pre>
 <hr />
 <h2>问题归属总表（全局 review）——三问判定，按层排序</h2>

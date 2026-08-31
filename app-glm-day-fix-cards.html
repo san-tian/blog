@@ -276,21 +276,20 @@ UDF 碎片检测：<span class="hl">input 消息数 vs session 轮数严重失�
   </div>
   <div class="mini no"><b>机制</b>失败请求在 dwd 也有行——网关记了请求（request_body 正常，完整历史），上游失败时 response_body 是<b>错误 JSON</b>（不是空），解析不出 choices → resp_choices = NULL。<b>实测</b>（pt=2026083000 单小时）：200 共 14,626 条，<b>502 × 13、400 × 1</b>——502 的响应体是 <code>{"error":{"code":502,"message":"Upstream access forbidden…","type":"upstream_error"}}</code>。</div>
   <table class="tbl">
-    <tr><th>ts</th><th>req_messages</th><th>resp_choices</th><th>说明</th></tr>
-    <tr><td>100</td><td>第 1 轮历史</td><td>第 1 轮应答</td><td>成功</td></tr>
-    <tr><td>200</td><td>第 2 轮历史</td><td>第 2 轮应答</td><td>成功</td></tr>
-    <tr><td><b>300</b></td><td><b>第 3 轮历史（最新最全）</b></td><td><b style="color:#dc2626">NULL</b></td><td>上游 502 → 响应体是错误 JSON，解析不出 choices</td></tr>
+    <tr><th>ts</th><th>req_messages（客户端每次重发全量历史）</th><th>resp_choices</th><th>说明</th></tr>
+    <tr><td>100</td><td>[user₁]</td><td>assistant₁</td><td>第 1 轮成功</td></tr>
+    <tr><td>200</td><td>[user₁, a₁, user₂]</td><td>assistant₂</td><td>第 2 轮成功</td></tr>
+    <tr><td><b>300</b></td><td><b>[user₁, a₁, user₂, a₂, user₃]</b>（最新最全）</td><td><b style="color:#dc2626">NULL</b></td><td>上游 502 → 响应体是错误 JSON，解析不出 choices</td></tr>
   </table>
   <div class="mini warn"><b>MAX_BY 的关键误区</b>：它不是「取最后一个非空的值」，是「取时间最新<b>那一行</b>的值」——那行恰好是 NULL 就拿到 NULL，<b>不会回退到上一行</b>：<code>MAX_BY(resp_choices, ts)</code> = 第 3 轮的 NULL，而不是第 2 轮的应答。</div>
-  <pre class="code"><span class="cmt">背景：session 有 3 次请求，第 3 次失败（resp 是错误 JSON → 解析出 resp_choices = NULL）</span>
-<span class="tag no">现状 ❌</span>
-MAX_BY(req_messages, ts) → 第 3 次的历史（最新，但它的 resp 拼不上）→ 缺口
-<span class="tag ok">修复后 ✅</span>
-行级 WHERE 排除无应答请求（<span class="hl">resp_choices IS NOT NULL AND != '' AND != '\N'</span>）
-→ 两个 MAX_BY 落在<b>同一个</b>最后有效请求上（历史+应答天然配对，不会错配）
-→ 少最后一轮（那轮本来就没答），但结构完整闭环；全 session 失败 → 整行消失
-<span class="cmt">为什么前两轮天然在：客户端每次重发全量历史——ts=200 那行的 req_messages 本来就装着第 1+2 轮完整对话</span>
-<span class="cmt">第 3 轮整轮丢（含它的 user message）：没得到应答，保留就是"有问无答"的尾巴（不闭环）</span></pre>
+  <pre class="code"><span class="cmt">背景：session 有 3 次请求（见上表），第 3 次失败（resp 是错误 JSON → resp_choices = NULL）</span>
+<span class="tag no">现状 ❌</span>（MAX_BY 取最新不问有效性——两个 MAX_BY 都取到 ts=300 那行）
+MAX_BY(req_messages, ts) → 全量历史（第 1+2 轮 + user₃）——历史不缺
+MAX_BY(resp_choices,  ts) → NULL（那行恰好是 NULL，不会回退到第 2 轮的应答）
+结果 → 对话以 user₃ 结尾、没有任何应答（有问无答）→ 不闭环
+<span class="tag ok">修复后 ✅</span>（行级 WHERE：<span class="hl">resp_choices IS NOT NULL AND != '' AND != '\N'</span>，只剩 ts=100/200，两个 MAX_BY 都落在 ts=200）
+取到：[user₁, a₁, user₂] + assistant₂（同一行，历史+应答天然配对，不会错配）→ 2 轮完整闭环
+user₃ 整轮丢（它没得到应答，保留就是"有问无答"的尾巴）；全 session 失败 → 整行消失</pre>
   <div class="term"><b>三问判定</b>：① 部分在 ✓（最后交换缺一半，但<b>前一次有效交换在</b>）→ 换取法（取最后有效交换）= <b>格式·修</b>；全 session 失败 → ①✗ → 格式层丢弃。副作用（正向）：COUNT(*) 变成有效轮数。</div>
   <div class="chips">
     <span class="chip ok">验收 V4：chat 源行数下降量 = 无应答 session + 续话碎片，可解释</span>
