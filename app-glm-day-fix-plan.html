@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>app_glm_day 修复方案：格式层确认表前置 + 逐问题现状/修复后示例（评审稿 v5）</title>
+<title>app_glm_day 修复方案：格式层确认表前置 + 逐问题现状/修复后示例（评审稿 v6）</title>
 <style>
   :root {
     --bg: #fafaf9;
@@ -71,15 +71,16 @@
 <body>
 <div class="container">
 <header class="hero">
-  <h1>app_glm_day 修复方案：格式层确认表前置 + 逐问题现状/修复后示例（评审稿 v5）</h1>
-  <div class="subtitle">文档最前是格式层确认表（Phase 1 签核清单：7 个问题 × 现象/根因/修法/验收）+ 每个问题的「现状（错的）vs 修复后（对的）」示例；其后归属总表（三问判定，按层排序）→ 第一部分格式修复 → 第二部分质量筛选 → 第三部分交付。statis_day=20260830 快照 69,330 条实测</div>
+  <h1>app_glm_day 修复方案：格式层确认表前置 + 逐问题现状/修复后示例（评审稿 v6）</h1>
+  <div class="subtitle">文档最前是格式层确认表（Phase 1 签核清单：7 个问题 × 现象/根因/修法/验收）+ 每个问题的「现状（错的）vs 修复后（对的）」示例；P1-3 修法改为整个删除 chat_template_kwargs（映射不好管理就不映射，契约 Optional 实测省略键过 L0-L6）。statis_day=20260830 快照 69,330 条实测</div>
   <div class="meta">
     <span>📝 本文主要由 AI agent 完成</span>
     <span>📊 MaxCompute 20260830 快照</span>
   </div>
 </header>
 <blockquote>
-<p><strong>v5 变更</strong>：<strong>格式层确认表置于文档最前</strong>（Phase 1 签核清单：7 个问题 × 现象/根因/修法/验收）+ <strong>逐问题「现状 vs 修复后」示例</strong>（现状为 0830 实测结构，修复后参照 messages 源已达成形态）；归属总表按层排序（格式 → 筛选 → 交付）。
+<p><strong>v6 变更</strong>：P1-3 修法改为<strong>整个删除 chat_template_kwargs</strong>（映射不好管理就不映射：契约 Optional、实测省略键过 L0-L6 exit 0、本地 to_glm52_sft.py 训练时强制 max——数仓不映射不丢信息，effort 策略留下游）。
+<strong>v5 变更</strong>：<strong>格式层确认表置于文档最前</strong>（Phase 1 签核清单：7 个问题 × 现象/根因/修法/验收）+ <strong>逐问题「现状 vs 修复后」示例</strong>（现状为 0830 实测结构，修复后参照 messages 源已达成形态）；归属总表按层排序（格式 → 筛选 → 交付）。
 <strong>v4 变更</strong>：<strong>归属总表前置为文档首节并自包含</strong>（最小背景 + 三问速查 + 逐条判定依据），理论上只看这张表即可完成评审，其余章节为深究材料。
 <strong>v3 变更</strong>：按执行顺序重排——第一部分格式修复（先做）→ 第二部分质量筛选（后做）→ 第三部分交付。</p>
 <p><strong>一句话结论</strong>：这张表目前是"未闭环、未对齐、未筛选"的中间产物。修复分两层：<strong>格式修复层</strong>（每条产出记录 = 结构合法的完整对话，造不出的不产出）→ <strong>质量筛选层</strong>（从合法记录里选有训练价值的，18 条款）。</p>
@@ -132,8 +133,8 @@
 <td>reasoning_effort 值域非法</td>
 <td>chat 源 100% ∉ {high,max}（COALESCE 兜底 'medium'）</td>
 <td>写死非法值，契约 <code>Literal["high","max"]</code></td>
-<td><code>CASE WHEN IN('high','max') THEN 原值 ELSE 'max'</code></td>
-<td>V2 非法值=0</td>
+<td><strong>整个删除</strong>：<code>NULL AS chat_template_kwargs</code> 不产出（契约 Optional，实测省略键过 L0-L6；映射不好管理就不映射，effort 由下游决定）</td>
+<td>V2 全部 NULL</td>
 <td>§5</td>
 </tr>
 <tr>
@@ -174,7 +175,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>格式层总验收</strong>（§8）：V1 三源闭环率 ≈100% / V2 effort 合法率 100% / V3 空数组与空记录 = 0 / V4 行数下降量可解释（无应答 session + 续话碎片）/ V5 本地 L0-L6 抽检 50 条，四类 FATAL 归零。</p>
+<p><strong>格式层总验收</strong>（§8）：V1 三源闭环率 ≈100% / V2 chat_template_kwargs 全部 NULL（不产出） / V3 空数组与空记录 = 0 / V4 行数下降量可解释（无应答 session + 续话碎片）/ V5 本地 L0-L6 抽检 50 条，FATAL 归零（chat_template_kwargs 不产出后无 effort 类）。</p>
 <h3>逐问题示例：现状（错的）vs 修复后（对的）</h3>
 <blockquote>
 <p>现状样例为 0830 快照实测结构；<strong>修复后样例的参照物 = messages 源</strong>（3,093 条，96.8% assistant 结尾——该源走 <code>macaron_anthropic_to_glm_sft</code> UDF 已正确拼装），chat/responses 两源修完应达到同等形态。每个示例只展示与该问题相关的增量。筛选层（Phase 2）「哪类记录被淘汰」的示例在 Phase 2 确认时再补。</p>
@@ -217,11 +218,11 @@
 </code></pre>
 <p><strong>P1-3 · reasoning_effort 值域非法</strong>（chat 源 100% 非法）</p>
 <pre><code class="language-json">现状 ❌: &quot;chat_template_kwargs&quot;: {&quot;reasoning_effort&quot;: &quot;medium&quot;}   ← COALESCE 兜底，L0-L6 报 literal_error
-修复后 ✅: &quot;chat_template_kwargs&quot;: {&quot;reasoning_effort&quot;: &quot;max&quot;}    ← 请求原值 high/max 保留，其余归 max
+修复后 ✅: （整个键不产出——chat_template_kwargs 置 NULL）      ← 契约 Optional，实测省略键过 L0-L6；映射不好管理就不映射
 </code></pre>
 <p><strong>P1-4a · tools 空数组</strong>（44,395 条，64%）</p>
 <pre><code class="language-json">现状 ❌: {&quot;messages&quot;: [...], &quot;tools&quot;: [], &quot;chat_template_kwargs&quot;: {...}}   ← 空数组 = L0-L6 FATAL
-修复后 ✅: {&quot;messages&quot;: [...], &quot;chat_template_kwargs&quot;: {...}}               ← 无工具 = 省略键（99.4% 本来就没带）
+修复后 ✅: {&quot;messages&quot;: [...]}                                          ← 无工具 = 省略键（99.4% 本来就没带；chat_template_kwargs 也整体不产出，见 P1-3）
 </code></pre>
 <p>（注意：修复后这条记录<strong>仍留在格式层全量表</strong>——它结构合法；「无工具纯对话」的去留是第二部分 P1-4b / 筛选层的事。格式层只修「无」的表达方式，不判断该不该留。）</p>
 <p><strong>P1-5 · 空 messages 记录</strong>（6 条）</p>
@@ -242,7 +243,7 @@
 <ul>
 <li><strong>对象</strong>：<code>app_macaron_relay_stack_glm_day</code>（GLM-5.2 SFT 训练数据表，数仓 ETL 产物）。statis_day=20260830 快照 69,330 条 = chat_completions 65,691 + messages 3,093 + responses 546（全量快照、LIFECYCLE 3 天，数字随快照增长）</li>
 <li><strong>现状一句话</strong>：未闭环（chat 源 99.97% 缺模型回复）、未对齐（训练契约 FATAL）、未筛选（全量含单轮/闲聊/无工具）</li>
-<li><strong>训练契约</strong>（L0-L6 校验器实测）：顶层四键 <code>extra="forbid"</code> / <code>reasoning_effort: Literal["high","max"]</code> / tools 空数组 FATAL（省略键 OK）/ <code>messages</code> ≥1</li>
+<li><strong>训练契约</strong>（L0-L6 校验器实测）：顶层四键 <code>extra="forbid"</code> / <code>reasoning_effort: Literal["high","max"]</code>（<strong>chat_template_kwargs 可整体省略</strong>，实测省略键过）/ tools 空数组 FATAL（省略键 OK）/ <code>messages</code> ≥1</li>
 <li><strong>修复路线</strong>：先格式修复（app_glm_day 修好 = 结构合法全量表）→ 再质量筛选（<code>_qualified</code> 新表，18 条款 glm 口径）→ 交付剥 4 键</li>
 </ul>
 <p><strong>三问速查</strong>（判据的机械版，判据全文见 §1.1；逐行按下表「判定依据」列核对）：</p>
@@ -327,9 +328,9 @@
 <td>P1-3</td>
 <td>reasoning_effort 值域非法</td>
 <td>chat 源 100% 非法（COALESCE 兜底 'medium'），契约 Literal["high","max"]</td>
-<td>①✓ 请求真实 effort 在 dwd ②✗ 写死非法值；可无损映射（high/max 保留、其余归 max）</td>
+<td>①✓ 请求真实 effort 在 dwd ②✗ 写死非法值。修法<strong>不做值映射、直接删除字段</strong>（契约 Optional，实测省略键过 L0-L6；本地 to_glm52_sft.py 训练时强制 max，数仓不映射不丢信息）</td>
 <td><strong>格式</strong></td>
-<td>CASE 保留合法值、ELSE 'max'</td>
+<td><code>NULL AS chat_template_kwargs</code>（三处全删）</td>
 <td>§5</td>
 </tr>
 <tr>
@@ -467,10 +468,10 @@
 </table>
 <p><strong>下游契约</strong>（训练侧 L0-L6 校验器，实测依据）：
 - 顶层只认 <code>messages/tools/chat_template_kwargs/meta</code> 四键，<code>extra="forbid"</code>（多一个字段直接 FATAL，实测 <code>Extra inputs are not permitted</code>）
-- <code>reasoning_effort: Literal["high","max"]</code>（实测 medium 报 <code>Input should be 'high' or 'max'</code>）
+- <code>reasoning_effort: Literal["high","max"]</code>（实测 medium 报 <code>Input should be 'high' or 'max'</code>）；<strong>chat_template_kwargs 整个键可省略</strong>（实测省略后过 L0-L6，P1-3 修法依据）
 - <code>tools</code> 为空数组直接 FATAL（<code>_reject_empty_tools</code>），省略键则 OK
 - <code>messages</code> 至少 1 条（<code>min_length=1</code>）
-- 本地转换器 <code>to_glm52_sft.py</code> 的既有约定：<strong>强制 <code>reasoning_effort="max"</code>、空 tools 省略键</strong>——格式层向它对齐</p>
+- 本地转换器 <code>to_glm52_sft.py</code> 的既有约定：<strong>强制 <code>reasoning_effort="max"</code>、空 tools 省略键</strong>——tools 语义向它对齐；effort 数仓不产出（P1-3 修法：删除字段，策略留下游）</p>
 <hr />
 <h2>1. 两层架构：先格式修复，再质量筛选</h2>
 <h3>1.1 分类判据（一句话）</h3>
@@ -576,9 +577,7 @@ END AS messages,
     THEN JSON_PARSE(final_tools)
     ELSE NULL                                              -- [修复 P1-4a] 空数组 → NULL（省略键语义）
   END AS tools,
-  JSON_OBJECT('reasoning_effort',
-    CASE WHEN reasoning_effort IN ('high', 'max') THEN reasoning_effort ELSE 'max' END
-  ) AS chat_template_kwargs,                                -- [修复 P1-3]
+  NULL AS chat_template_kwargs,                             -- [修复 P1-3] 整个删除：不产出（契约 Optional；映射不好管理，effort 由下游决定）
   JSON_OBJECT( ... 原样不变 ... ) AS meta
 FROM chat_sessions
 WHERE final_messages IS NOT NULL AND final_messages != '' AND final_messages != '\\N'
@@ -637,7 +636,8 @@ WHERE final_messages IS NOT NULL AND final_messages != '' AND final_messages != 
   -- tools / chat_template_kwargs / WHERE 同 §3 修法
   -- WHERE 加：UDF 返回非 NULL（碎片/空 input 丢弃）
 </code></pre>
-<h2>5. [格式·P1-3] reasoning_effort 值域</h2>
+<h2>5. [格式·P1-3] reasoning_effort 值域 → 整个删除字段（不做值映射）</h2>
+<p><strong>修法：三处 <code>JSON_OBJECT('reasoning_effort', …)</code> 全部改为 <code>NULL AS chat_template_kwargs</code>，不再产出该键。</strong></p>
 <table>
 <thead>
 <tr>
@@ -649,17 +649,23 @@ WHERE final_messages IS NOT NULL AND final_messages != '' AND final_messages != 
 <tbody>
 <tr>
 <td>chat/responses</td>
-<td><code>COALESCE(reasoning_effort,'medium')</code></td>
-<td><code>CASE WHEN effort IN ('high','max') THEN effort ELSE 'max' END</code></td>
+<td><code>JSON_OBJECT('reasoning_effort', COALESCE(reasoning_effort,'medium'))</code></td>
+<td><code>NULL AS chat_template_kwargs</code></td>
 </tr>
 <tr>
 <td>messages</td>
-<td><code>CASE WHEN thinking_type='adaptive' THEN 'max' ELSE 'medium' END</code></td>
-<td>同上（统一）</td>
+<td><code>JSON_OBJECT('reasoning_effort', CASE WHEN thinking_type='adaptive' THEN 'max' ELSE 'medium' END)</code></td>
+<td><code>NULL AS chat_template_kwargs</code></td>
 </tr>
 </tbody>
 </table>
-<p>与本地 <code>to_glm52_sft.py</code> 强制 max 对齐；保留合法原值（high/max），非法归 max。数据可无损映射，纯契约对齐，归格式层。</p>
+<p><strong>为什么不映射而是删除</strong>：</p>
+<ol>
+<li><strong>契约 Optional</strong>：L0-L6 校验器 <code>chat_template_kwargs: GLM52ChatTemplateKwargs | None = None</code>——省略键合法。实测：样例删掉该键后 <code>validate_glm52_sft.py</code> exit 0（1 条可训练）</li>
+<li><strong>映射不好管理</strong>：请求侧值域开放（medium/high/max/xhigh/low…），映射策略（原值保留 vs 强制 max）是训练侧策略问题，放数仓维护成本高</li>
+<li><strong>不丢信息</strong>：本地 <code>to_glm52_sft.py</code> 构建训练数据时本来就强制 <code>{"reasoning_effort": "max"}</code>——effort 策略留在下游（训练侧）决定，数仓不映射不丢任何东西</li>
+</ol>
+<p>导出联动：<code>chat_template_kwargs</code> 为 NULL 时省略键（见 §13 导出 SQL）。</p>
 <h2>6. [格式·P1-4a] tools 空数组语义（+ MAX_BY 条件化）</h2>
 <p><strong>格式侧修法</strong>：<code>ELSE JSON_ARRAY()</code> → <code>ELSE NULL</code>（messages 分支：<code>JSON_PARSE(NULLIF(macaron_tools_to_openai_format(...), '[]'))</code>）。"无工具"的合法表达是<strong>省略键</strong>，不是空数组——L0-L6 对 <code>[]</code> 直接 FATAL，对省略键 OK。</p>
 <p><strong>MAX_BY 条件化</strong>（chat/responses 分支）：<code>req_tools</code> 取"最后一次<strong>带 tools</strong> 的请求"而非最后一次请求——实测有 2 条（n_tool_use 209/18）session 中途带工具、最后一次没带 → tools 取空但 messages 里有 tool_calls（声明与调用不配对）。条件化后取最后一次带 tools 的请求，声明不丢。</p>
@@ -732,9 +738,9 @@ SELECT GET_JSON_OBJECT(JSON_FORMAT(meta),'$.source') AS src,
 FROM macaron_relay_stack.app_macaron_relay_stack_glm_day
 WHERE statis_day = '&lt;最新分区&gt;' GROUP BY 1, 2 ORDER BY n DESC;
 
--- V2 effort 合法率：eff ∉ {high,max} 应为 0
-SELECT GET_JSON_OBJECT(JSON_FORMAT(chat_template_kwargs),'$.reasoning_effort') AS eff, COUNT(*) AS n
-FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day='&lt;最新分区&gt;' GROUP BY 1;
+-- V2 chat_template_kwargs 全部为 NULL（P1-3 修法=整个删除字段，不产出）
+SELECT SUM(CASE WHEN chat_template_kwargs IS NULL THEN 1 ELSE 0 END) AS null_ct, COUNT(*) AS total
+FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day='&lt;最新分区&gt;';
 
 -- V3 空 tools 数组 / 空 messages 应为 0（NULL 的 tools 不算空数组）
 SELECT SUM(CASE WHEN JSON_FORMAT(tools)='[]' THEN 1 ELSE 0 END) AS empty_tools,
@@ -743,7 +749,7 @@ FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day='&lt;�
 
 -- V4 行数对账：chat 源下降量 = 无有效应答的 session 数 + 续话碎片数，需可解释
 </code></pre>
-<p><strong>V5 本地 L0-L6 抽检</strong>（格式层最终验收）：导出 50 条过 <code>validate_glm52_sft.py --max-seq-len 98304</code>，预期 reasoning_effort/tools 空数组/extra 字段/空 messages 四类 FATAL 归零。</p>
+<p><strong>V5 本地 L0-L6 抽检</strong>（格式层最终验收）：导出 50 条过 <code>validate_glm52_sft.py --max-seq-len 98304</code>，预期 tools 空数组/extra 字段/空 messages 等 FATAL 归零（chat_template_kwargs 已整体不产出，无 effort 类 FATAL）。</p>
 <hr />
 <h1>第二部分：质量筛选层（Phase 2，后做）</h1>
 <h2>9. 筛选层职责与产出定义</h2>
@@ -863,7 +869,7 @@ WHERE g.statis_day = '${statis_day}'
 <pre><code class="language-sql">SELECT CONCAT(
   '{&quot;messages&quot;:', JSON_FORMAT(messages),
   CASE WHEN tools IS NOT NULL THEN CONCAT(',&quot;tools&quot;:', JSON_FORMAT(tools)) ELSE '' END,  -- NULL 省键
-  ',&quot;chat_template_kwargs&quot;:', JSON_FORMAT(chat_template_kwargs),
+  CASE WHEN chat_template_kwargs IS NOT NULL THEN CONCAT(',&quot;chat_template_kwargs&quot;:', JSON_FORMAT(chat_template_kwargs)) ELSE '' END,  -- NULL 省键（P1-3 删除后恒省略）
   ',&quot;meta&quot;:', JSON_FORMAT(meta), '}'
 ) AS line
 FROM macaron_relay_stack.app_macaron_relay_stack_glm_day_qualified
@@ -889,7 +895,7 @@ WHERE statis_day = '${statis_day}'
 </tr>
 <tr>
 <td>messages 源 messages 构造</td>
-<td>96.8% 闭环，UDF 工作正常，不动（只改 effort/tools 两行）</td>
+<td>96.8% 闭环，UDF 工作正常，不动（只改 chat_template_kwargs 置 NULL / tools 两行）</td>
 </tr>
 <tr>
 <td>opus_day 的脱敏问题</td>
@@ -915,7 +921,7 @@ WHERE statis_day = '${statis_day}'
 <hr />
 <p><em>证据存档：source×last_role 矩阵、effort 分布、空数组统计、tools 空值归因（n_tool_use 交叉）、空 messages 6 条明细、stg response_body 结构采样、dwd/app ETL 源文件（etl/app/app_macaron_relay_stack_glm_day.sql、etl/dwd/dwd_macaron_relay_stack_chat_completions_total_day.sql）。基线分区 20260830，v3 生成于 2026-08-31。</em></p>
 <footer>
-  <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿 v5（格式层确认表前置 + 逐问题示例）。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>。</p>
+  <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿 v6（格式层确认表前置 + 逐问题示例；P1-3 修法改为删除字段）。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>，卡片版见 <a href="app-glm-day-fix-cards.html">app-glm-day-fix-cards.html</a>。</p>
   <p style="margin-top:8px;">san-tian 的技术 blog · <a href="index.html">返回目录</a></p>
 </footer>
 </div>

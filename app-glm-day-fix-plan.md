@@ -1,5 +1,6 @@
-# app_macaron_relay_stack_glm_day 修复方案（评审稿 v5）
+# app_macaron_relay_stack_glm_day 修复方案（评审稿 v6）
 
+> **v6 变更**：P1-3 修法改为**整个删除 chat_template_kwargs**（映射不好管理就不映射：契约 Optional、实测省略键过 L0-L6 exit 0、本地 to_glm52_sft.py 训练时强制 max——数仓不映射不丢信息，effort 策略留下游）。
 > **v5 变更**：**格式层确认表置于文档最前**（Phase 1 签核清单：7 个问题 × 现象/根因/修法/验收）+ **逐问题「现状 vs 修复后」示例**（现状为 0830 实测结构，修复后参照 messages 源已达成形态）；归属总表按层排序（格式 → 筛选 → 交付）。
 > **v4 变更**：**归属总表前置为文档首节并自包含**（最小背景 + 三问速查 + 逐条判定依据），理论上只看这张表即可完成评审，其余章节为深究材料。
 > **v3 变更**：按执行顺序重排——第一部分格式修复（先做）→ 第二部分质量筛选（后做）→ 第三部分交付。
@@ -17,13 +18,13 @@
 | P0-1 | chat 源缺 assistant 回复 | 65,691 条仅 19 条（0.03%）以 assistant 结尾 | CTE 没取 `resp_choices`，messages 只用请求侧历史 | CTE 取 resp_choices + `GET_JSON_OBJECT('$[0].message')` 拼接 | V1 闭环率 ≈100% | §3 |
 | P0-2 | responses 源缺 assistant 回复 | 546 条 0 条闭环 | `final_resp_output` 取了但 INSERT 从未用（注释写了没做） | 新 UDF `macaron_responses_to_glm_sft`（input+instructions+output → 完整 messages） | V1 同上 | §4 |
 | — | 续话客户端碎片（previous_response_id） | 4 条 messages=[]（n_turns 75/288/212/33） | 历史在服务端、请求只有增量，MAX_BY 拿不到全量 | UDF 碎片检测（input 消息数 vs session 轮数失配 → NULL 不产出） | V3 空 messages=0 | §4 规则 4 |
-| P1-3 | reasoning_effort 值域非法 | chat 源 100% ∉ {high,max}（COALESCE 兜底 'medium'） | 写死非法值，契约 `Literal["high","max"]` | `CASE WHEN IN('high','max') THEN 原值 ELSE 'max'` | V2 非法值=0 | §5 |
+| P1-3 | reasoning_effort 值域非法 | chat 源 100% ∉ {high,max}（COALESCE 兜底 'medium'） | 写死非法值，契约 `Literal["high","max"]` | **整个删除**：`NULL AS chat_template_kwargs` 不产出（契约 Optional，实测省略键过 L0-L6；映射不好管理就不映射，effort 由下游决定） | V2 全部 NULL | §5 |
 | P1-4a | tools 空数组 | 44,395 条（64%）`tools=[]`，L0-L6 直接 FATAL | `ELSE JSON_ARRAY()` 把「无工具」表达成非法形态 | `ELSE NULL`（空则省略键）+ MAX_BY 条件化（取最后一次**带** tools 的请求） | V3 `[]`=0 | §6 |
 | P1-5 | 空 messages 记录 | 6 条（4 续话 + 2 chat 畸形 body） | 最后请求的输入无效（续话：历史在服务端；chat：疑 body 截断/畸形）→ `ELSE JSON_ARRAY()` 兜底硬造空记录 | 分支 WHERE 丢弃，不产出 | V3 空 messages=0 | §7 |
 | — | 最后请求失败（无应答） | 末尾请求 resp 为空（量待修后对账 V4） | 失败请求在 dwd 也有行（网关记了请求、响应为空），`MAX_BY(…, ts)` 取最新不问有效性 | 行级 WHERE 只聚合有应答的请求；全失败 session 自然消失 | V4 行数对账可解释 | §3 修法① |
 | P1-4b | 无工具纯对话 | 空 tools 里 99.4%（43,313+708+369 条）整个 session 零工具调用（n_tool_use=0/null） | ①✓ 客户端真没带 ②✓ 修完 P1-4a 后表达对（省略键）③✗ 纯聊天无 agentic 训练价值。**不在格式层 WHERE 掉的理由**：格式层不做事价值判断，且行数对账解释不了「为什么少了 44k」 | **筛选** | 18 条款 2.x/3.x 淘汰 | §10 |
 
-**格式层总验收**（§8）：V1 三源闭环率 ≈100% / V2 effort 合法率 100% / V3 空数组与空记录 = 0 / V4 行数下降量可解释（无应答 session + 续话碎片）/ V5 本地 L0-L6 抽检 50 条，四类 FATAL 归零。
+**格式层总验收**（§8）：V1 三源闭环率 ≈100% / V2 chat_template_kwargs 全部 NULL（不产出） / V3 空数组与空记录 = 0 / V4 行数下降量可解释（无应答 session + 续话碎片）/ V5 本地 L0-L6 抽检 50 条，FATAL 归零（chat_template_kwargs 不产出后无 effort 类）。
 
 ### 逐问题示例：现状（错的）vs 修复后（对的）
 
@@ -90,14 +91,14 @@
 
 ```json
 现状 ❌: "chat_template_kwargs": {"reasoning_effort": "medium"}   ← COALESCE 兜底，L0-L6 报 literal_error
-修复后 ✅: "chat_template_kwargs": {"reasoning_effort": "max"}    ← 请求原值 high/max 保留，其余归 max
+修复后 ✅: （整个键不产出——chat_template_kwargs 置 NULL）      ← 契约 Optional，实测省略键过 L0-L6；映射不好管理就不映射
 ```
 
 **P1-4a · tools 空数组**（44,395 条，64%）
 
 ```json
 现状 ❌: {"messages": [...], "tools": [], "chat_template_kwargs": {...}}   ← 空数组 = L0-L6 FATAL
-修复后 ✅: {"messages": [...], "chat_template_kwargs": {...}}               ← 无工具 = 省略键（99.4% 本来就没带）
+修复后 ✅: {"messages": [...]}                                          ← 无工具 = 省略键（99.4% 本来就没带；chat_template_kwargs 也整体不产出，见 P1-3）
 ```
 
 （注意：修复后这条记录**仍留在格式层全量表**——它结构合法；「无工具纯对话」的去留是第二部分 P1-4b / 筛选层的事。格式层只修「无」的表达方式，不判断该不该留。）
@@ -129,7 +130,7 @@
 
 - **对象**：`app_macaron_relay_stack_glm_day`（GLM-5.2 SFT 训练数据表，数仓 ETL 产物）。statis_day=20260830 快照 69,330 条 = chat_completions 65,691 + messages 3,093 + responses 546（全量快照、LIFECYCLE 3 天，数字随快照增长）
 - **现状一句话**：未闭环（chat 源 99.97% 缺模型回复）、未对齐（训练契约 FATAL）、未筛选（全量含单轮/闲聊/无工具）
-- **训练契约**（L0-L6 校验器实测）：顶层四键 `extra="forbid"` / `reasoning_effort: Literal["high","max"]` / tools 空数组 FATAL（省略键 OK）/ `messages` ≥1
+- **训练契约**（L0-L6 校验器实测）：顶层四键 `extra="forbid"` / `reasoning_effort: Literal["high","max"]`（**chat_template_kwargs 可整体省略**，实测省略键过）/ tools 空数组 FATAL（省略键 OK）/ `messages` ≥1
 - **修复路线**：先格式修复（app_glm_day 修好 = 结构合法全量表）→ 再质量筛选（`_qualified` 新表，18 条款 glm 口径）→ 交付剥 4 键
 
 **三问速查**（判据的机械版，判据全文见 §1.1；逐行按下表「判定依据」列核对）：
@@ -148,7 +149,7 @@
 | P0-1 | chat 源缺 assistant 回复 | 65,691 条仅 19 条（0.03%）assistant 结尾 | ①✓ 应答完整存在 dwd `resp_choices`（stg 实测 `choices[0].message` 含 role/content/reasoning_content，就是 GLM 格式）②✗ CTE 没取、INSERT 没拼 → 数据在+表达错 | **格式** | CTE 取 resp_choices + SQL 拼接 | §3 |
 | P0-2 | responses 源缺 assistant 回复 | 546 条 0 条闭环 | ①✓ `final_resp_output` 在 CTE 取了但 INSERT 从未引用（注释声称拼 assistant_response，代码没做）②✗ → 数据在+表达错 | **格式** | UDF 转 output items 拼上 | §4 |
 | — | 续话客户端碎片（previous_response_id） | 4 条 messages=[] 且 n_turns 75/288/212/33；隐蔽形态是 1-2 条消息的结构合法残片 | ①✗ 对话历史在服务端（response ID 链式），请求日志只有增量，MAX_BY 单请求设计拿不到全量。注：理论上可全量缝合（对齐本地 session_to_trace.py），v1 不做（responses 源仅占 0.8%） | **格式层丢弃** | UDF 碎片检测（input 消息数 vs session 轮数失配 → NULL） | §4 规则 4 + §7 |
-| P1-3 | reasoning_effort 值域非法 | chat 源 100% 非法（COALESCE 兜底 'medium'），契约 Literal["high","max"] | ①✓ 请求真实 effort 在 dwd ②✗ 写死非法值；可无损映射（high/max 保留、其余归 max） | **格式** | CASE 保留合法值、ELSE 'max' | §5 |
+| P1-3 | reasoning_effort 值域非法 | chat 源 100% 非法（COALESCE 兜底 'medium'），契约 Literal["high","max"] | ①✓ 请求真实 effort 在 dwd ②✗ 写死非法值。修法**不做值映射、直接删除字段**（契约 Optional，实测省略键过 L0-L6；本地 to_glm52_sft.py 训练时强制 max，数仓不映射不丢信息） | **格式** | `NULL AS chat_template_kwargs`（三处全删） | §5 |
 | P1-4a | tools 表达成 `[]` | 44,395 条（64%）；L0-L6 对 `[]` FATAL、对省略键 OK | ①✓ 「无工具」是事实 ②✗ `ELSE JSON_ARRAY()` 把「无」表达成了非法形态（合法表达是省略键） | **格式** | `ELSE NULL` + MAX_BY 条件化（2 条中途带工具的边缘 case） | §6 |
 | P1-5 | 空 messages | 6 条：4 条续话（上表）+ 2 条 chat 畸形（session_id 16 位 hex 非 UUID，疑 body 截断/解析失败） | ①✗ input 空 / req_messages 非法，构造不出 | **格式层丢弃** | WHERE 不产出（不硬造） | §7 |
 | — | 未闭环尾部（session 结束在 tool_call 无结果） | P0-1 修完后的残余（最后一轮 tool_call、客户端未续）；数量待修后实测 | ①✓ ②✓ 拼完 resp 后结构完整（有 assistant）③✗ 对话没走完，作训练样本不完整 | **筛选** | 18 条款 4.x 淘汰 | §9 + §11 |
@@ -182,10 +183,10 @@
 
 **下游契约**（训练侧 L0-L6 校验器，实测依据）：
 - 顶层只认 `messages/tools/chat_template_kwargs/meta` 四键，`extra="forbid"`（多一个字段直接 FATAL，实测 `Extra inputs are not permitted`）
-- `reasoning_effort: Literal["high","max"]`（实测 medium 报 `Input should be 'high' or 'max'`）
+- `reasoning_effort: Literal["high","max"]`（实测 medium 报 `Input should be 'high' or 'max'`）；**chat_template_kwargs 整个键可省略**（实测省略后过 L0-L6，P1-3 修法依据）
 - `tools` 为空数组直接 FATAL（`_reject_empty_tools`），省略键则 OK
 - `messages` 至少 1 条（`min_length=1`）
-- 本地转换器 `to_glm52_sft.py` 的既有约定：**强制 `reasoning_effort="max"`、空 tools 省略键**——格式层向它对齐
+- 本地转换器 `to_glm52_sft.py` 的既有约定：**强制 `reasoning_effort="max"`、空 tools 省略键**——tools 语义向它对齐；effort 数仓不产出（P1-3 修法：删除字段，策略留下游）
 
 ---
 
@@ -314,9 +315,7 @@ SELECT
     THEN JSON_PARSE(final_tools)
     ELSE NULL                                              -- [修复 P1-4a] 空数组 → NULL（省略键语义）
   END AS tools,
-  JSON_OBJECT('reasoning_effort',
-    CASE WHEN reasoning_effort IN ('high', 'max') THEN reasoning_effort ELSE 'max' END
-  ) AS chat_template_kwargs,                                -- [修复 P1-3]
+  NULL AS chat_template_kwargs,                             -- [修复 P1-3] 整个删除：不产出（契约 Optional；映射不好管理，effort 由下游决定）
   JSON_OBJECT( ... 原样不变 ... ) AS meta
 FROM chat_sessions
 WHERE final_messages IS NOT NULL AND final_messages != '' AND final_messages != '\\N'
@@ -392,14 +391,22 @@ responses_sessions AS (
   -- WHERE 加：UDF 返回非 NULL（碎片/空 input 丢弃）
 ```
 
-## 5. [格式·P1-3] reasoning_effort 值域
+## 5. [格式·P1-3] reasoning_effort 值域 → 整个删除字段（不做值映射）
+
+**修法：三处 `JSON_OBJECT('reasoning_effort', …)` 全部改为 `NULL AS chat_template_kwargs`，不再产出该键。**
 
 | 位置 | 现状 | 修法 |
 |---|---|---|
-| chat/responses | `COALESCE(reasoning_effort,'medium')` | `CASE WHEN effort IN ('high','max') THEN effort ELSE 'max' END` |
-| messages | `CASE WHEN thinking_type='adaptive' THEN 'max' ELSE 'medium' END` | 同上（统一） |
+| chat/responses | `JSON_OBJECT('reasoning_effort', COALESCE(reasoning_effort,'medium'))` | `NULL AS chat_template_kwargs` |
+| messages | `JSON_OBJECT('reasoning_effort', CASE WHEN thinking_type='adaptive' THEN 'max' ELSE 'medium' END)` | `NULL AS chat_template_kwargs` |
 
-与本地 `to_glm52_sft.py` 强制 max 对齐；保留合法原值（high/max），非法归 max。数据可无损映射，纯契约对齐，归格式层。
+**为什么不映射而是删除**：
+
+1. **契约 Optional**：L0-L6 校验器 `chat_template_kwargs: GLM52ChatTemplateKwargs | None = None`——省略键合法。实测：样例删掉该键后 `validate_glm52_sft.py` exit 0（1 条可训练）
+2. **映射不好管理**：请求侧值域开放（medium/high/max/xhigh/low…），映射策略（原值保留 vs 强制 max）是训练侧策略问题，放数仓维护成本高
+3. **不丢信息**：本地 `to_glm52_sft.py` 构建训练数据时本来就强制 `{"reasoning_effort": "max"}`——effort 策略留在下游（训练侧）决定，数仓不映射不丢任何东西
+
+导出联动：`chat_template_kwargs` 为 NULL 时省略键（见 §13 导出 SQL）。
 
 ## 6. [格式·P1-4a] tools 空数组语义（+ MAX_BY 条件化）
 
@@ -437,9 +444,9 @@ SELECT GET_JSON_OBJECT(JSON_FORMAT(meta),'$.source') AS src,
 FROM macaron_relay_stack.app_macaron_relay_stack_glm_day
 WHERE statis_day = '<最新分区>' GROUP BY 1, 2 ORDER BY n DESC;
 
--- V2 effort 合法率：eff ∉ {high,max} 应为 0
-SELECT GET_JSON_OBJECT(JSON_FORMAT(chat_template_kwargs),'$.reasoning_effort') AS eff, COUNT(*) AS n
-FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day='<最新分区>' GROUP BY 1;
+-- V2 chat_template_kwargs 全部为 NULL（P1-3 修法=整个删除字段，不产出）
+SELECT SUM(CASE WHEN chat_template_kwargs IS NULL THEN 1 ELSE 0 END) AS null_ct, COUNT(*) AS total
+FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day='<最新分区>';
 
 -- V3 空 tools 数组 / 空 messages 应为 0（NULL 的 tools 不算空数组）
 SELECT SUM(CASE WHEN JSON_FORMAT(tools)='[]' THEN 1 ELSE 0 END) AS empty_tools,
@@ -449,7 +456,7 @@ FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day='<最�
 -- V4 行数对账：chat 源下降量 = 无有效应答的 session 数 + 续话碎片数，需可解释
 ```
 
-**V5 本地 L0-L6 抽检**（格式层最终验收）：导出 50 条过 `validate_glm52_sft.py --max-seq-len 98304`，预期 reasoning_effort/tools 空数组/extra 字段/空 messages 四类 FATAL 归零。
+**V5 本地 L0-L6 抽检**（格式层最终验收）：导出 50 条过 `validate_glm52_sft.py --max-seq-len 98304`，预期 tools 空数组/extra 字段/空 messages 等 FATAL 归零（chat_template_kwargs 已整体不产出，无 effort 类 FATAL）。
 
 ---
 
@@ -529,7 +536,7 @@ WHERE g.statis_day = '${statis_day}'
 SELECT CONCAT(
   '{"messages":', JSON_FORMAT(messages),
   CASE WHEN tools IS NOT NULL THEN CONCAT(',"tools":', JSON_FORMAT(tools)) ELSE '' END,  -- NULL 省键
-  ',"chat_template_kwargs":', JSON_FORMAT(chat_template_kwargs),
+  CASE WHEN chat_template_kwargs IS NOT NULL THEN CONCAT(',"chat_template_kwargs":', JSON_FORMAT(chat_template_kwargs)) ELSE '' END,  -- NULL 省键（P1-3 删除后恒省略）
   ',"meta":', JSON_FORMAT(meta), '}'
 ) AS line
 FROM macaron_relay_stack.app_macaron_relay_stack_glm_day_qualified
@@ -544,7 +551,7 @@ WHERE statis_day = '${statis_day}'
 |---|---|
 | 顶层 9 列 | 保留，交付层剥离（§13） |
 | meta 内容 | 无敏感字段，L0-L6 不校验 meta 内容，不动 |
-| messages 源 messages 构造 | 96.8% 闭环，UDF 工作正常，不动（只改 effort/tools 两行） |
+| messages 源 messages 构造 | 96.8% 闭环，UDF 工作正常，不动（只改 chat_template_kwargs 置 NULL / tools 两行） |
 | opus_day 的脱敏问题 | 另一张表，另行处理 |
 | session_n_messages 等统计口径 | meta 信息性字段，不影响训练，不动 |
 | 无工具纯对话是否留在格式层全量表 | **留**（tools 省略键的合法记录），第二部分淘汰 |

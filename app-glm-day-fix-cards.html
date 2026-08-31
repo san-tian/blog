@@ -90,7 +90,7 @@
     <li><b>P0-1</b> chat 源缺 assistant 回复（65,691 条仅 19 条闭环，0.03%）→ 第 2 页</li>
     <li><b>P0-2</b> responses 源缺 assistant 回复（546 条 0 条闭环）→ 第 3 页</li>
     <li><b>续话客户端碎片</b> previous_response_id（4 条空 messages）→ 第 4 页</li>
-    <li><b>P1-3</b> reasoning_effort 值域非法（chat 源 100%）→ 第 5 页</li>
+    <li><b>P1-3</b> reasoning_effort 值域非法（修法：整个删除 chat_template_kwargs）→ 第 5 页</li>
     <li><b>P1-4a</b> tools 空数组（44,395 条，64%）→ 第 6 页</li>
     <li><b>P1-5</b> 空 messages 记录（6 条）→ 第 7 页</li>
     <li><b>最后请求失败</b>（无应答，MAX_BY 取到失败请求）→ 第 8 页</li>
@@ -199,23 +199,23 @@ UDF 碎片检测：<span class="hl">input 消息数 vs session 轮数严重失�
 <!-- ============ 5 P1-3 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">格式层确认 · P1-3 · 归属：格式·修 · 深究主文档 §5</div>
-  <h2>reasoning_effort 值域非法<span class="dim">COALESCE 兜底 'medium'，训练契约只认 high/max</span></h2>
+  <div class="kicker">格式层确认 · P1-3 · 归属：格式·修（修法=整个删除字段）· 深究主文档 §5</div>
+  <h2>reasoning_effort 值域非法<span class="dim">映射不好管理——整个删除 chat_template_kwargs，不产出</span></h2>
   <div class="chips">
     <span class="chip no">chat 源 <b>100% 非法</b>（eff_ok = 0/65,691）</span>
-    <span class="chip">契约 Literal["high","max"]，实测 medium 报 <code>Input should be 'high' or 'max' [type=literal_error]</code></span>
+    <span class="chip ok">契约 Optional：chat_template_kwargs 可整体省略，<b>实测省略键过 L0-L6（exit 0）</b></span>
   </div>
   <pre class="code"><span class="tag no">现状 ❌</span>（ETL 写死）
 "chat_template_kwargs": {"reasoning_effort": "medium"}      <span class="cmt">← COALESCE(reasoning_effort, 'medium')，L0-L6 直接 FATAL</span>
-<span class="tag ok">修复后 ✅</span>（保留合法原值，非法归 max）
-"chat_template_kwargs": {"reasoning_effort": <span class="hl">"max"</span>}              <span class="cmt">← CASE WHEN IN('high','max') THEN 原值 ELSE 'max'</span></pre>
-  <div class="mini ok"><b>修法</b>三处统一：<code>CASE WHEN reasoning_effort IN ('high','max') THEN reasoning_effort ELSE 'max' END</code>（chat/responses 的 COALESCE + messages 源的 adaptive CASE）。与本地转换器 <code>to_glm52_sft.py</code> 强制 max 对齐。</div>
-  <div class="term"><b>三问判定</b>：① 数据在 ✓（请求真实 effort 在 dwd）② 表达 ✗（写死非法值；可无损映射）→ <b>格式·修</b>。</div>
+<span class="tag ok">修复后 ✅</span>（整个键不产出——chat_template_kwargs 置 NULL）
+<span class="hl">NULL AS chat_template_kwargs</span>                          <span class="cmt">← 三处 JSON_OBJECT('reasoning_effort', …) 全删，无值可非法</span></pre>
+  <div class="mini ok"><b>修法：不映射，直接删</b>三处 <code>JSON_OBJECT('reasoning_effort', …)</code> 全部改为 <code>NULL AS chat_template_kwargs</code>。依据：① 契约 Optional（实测省略键过 L0-L6）；② 映射策略（原值保留 vs 强制 max）不好管理，不放数仓；③ 不丢信息——本地 <code>to_glm52_sft.py</code> 构建训练数据时本来就强制 <code>{"reasoning_effort": "max"}</code>，effort 策略留在下游。</div>
+  <div class="term"><b>三问判定</b>：① 数据在 ✓（请求真实 effort 在 dwd）② 表达 ✗（写死非法值）→ <b>格式·修</b>；修法选删除字段而非值映射。</div>
   <div class="chips">
-    <span class="chip ok">验收 V2：eff ∉ {high,max} = 0</span>
-    <span class="chip">messages 源 94% 已合法（adaptive→max），chat 源全军覆没（eff_ok=0）</span>
+    <span class="chip ok">验收 V2：chat_template_kwargs 全部 NULL</span>
+    <span class="chip">实测证据：样例删掉该键 → validate_glm52_sft.py exit 0（1 条可训练）</span>
   </div>
-  <div class="footnote">0830 快照按源实测：chat 0% / messages 94% / responses 44% 合法。修法与对齐依据见主文档 §5。</div>
+  <div class="footnote">0830 快照按源实测：chat 0% / messages 94% / responses 44% 合法（修法改为删除字段后该分布不再相关）。导出联动（该键 NULL 时省略）见主文档 §13。</div>
 </div>
 </section>
 
@@ -231,7 +231,7 @@ UDF 碎片检测：<span class="hl">input 消息数 vs session 轮数严重失�
   <pre class="code"><span class="tag no">现状 ❌</span>
 {"messages": [...], "tools": [], "chat_template_kwargs": {...}}      <span class="cmt">← ELSE JSON_ARRAY() 把「无」表达成非法形态 = FATAL</span>
 <span class="tag ok">修复后 ✅</span>
-{"messages": [...], <span class="hl">"chat_template_kwargs": {...}</span>}                            <span class="cmt">← 无工具 = 省略键（99.4% 本来就没带）</span></pre>
+{"messages": [...]}                                          <span class="cmt">← 无工具 = 省略键（99.4% 本来就没带；chat_template_kwargs 也已整体不产出，见 P1-3）</span></pre>
   <div class="mini ok"><b>修法</b>① <code>ELSE NULL</code>（空则省略键）② MAX_BY 条件化：取最后一次<b>带</b> tools 的请求（实测 2 条 session 中途带工具、最后一次没带 → 声明丢失，18 条款 3.x 配对会挂）。</div>
   <div class="mini warn"><b>与 P1-4b 的边界（易混点）</b>本页修的是「无工具」的<b>表达方式</b>（[] → 省略键）；这批记录的<b>去留</b>（99.4% 纯对话无 agentic 训练价值 → 淘汰）归筛选层 P1-4b（Phase 2，18 条款 2.x/3.x）。修复后记录<b>仍留在格式层全量表</b>——它结构合法。格式层不做事价值判断。</div>
   <div class="term"><b>三问判定</b>：① 数据在 ✓（无工具是事实）② 表达 ✗（[] 不是「无」的合法表达）→ <b>格式·修</b>。chat 源 66% 是无工具流量（messages 源仅 23%，Anthropic 客户端多为 agentic）。</div>
@@ -300,13 +300,13 @@ MAX_BY(req_messages, ts) → 第 3 次的历史（最新，但它的 resp 拼不
     <tr><td>P0-1</td><td>chat 缺 assistant 回复</td><td>CTE 取 resp_choices + <code>GET_JSON_OBJECT('$[0].message')</code> 拼接 + 行级 WHERE</td><td>V1 闭环 ≈100%</td></tr>
     <tr><td>P0-2</td><td>responses 缺 assistant 回复</td><td>新 UDF <code>macaron_responses_to_glm_sft</code>（含碎片检测规则 4）</td><td>V1</td></tr>
     <tr><td>续话碎片</td><td>构造不出完整对话</td><td>UDF 失配检测 → NULL 不产出</td><td>V3 空 messages=0</td></tr>
-    <tr><td>P1-3</td><td>effort 值域非法</td><td><code>CASE WHEN IN('high','max') THEN 原值 ELSE 'max'</code></td><td>V2 非法=0</td></tr>
+    <tr><td>P1-3</td><td>effort 值域非法</td><td>整个删除：<code>NULL AS chat_template_kwargs</code>（契约 Optional，映射不管理）</td><td>V2 全部 NULL</td></tr>
     <tr><td>P1-4a</td><td>tools 空数组</td><td><code>ELSE NULL</code> + MAX_BY 条件化（取最后一次带 tools 的请求）</td><td>V3 []=0</td></tr>
     <tr><td>P1-5</td><td>空 messages</td><td>分支 WHERE 丢弃</td><td>V3</td></tr>
     <tr><td>最后失败</td><td>MAX_BY 取到失败请求</td><td>行级 WHERE 只聚合有应答的请求</td><td>V4 对账可解释</td></tr>
   </table>
   <div class="grid2">
-    <div class="mini"><b>V1–V4（SQL 验收，主文档 §8）</b>V1 三源闭环率 ≈100%（messages 源基线 96.8%）· V2 effort 合法率 100% · V3 空数组与空记录 = 0 · V4 行数下降量可解释（无应答 session + 续话碎片）</div>
+    <div class="mini"><b>V1–V4（SQL 验收，主文档 §8）</b>V1 三源闭环率 ≈100%（messages 源基线 96.8%）· V2 chat_template_kwargs 全部 NULL（P1-3 删除字段） · V3 空数组与空记录 = 0 · V4 行数下降量可解释（无应答 session + 续话碎片）</div>
     <div class="mini"><b>V5（本地 L0-L6 抽检）</b>导出 50 条过 <code>validate_glm52_sft.py --max-seq-len 98304</code>，四类 FATAL（effort/tools 空数组/extra 字段/空 messages）归零。</div>
   </div>
   <div class="term"><b>确认方式</b>：逐页过「根因 / 修法 / 现状 vs 修复后」，有异议报编号（P0-1 / P1-4a / 续话…）。确认通过 → 开工 Phase 1（一次 ETL 改动 + responses UDF）。质量筛选（Phase 2：18 条款 + _qualified 表）与交付层（导出剥 4 键）随后确认。</div>

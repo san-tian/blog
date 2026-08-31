@@ -116,7 +116,7 @@
   </a>
 
   <a class="post" href="app-glm-day-fix-plan.html">
-    <div class="title">[DRAFT] app_glm_day 修复方案：格式层确认表前置 + 逐问题现状/修复后示例（评审稿 v5）</div>
+    <div class="title">[DRAFT] app_glm_day 修复方案：格式层确认表前置 + 逐问题现状/修复后示例（评审稿 v6，P1-3 改为删除字段）</div>
     <div class="desc">数仓 <code>app_macaron_relay_stack_glm_day</code>（GLM-5.2 SFT 训练数据表）两层重构修复方案。文档最前是格式层确认表（Phase 1 签核清单：7 个问题 × 现象/根因/修法/验收）+ 每个问题的「现状（错的）vs 修复后（对的）」示例（现状为 0830 实测结构、修复后参照 messages 源已达成形态）；其后归属总表（三问判定，按层排序）与正文按执行顺序分组：第一部分格式修复（P0-1 拼 resp_choices、P0-2 responses UDF、effort 值域、tools 语义、造不出不产出）→ 第二部分质量筛选（18 条款 + 无工具/未闭环淘汰，新 _qualified 表）→ 第三部分交付（导出剥 4 键）。分类判据：数据在但表达错 = 格式修复；数据在表达对但无训练价值 = 质量筛选；数据不在构造不出 = 格式层丢弃。20260830 快照 69,330 条实测：chat 源仅 0.03% 闭环、64% tools 空数组（归因实测 99.4% 是无工具纯对话流量，归筛选层）、空 messages 6 条逐条归因。markdown 源文件见同仓 app-glm-day-fix-plan.md。</div>
     <div class="meta">
       <span class="tag agent">🤖 AI-assisted</span>
