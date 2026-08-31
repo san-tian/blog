@@ -288,7 +288,9 @@ MAX_BY(req_messages, ts) → 第 3 次的历史（最新，但它的 resp 拼不
 <span class="tag ok">修复后 ✅</span>
 行级 WHERE 排除无应答请求（<span class="hl">resp_choices IS NOT NULL AND != '' AND != '\N'</span>）
 → 两个 MAX_BY 落在<b>同一个</b>最后有效请求上（历史+应答天然配对，不会错配）
-→ 少最后一轮（那轮本来就没答），但结构完整闭环；全 session 失败 → 整行消失</pre>
+→ 少最后一轮（那轮本来就没答），但结构完整闭环；全 session 失败 → 整行消失
+<span class="cmt">为什么前两轮天然在：客户端每次重发全量历史——ts=200 那行的 req_messages 本来就装着第 1+2 轮完整对话</span>
+<span class="cmt">第 3 轮整轮丢（含它的 user message）：没得到应答，保留就是"有问无答"的尾巴（不闭环）</span></pre>
   <div class="term"><b>三问判定</b>：① 部分在 ✓（最后交换缺一半，但<b>前一次有效交换在</b>）→ 换取法（取最后有效交换）= <b>格式·修</b>；全 session 失败 → ①✗ → 格式层丢弃。副作用（正向）：COUNT(*) 变成有效轮数。</div>
   <div class="chips">
     <span class="chip ok">验收 V4：chat 源行数下降量 = 无应答 session + 续话碎片，可解释</span>

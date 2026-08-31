@@ -563,6 +563,7 @@ END AS messages,
 </code></pre>
 <blockquote>
 <p>行级过滤的语义：<code>MAX_BY(req_messages, ts)</code> 变成"最后一次<strong>成功应答</strong>的请求"。session 尾部失败请求被跳过（历史+应答仍完整闭环）；整个 session 全失败则自然消失（构造不出，格式层丢弃）。副作用（正向）：<code>COUNT(*)</code> 变成有效轮数。</p>
+<p><strong>为什么前两轮天然在、第三轮整轮丢</strong>：chat completions 协议客户端每次重发<strong>全量历史</strong>——ts=200 那行的 <code>req_messages</code> 本来就装着第 1+2 轮完整对话，所以取到它 = 前两轮全收。失败的第 3 轮（含它的 user message）整体丢弃：它没得到应答，保留就是"有问无答"的尾巴（不闭环）；数据仍在 dwd，需要时可查。</p>
 </blockquote>
 <p><strong>② INSERT 的 messages 拼回应答</strong>（同时修 P1-3/P1-4a/P1-5 的 chat 部分）：</p>
 <pre><code class="language-sql">SELECT
