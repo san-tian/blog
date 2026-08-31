@@ -605,7 +605,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 <details class="ann"><summary><span class="ln">71</span><span class="cc">            rope_buf_ptr + cache_loc * rope_buf_stride_0 + offs, data, mask=mask</span><span class="bub">ⓘ 写rope区</span></summary><div class="exp">把 rope 数据写进 rope 区（bf16，行内偏移 528~656）。同样行号用的是 cache_loc（虚拟 id），也错了。</div></details>
 <div class="cl"><span class="ln">72</span><span class="cc">        )</span></div>
   </div>
-  <div class="footnote">对比旧 kernel：这里没有 <code>loc % DCP_WORLD_SIZE == DCP_RANK</code>（归属过滤）、没有 <code>loc // DCP_WORLD_SIZE</code>（行号换算）、没有 <code>reserved_skip_index</code> 跳过——所以 <code>cache_loc</code>（虚拟 id）被直接当行号。</div>
+  <div class="footnote">对比旧 kernel：这里没有 <code>loc % DCP_WORLD_SIZE == DCP_RANK</code>（归属过滤）、没有 <code>loc // DCP_WORLD_SIZE</code>（行号换算）、没有 <code>reserved_skip_index</code> 跳过——所以 <code>cache_loc</code>（虚拟 id）被直接当行号。<br><b>归属</b>：本 kernel 文件是本 commit <code>0a60805df4</code> <b>新增</b>的（173 行全新）；同 commit 在 memory_pool.py 把 fp8 分支从两步（quantize_k_cache_separate + set_mla_kv_buffer_triton）换成它。而 <code>dsa_kv_cache_store_fp8</code> 这个 flag 与三分支骨架是更早的 commit <code>8131641bc6</code> 引入的、本来就有的。</div>
 </div>
 </section>
 
@@ -848,6 +848,7 @@ tl.store(nope_buf_ptr + cache_loc * stride + offs, y_q)                      <sp
   <details class="chain" style="margin:12px 0;">
     <summary>🔍 代码链路：为什么「fp8→bf16」会走到 else 分支（点开）</summary>
     <div style="margin-top:10px;">
+      <div class="mini" style="margin-bottom:8px;"><b>归属提醒</b>：<code>dsa_kv_cache_store_fp8</code> 这个 flag（②）和三分支骨架（③）是更早的 commit <code>8131641bc6</code> 引入的、本来就有的；本 commit <code>0a60805df4</code> 只做了两件事——<b>新增</b> fused_dsa_quant_store.py（③ 里 <code>elif</code> 分支的实现），并把该 <code>elif</code> 分支从两步换成它。所以「关掉 indexer share」走的是早就存在的 <code>else</code> 分支，不是本 commit 引入的东西。</div>
       <pre class="code"><span class="cmt"># ① --kv-cache-dtype 字符串 → torch dtype（kv_cache_dtype.py:53-61）</span>
 "fp8_e4m3"  →  torch.float8_e4m3fn     <span class="cmt"># 开 indexer share</span>
 "bf16"      →  torch.bfloat16          <span class="cmt"># 关 indexer share</span>
