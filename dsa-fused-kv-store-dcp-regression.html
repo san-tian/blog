@@ -61,7 +61,7 @@
   .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0; }
   .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 16px 0; }
   .mini { background: var(--card-2); border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px; font-size: 13.5px; line-height: 1.6; }
-  .mini b { display: block; color: #111; margin-bottom: 3px; font-size: 14px; }
+  .mini > b:first-child { display: block; color: #111; margin-bottom: 3px; font-size: 14px; }
   .mini .src { color: var(--text-dim); font-size: 12px; font-family: "JetBrains Mono",Consolas,monospace; word-break: break-all; }
   .mini.no { border-color: #fecaca; background: #fef2f2; }
   .mini.ok { border-color: #a7f3d0; background: #f0fdf4; }
@@ -210,10 +210,10 @@
 <section class="slide">
 <div class="inner">
   <div class="kicker">背景 · DCP 1/5：为什么有了 TP 还要它（本文首次详细解释）</div>
-  <h2>TP 切「权重」，DCP 切「KV cache 这份数据」——两种内存</h2>
+  <h2>TP 切「头」，DCP 切「序列」——KV cache 是数据，不是权重</h2>
   <div class="grid2">
-    <div class="mini warn"><b>误区：TP 不是已经在切了吗？</b>TP 切的是<b>模型权重</b>（固定大小，模型多大就多大）；而 <b>KV cache 是运行时数据</b>——每个历史 token 的 K、V 算一次存起来反复读（自回归），大小 = 序列 × 每 token 字节，随序列<b>线性</b>增长。两者根本不是同一种内存。</div>
-    <div class="mini ok"><b>所以 DCP 补「序列」这一维</b>TP 对 KV cache 只切<b>头</b>维（每卡 <code>头数/tp</code> 个头），但<b>整条序列每张卡都存</b>；长上下文吃爆显存的是「序列长度」这条轴，只有 DCP 能切它——把序列按轮转切到多卡，每卡只存 <code>1/dcp</code> 的 token。</div>
+    <div class="mini warn"><b>澄清：KV cache 不是权重，是数据</b>模型权重（参数矩阵）固定大小，只有 TP 切它；<b>KV cache 是运行时产生的 K/V 向量（数据）</b>，大小 = 序列 × 每 token 字节，随序列<b>线性</b>增长。它有两个维度可切：「头」和「序列」。</div>
+    <div class="mini ok"><b>TP 切「头」，DCP 切「序列」</b>TP 其实<b>也切 KV cache</b>，但只按<b>头</b>切（每卡 <code>头数/tp</code> 个头），「序列」这条轴每张卡都存完整；长上下文吃爆的是「序列」，只有 DCP 切它——每卡只存 <code>序列/dcp</code> 的 token。</div>
   </div>
   <table class="tbl">
     <tr><th>并行方式</th><th>切什么</th><th>对 KV cache 的影响</th></tr>
