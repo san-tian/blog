@@ -24,9 +24,9 @@
 | **DSA（DeepSeek Sparse Attention）** | 稀疏注意力架构：先 indexer 选路、再对 top-k 条目计算（两段式） | dsa-fused-kv-store-dcp-regression.html（P2，首次详细解释） |
 | **indexer（索引器）** | DSA 的选路模块：fp8 低精度打分器扫全部历史 KV、选出 top-k（GLM-5.2 约 2048） | dsa-fused-kv-store-dcp-regression.html（P2，首次详细解释） |
 | indexer KV share | indexer 打分与 attention 计算共用同一份 K（656B 行） | dsa-fused-kv-store-dcp-regression.html（P3） |
-| DCP（概念） | KV Cache 切分维度从头维改为序列维，消除高 TP 下 KV 重复存储 | dynamic-context-parallelism.md；本文 P5-9 |
-| DCP 上限公式 | DCP 上限 = TP 并行度 ÷ KV 头数（且需整除） | glm52-dcp-config-draft.md |
-| DCP（sglang 实现：虚拟 id 换算） | loc 为全局虚拟 slot 编号；写入前换算：归属 rank = v % dcp，物理行号 = v // dcp | dsa-fused-kv-store-dcp-regression.html（P6 详解；排查见 P13）；prefill CP 与 decode CP 对比见 why-prefill-cp-breaks-standalone-decode.md（§4.3） |
+| DCP（概念） | decode context parallelism：在完整 TP group 内建立 DCP 子组，按 token 序列轮转分配 KV；对本文 DSA/MLA 的 compressed latent KV，DCP 负责序列 owner，不能简单表述为把普通 KV-head 从 TP 切分切换过去 | dynamic-context-parallelism.md；本文 P5-9 |
+| DCP 上限公式 | 通用 DCP 配置需满足 `tp_size % dcp_size == 0`；本文当前 DSA/MLA 的 656B compressed latent KV 没有普通 KV-head 轴，因此不能用“TP ÷ KV 头数”解释本文的 dcp=2/4/8 分配 | dynamic-context-parallelism.md；本文「TP 与 DCP 的真实分工」 |
+| DCP（sglang 实现：虚拟 id 换算） | loc 为全局虚拟 slot 编号；DCP 子组内写入前换算：归属 rank = v % dcp，物理行号 = v // dcp | dsa-fused-kv-store-dcp-regression.html（P6 详解；排查见 P13）；prefill CP 与 decode CP 对比见 why-prefill-cp-breaks-standalone-decode.md（§4.3） |
 | 656B fp8 DSA KV 行布局 | [k_nope fp8(512B) \| scales(16B) \| k_rope bf16(128B)]，indexer 与 attention 共读 | glm52-tpot-decode-optimization.html（§背景） |
 | fp8 e4m3fn 量化 | 对称格式，max = -min = 448；per-128 块 fp32 scale | glm52-tpot-decode-optimization.html（§正确性细节） |
 | MTP（多 token 预测） | 每步起草多个 token 的投机解码；draft 槽位分走 KV pool | mtp-kv-cache-viz.html |
@@ -36,7 +36,7 @@
 | flashinfer 三件套 | flashinfer-python / cubin / jit-cache 必须同版本 | sglang-flashinfer-fusion-error-investigation.md |
 | **Kubernetes（K8s）** | 容器编排系统：把「哪些程序跑几份、各用多少资源」声明成 YAML，集群持续拉起维持 | rbg-rolebasedgroup-explained.html（P3 内联术语卡） |
 | **Operator / CRD** | 用自定义控制器扩展 K8s 的模式 / 往 K8s 注册新对象类型的机制 | rbg-rolebasedgroup-explained.html（P3 内联术语卡） |
-| **TP（张量并行）** | 一个模型多卡协同计算；1 leader + N worker 组成一个推理实例 | rbg-rolebasedgroup-explained.html（P4 内联术语卡；leader-worker 模式 P7） |
+| **TP（张量并行）** | 一个模型多卡协同计算；当前 decode 中完整 TP group 仍负责模型权重与 query/output head 的分片；DCP 不会把 TP group 改成 dcp 大小的 group | rbg-rolebasedgroup-explained.html（P4 内联术语卡；leader-worker 模式 P7）；本文「TP 与 DCP 的真实分工」 |
 | **headless Service** | 不分配虚拟 IP 的 Service，DNS 直达每个 pod，pod 名稳定可寻址 | rbg-rolebasedgroup-explained.html（P8 服务发现） |
 | **gang 调度** | 一组 pod 要么全部调度成功要么全不调度，避免多卡只上一半 | rbg-rolebasedgroup-explained.html（P12） |
 | **原地更新（in-place update）** | 改镜像只重启容器不重建 pod，名字/IP/节点/GPU 绑定不变 | rbg-rolebasedgroup-explained.html（P11） |

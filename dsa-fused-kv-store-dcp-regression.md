@@ -3,6 +3,8 @@
 > 📑 **逐页卡片版（建议先看）**：[dsa-fused-kv-store-dcp-regression.html](dsa-fused-kv-store-dcp-regression.html) —— 14 页漏斗式幻灯片（现象 → 变量隔离 → 虚拟 id → 契约 → 根因 → 定位），每页一张图 + 排查进度条。本文是详细证据版。
 
 > 排查对象：[`0a60805df4`](https://github.com/san-tian/sglang/commit/0a60805df4)（DSA fused quant+store，即 indexer KV share 优化）。现象：dcp=4 下服务开头输出正常，跑一段时间突然乱码；关掉该优化则 dcp=4/8 均正常；dcp=8 下开优化暂时未复现乱码。结论一句话：新融合 kernel 丢掉了旧写入路径里的 DCP 虚拟 id → 本地行号映射（owner mask + `loc // dcp`），DCP 下把虚拟 id 直接当物理行号写，先错位、后越界。**这不是 dcp 值特异的 bug，kernel 对任何 dcp>1 都不正确，dcp=8 的"正常"是水位没越过越界阈值的假象。**
+>
+> **并行维度的事实（更新）**：本文对象是 GLM-5.2 的 DSA/MLA compressed latent KV，不是普通 MHA 的「每个 KV head 一份」张量。TP=8 仍完整切模型权重以及 query/output heads；656B indexer KV 行本身没有 head 轴，DCP 在完整 TP group 内建立子组并按序列 owner 分配它。当前 `tp=8` 时，dcp=2/4/8 对应 4/2/1 个 DCP 子组；同一 latent KV token 在不同子组之间因此分别有 4/2/1 份副本。
 
 ## TL;DR
 
@@ -47,6 +49,114 @@ commit 0a60805df4 [kernel] DSA fused quant+store: ...
 ```
 
 所以排查范围天然收敛：**写入路径的语义变化**。
+
+## TP 与 DCP 的真实分工（源码核对）
+
+这里必须把「普通 MHA 的 KV head 说法」和本文的 DSA/MLA cache 分开，否则很容易得出错误的二维分配图。
+
+### 1. TP group 没有被 DCP 改小
+
+`parallel_state.py` 先建立完整 TP group；以当前 `tp=8` 为例：
+
+```text
+TP group:   [0, 1, 2, 3, 4, 5, 6, 7]
+```
+
+DeepSeek attention 的初始化使用 `attn_tp_size`：
+
+```python
+# python/sglang/srt/models/deepseek_v2.py:1600-1605
+attn_tp_size = get_parallel().attn_tp_size
+self.num_local_heads = num_heads // attn_tp_size
+```
+
+在当前没有 attention DP/CP 的 decode 配置下，`attn_tp_size=tp_size=8`。因此：
+
+- 模型权重的 TP=8 不变；
+- query/output head 仍按 attention TP=8 分片；
+- `--dcp-size` 不会把 TP 从 8 改成 2 或 4。
+
+### 2. 本文的 656B DSA/MLA KV 没有 head 轴
+
+本文修复的 cache 行是每个 token 一条 compressed latent KV：
+
+```text
+[k_nope fp8(512B) | per-128 scale(16B) | k_rope bf16(128B)] = 656B
+```
+
+`MLATokenToKVPool` 的 buffer 是 `(size + page_size, 1, kv_cache_dim)`；第二维是单个 latent KV 行，而不是 `num_kv_heads`。因此不能把这条 656B cache 画成「TP 再把 KV 头切成 8 份」。对这条 cache，序列 owner 是 DCP 规则决定的。
+
+### 3. DCP 是完整 TP group 内的子组
+
+源码 [`parallel_state.py:2251-2268`](https://github.com/MindLab-Research/sglang/blob/21b00129fe/python/sglang/srt/distributed/parallel_state.py#L2251-L2268) 保留 TP group 后，在其中按 `dcp_size` 切子组：
+
+```python
+for tp_group in group_ranks:
+    for start in range(0, len(tp_group), decode_context_parallel_size):
+        dcp_group_ranks.append(tp_group[start : start + decode_context_parallel_size])
+```
+
+所以 `tp=8` 时：
+
+```text
+dcp=2: [0,1] [2,3] [4,5] [6,7]       # 4 个 DCP 子组
+dcp=4: [0,1,2,3] [4,5,6,7]            # 2 个 DCP 子组
+dcp=8: [0,1,2,3,4,5,6,7]              # 1 个 DCP 子组
+```
+
+每个 DCP 子组内部，token 按 `v % dcp_size` 轮转到 owner rank；不同 DCP 子组各自覆盖一份序列，因此同一 656B latent KV token 的副本数是 `tp/dcp`：dcp=2/4/8 分别是 4/2/1。**这不是 TP 对 KV 头做了 `H/8` 切分，而是完整 TP group 中的多个 DCP 子组各自持有一份按序列分片的 latent KV。**
+
+## TP 与 DCP 的真实分工（源码核对）
+
+这里必须把「普通 MHA 的 KV head 说法」和本文的 DSA/MLA cache 分开。当前实现不是“DCP 把 TP 改小”，也不是简单的“TP 只切权重”。
+
+### 1. TP group 保持完整，dcp=2/4/8 不改变 attention TP=8
+
+`parallel_state.py` 先建立完整 TP group；当前 `tp=8` 时：
+
+```text
+TP group:   [0, 1, 2, 3, 4, 5, 6, 7]
+```
+
+DeepSeek attention 初始化使用 `attn_tp_size`：
+
+```python
+# python/sglang/srt/models/deepseek_v2.py:1600-1605
+attn_tp_size = get_parallel().attn_tp_size
+self.num_local_heads = num_heads // attn_tp_size
+```
+
+当前 decode 没有额外 attention DP/CP 时，`attn_tp_size=tp_size=8`。因此：模型权重以及 query/output heads 仍然按 TP=8 分片；`--dcp-size` 不会把 TP 改成 2 或 4。
+
+### 2. 本文 656B DSA/MLA KV 没有普通 KV-head 轴
+
+本文修复的 cache 行是每个 token 一条 compressed latent KV：
+
+```text
+[k_nope fp8(512B) | per-128 scale(16B) | k_rope bf16(128B)] = 656B
+```
+
+`MLATokenToKVPool` 的 buffer 形状是 `(size + page_size, 1, kv_cache_dim)`；第二维是单个 latent KV 行，而不是 `num_kv_heads`。因此不能把本文这条 656B cache 画成“TP 再把 KV 头切成 8 份”。对这条 cache，序列 owner 由 DCP 规则决定。
+
+### 3. DCP 是完整 TP group 内的子组
+
+源码 [`parallel_state.py:2251-2268`](https://github.com/MindLab-Research/sglang/blob/21b00129fe/python/sglang/srt/distributed/parallel_state.py#L2251-L2268) 在完整 TP group 内按 `dcp_size` 切子组：
+
+```python
+for tp_group in group_ranks:
+    for start in range(0, len(tp_group), decode_context_parallel_size):
+        dcp_group_ranks.append(tp_group[start : start + decode_context_parallel_size])
+```
+
+所以 `tp=8` 时：
+
+```text
+dcp=2: [0,1] [2,3] [4,5] [6,7]       # 4 个 DCP 子组，每组 2-way 序列分片
+dcp=4: [0,1,2,3] [4,5,6,7]            # 2 个 DCP 子组，每组 4-way 序列分片
+dcp=8: [0,1,2,3,4,5,6,7]              # 1 个 DCP 子组，8-way 序列分片
+```
+
+每个 DCP 子组覆盖一份完整序列，组内 token 按 `v % dcp_size` 轮转到 owner rank；不同 DCP 子组各自拥有一份相同的 latent KV 序列。因此对这条 656B latent KV，完整 TP group 中同一 token 的副本数是 `tp/dcp`：dcp=2/4/8 分别是 4/2/1。**这不是 TP 对 KV head 做 `H/8` 切分，而是完整 TP group 中的多个 DCP 子组各自持有按序列分片的 latent KV。**
 
 ## DCP 下 KV 写入的既有契约（全部有源码证据）
 
