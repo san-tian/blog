@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>app_glm_day 格式层问题卡片版：7 个问题 × 现状 vs 修复后（每问题一页）</title>
+<style>
+  :root {
+    --bg: #fafaf9; --card: #ffffff; --card-2: #f8f8f7; --border: #e7e5e4;
+    --text: #1c1917; --text-dim: #78716c; --accent: #1d4ed8;
+    --green: #059669; --red: #dc2626; --yellow: #d97706;
+    --code-bg: #f8fafc; --inline-code-bg: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.7; font-size: 16px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .progress { position: fixed; top: 0; left: 0; height: 3px; background: var(--accent); width: 0; transition: width .3s; z-index: 20; }
+  .deck { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 56px 20px 90px; }
+  .slide { display: none; width: 100%; }
+  .slide.active { display: flex; justify-content: center; animation: fadeUp .35s ease; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+  .inner {
+    width: min(980px, 100%); background: var(--card); border: 1px solid var(--border);
+    border-radius: 18px; padding: 42px 52px 34px; box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    max-height: calc(100vh - 130px); overflow-y: auto;
+  }
+  .kicker { color: var(--accent); font-size: 13px; letter-spacing: .14em; font-weight: 700; margin-bottom: 8px; }
+  .inner h2 { font-size: 26px; font-weight: 700; color: #111; margin: 0 0 14px; line-height: 1.35; }
+  .inner h2 .dim { color: var(--text-dim); font-weight: 500; font-size: .62em; }
+  .pts { margin: 10px 0; padding-left: 1.35em; font-size: 16px; }
+  .pts li { margin: 7px 0; }
+  .pts code, td code, .footnote code, .mini code, .chip code { font-family: "JetBrains Mono","Fira Code",Consolas,Menlo,monospace; background: var(--inline-code-bg); color: #2563eb; padding: 1px 6px; border-radius: 4px; font-size: .88em; }
+  pre.code {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; font-size: 13.5px; line-height: 1.7; overflow-x: auto;
+    font-family: "JetBrains Mono","Fira Code",Consolas,Menlo,monospace; margin: 14px 0; text-align: left;
+  }
+  pre.code .cmt { color: #94a3b8; }
+  pre.code .hl { background: #fef9c3; border-radius: 3px; padding: 0 3px; }
+  pre.code .tag { font-weight: 700; }
+  pre.code .tag.no { color: var(--red); }
+  pre.code .tag.ok { color: var(--green); }
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
+  .chip { background: var(--card-2); border: 1px solid var(--border); border-radius: 999px; padding: 6px 14px; font-size: 13px; }
+  .chip b { color: #111; }
+  .chip.ok { border-color: #a7f3d0; background: #f0fdf4; }
+  .chip.no { border-color: #fecaca; background: #fef2f2; }
+  .chip.warn { border-color: #fde68a; background: #fffbeb; }
+  .term { background: #eff6ff; border: 1px solid #bfdbfe; border-left: 3px solid var(--accent); border-radius: 8px; padding: 9px 14px; margin: 12px 0; font-size: 13.5px; line-height: 1.65; }
+  .term b { color: #1d4ed8; }
+  .mini { background: var(--card-2); border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px; font-size: 13.5px; line-height: 1.6; }
+  .mini b { display: block; color: #111; margin-bottom: 3px; font-size: 14px; }
+  .mini.no { border-color: #fecaca; background: #fef2f2; }
+  .mini.ok { border-color: #a7f3d0; background: #f0fdf4; }
+  .mini.warn { border-color: #fde68a; background: #fffbeb; }
+  .footnote { font-size: 13px; color: var(--text-dim); border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 20px; line-height: 1.7; }
+  table.tbl { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  table.tbl th, table.tbl td { border: 1px solid var(--border); padding: 7px 12px; text-align: left; vertical-align: top; }
+  table.tbl th { background: var(--card-2); font-weight: 600; }
+  .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 16px 0; }
+  .nav { position: fixed; bottom: 18px; right: 22px; display: flex; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 7px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.10); z-index: 20; }
+  .nav button { border: 1px solid var(--border); background: var(--card-2); color: var(--text); border-radius: 999px; width: 34px; height: 34px; font-size: 16px; cursor: pointer; }
+  .nav button:hover { background: var(--inline-code-bg); }
+  .nav a.navhome { border: 1px solid var(--border); background: var(--card-2); color: var(--text-dim); border-radius: 999px; padding: 6px 13px; font-size: 13px; }
+  .nav a.navhome:hover { background: var(--inline-code-bg); color: var(--accent); text-decoration: none; }
+  .counter { font-size: 13px; color: var(--text-dim); min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
+  .hint { position: fixed; bottom: 26px; left: 26px; font-size: 12px; color: #b8b3ad; z-index: 20; }
+  @media (max-width: 760px) {
+    .inner { padding: 26px 20px; } .grid2 { grid-template-columns: 1fr; }
+    .inner h2 { font-size: 21px; } .hint { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="progress"></div>
+<div class="deck" id="deck">
+
+<!-- ============ 1 封面 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">app_macaron_relay_stack_glm_day 修复 · 格式层确认（Phase 1）· statis_day=20260830 快照 · 评审稿 v5 配套</div>
+  <h2>格式层 7 个问题<span class="dim">每个问题一页：现象 → 根因 → 现状 vs 修复后 → 修法 → 验收</span></h2>
+  <div class="term"><b>三问速查</b>：① 构造所需的数据在？ ② ETL 当前表达对？ ③ 有训练价值？—— ①✗ → <b>格式层丢弃</b>（不产出，不硬造）· ①✓②✗ → <b>格式·修</b>（本卡片 7 页全是）· ①✓②✓③✗ → <b>筛选·滤</b>（Phase 2，如无工具纯对话）</div>
+  <ul class="pts">
+    <li><b>P0-1</b> chat 源缺 assistant 回复（65,691 条仅 19 条闭环，0.03%）→ 第 2 页</li>
+    <li><b>P0-2</b> responses 源缺 assistant 回复（546 条 0 条闭环）→ 第 3 页</li>
+    <li><b>续话客户端碎片</b> previous_response_id（4 条空 messages）→ 第 4 页</li>
+    <li><b>P1-3</b> reasoning_effort 值域非法（chat 源 100%）→ 第 5 页</li>
+    <li><b>P1-4a</b> tools 空数组（44,395 条，64%）→ 第 6 页</li>
+    <li><b>P1-5</b> 空 messages 记录（6 条）→ 第 7 页</li>
+    <li><b>最后请求失败</b>（无应答，MAX_BY 取到失败请求）→ 第 8 页</li>
+    <li><b>验收总览</b>（V1–V5 + 修法一览）→ 第 9 页</li>
+  </ul>
+  <div class="chips">
+    <span class="chip">基线：<b>20260830 快照 69,330 条</b>（chat 65,691 / messages 3,093 / responses 546）</span>
+    <span class="chip">契约：L0-L6 实测（四键 extra=forbid · Literal["high","max"] · 空 tools FATAL · messages≥1）</span>
+    <span class="chip">📄 详细版：<a href="app-glm-day-fix-plan.html">app-glm-day-fix-plan.html</a>（含筛选层/交付层）</span>
+  </div>
+  <div class="footnote">数据：MaxCompute macaron_relay_stack.app_macaron_relay_stack_glm_day，statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收用最新分区）。←/→ 翻页 · 右下角「目录」随时返回。</div>
+</div>
+</section>
+
+<!-- ============ 2 P0-1 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">格式层确认 · P0-1 · 归属：格式·修 · 深究主文档 §3</div>
+  <h2>chat 源缺 assistant 回复<span class="dim">ETL 只取了请求侧历史，模型的回答在 resp_choices 里没拼</span></h2>
+  <div class="chips">
+    <span class="chip no">chat_completions 源 <b>65,691 条仅 19 条（0.03%）</b>以 assistant 结尾</span>
+    <span class="chip">24,417 条 user 结尾 + 18,440 条 tool 结尾（有问无答）</span>
+  </div>
+  <div class="mini no"><b>根因</b>chat_sessions CTE 根本没取 <code>resp_choices</code>；messages = <code>MAX_BY(req_messages, ts)</code>（客户端重发的完整历史），模型的回答只在 <code>resp_choices</code> 里。</div>
+  <pre class="code"><span class="tag no">现状 ❌</span>（对话到工具结果就断）
+"messages": [
+  ...,
+  {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "&lt;文件内容&gt;"}
+]
+<span class="cmt">      ← 模型的回答缺失：resp_choices 在 dwd 里有，ETL 没取没拼</span></pre>
+  <pre class="code"><span class="tag ok">修复后 ✅</span>（拼接 resp_choices[0].message，结构为 stg 实测）
+"messages": [
+  ...,
+  {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "&lt;文件内容&gt;"},
+  <span class="hl">{"role": "assistant", "reasoning_content": "先扫入口函数…", "content": "第 42 行的解引用没有判空，需要加空值检查"}</span>
+]
+<span class="cmt">      ← choices[0].message 含 role/content/reasoning_content，就是 GLM 格式，直接可拼</span></pre>
+  <div class="mini ok"><b>修法（SQL-only）</b>CTE 加 <code>MAX_BY(resp_choices, ts)</code> + 行级 WHERE 过滤无应答请求；INSERT 用 <code>GET_JSON_OBJECT(final_resp_choices, '$[0].message')</code> 拼接。</div>
+  <div class="term"><b>三问判定</b>：① 数据在 ✓（dwd 的 resp_choices；stg 实测 <code>choices[0].message</code> 就是 GLM assistant 格式）② 表达 ✗（没拼）→ <b>格式·修</b>。附带修掉「最后请求失败」（行级 WHERE 取最后有效交换，第 8 页）。</div>
+  <div class="chips">
+    <span class="chip ok">验收 V1：三源闭环率 ≈100%</span>
+    <span class="chip">边界：纯 tool_calls 应答（content=null）合法；NUL 字节需在 parse UDF 清洗</span>
+  </div>
+  <div class="footnote">stg 原始 response_body 实测：<code>{"choices":[{"index":0,"message":{"role":"assistant","content":"…","reasoning_content":"…"}}]}</code> · 数量与机制见主文档 §3。</div>
+</div>
+</section>
+
+<!-- ============ 3 P0-2 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">格式层确认 · P0-2 · 归属：格式·修 · 深究主文档 §4</div>
+  <h2>responses 源缺 assistant 回复<span class="dim">resp_output 取了但 INSERT 从未用——注释写了 [assistant_response] 代码没做</span></h2>
+  <div class="chips">
+    <span class="chip no">responses 源 <b>546 条 0 条闭环</b></span>
+    <span class="chip">dwd 的 req_input 已被 parse UDF 归一成 chat 格式（实测 <code>[{"role":"system",…}]</code>），input 侧不用动</span>
+  </div>
+  <pre class="code"><span class="tag no">现状 ❌</span>（input 拼了、output 没拼）
+"messages": [
+  {"role": "system", "content": "You are a coding agent running in the Codex CLI…"},
+  {"role": "user", "content": "修复这个失败的测试"}
+]
+<span class="cmt">      ← final_resp_output 在 CTE 取了，INSERT 里从未引用</span></pre>
+  <pre class="code"><span class="tag ok">修复后 ✅</span>（resp_output 逐项转一条 assistant 拼上）
+"messages": [
+  {"role": "system", "content": "You are a coding agent running in the Codex CLI…"},
+  {"role": "user", "content": "修复这个失败的测试"},
+  <span class="hl">{"role": "assistant", "reasoning_content": "先跑一遍测试复现…", "content": "失败原因是…",</span>
+  <span class="hl"> "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "run_tests", "arguments": "{}"}}]}</span>
+]
+<span class="cmt">      ← UDF 转换：reasoning 项→reasoning_content · message/output_text→content · function_call→tool_calls</span></pre>
+  <div class="mini ok"><b>修法（新 UDF）</b><code>macaron_responses_to_glm_sft(input, instructions, resp_output)</code>——output items 是变长异构数组（reasoning/message/function_call 混排），SQL 字符串手术不可靠；参照现有 <code>macaron_anthropic_to_glm_sft</code> 模式。</div>
+  <div class="term"><b>三问判定</b>：① 数据在 ✓（final_resp_output 取了）② 表达 ✗（没用）→ <b>格式·修</b>。UDF 规则 4 同时承担续话碎片检测（下一页）。</div>
+  <div class="chips">
+    <span class="chip ok">验收 V1：闭环率 ≈100%</span>
+    <span class="chip">纯文本 input（非数组）→ UDF 包成 [{"role":"user",…}]</span>
+  </div>
+  <div class="footnote">数量与 UDF 规则见主文档 §4；messages 源（走 macaron_anthropic_to_glm_sft）3,093 条 96.8% 闭环，是修复后两源的参照物。</div>
+</div>
+</section>
+
+<!-- ============ 4 续话碎片 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">格式层确认 · 续话客户端碎片 · 归属：格式层丢弃 · 深究主文档 §4 规则 4 + §7</div>
+  <h2>续话客户端碎片（previous_response_id）<span class="dim">对话历史在服务端，请求日志只有增量——构造不出，不产出</span></h2>
+  <div class="chips">
+    <span class="chip no">4 条 <code>messages=[]</code>，n_turns 分别 <b>75 / 288 / 212 / 33</b></span>
+    <span class="chip warn">隐蔽形态：input 有 1 条 → [user, assistant] 的「结构合法残片」，更难发现</span>
+  </div>
+  <div class="mini no"><b>机制</b>previous_response_id 续话：完整对话只存在于服务端（response ID 链式），每次请求只带增量；<code>MAX_BY(req_input, ts)</code> 取到最后一次请求 = 空/增量 → 从 288 轮的会话里捞出 0~2 条消息的残片。</div>
+  <pre class="code"><span class="tag no">现状 ❌</span>（288 轮的大 session 只捞出空数组）
+{"session_id": "01a01e6d-…690a", "messages": [], "chat_template_kwargs": {"reasoning_effort": "medium"}}
+<span class="cmt">      ← MAX_BY 取到最后一次请求，它的 input 是空的（历史在服务端）</span></pre>
+  <pre class="code"><span class="tag ok">修复后 ✅</span>（构造不出完整对话 → 整行不产出，不是修数据）
+<span class="cmt">（该 session 从表中消失）</span>
+UDF 碎片检测：<span class="hl">input 消息数 vs session 轮数严重失配</span>（如 input 只有 1 条 user 但 n_turns&gt;10）→ 返回 NULL</pre>
+  <div class="term"><b>三问判定</b>：① 数据不在 ✗（不在任何单个请求里）→ <b>格式层丢弃</b>。理论上可全量缝合（对齐本地 session_to_trace.py），v1 不做——responses 源仅占 0.8%（546/69,330），不为它改 MAX_BY 单请求设计。</div>
+  <div class="chips">
+    <span class="chip ok">验收 V3：空 messages = 0</span>
+    <span class="chip">失配检测同时拦住隐蔽形态（1-2 条消息的合法残片）</span>
+  </div>
+  <div class="footnote">4 条实测明细（session 01a00759/01a01e6d/01a04036/01a04487）见主文档 §7；升级路线（全量缝合）见 §4 备注。</div>
+</div>
+</section>
+
+<!-- ============ 5 P1-3 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">格式层确认 · P1-3 · 归属：格式·修 · 深究主文档 §5</div>
+  <h2>reasoning_effort 值域非法<span class="dim">COALESCE 兜底 'medium'，训练契约只认 high/max</span></h2>
+  <div class="chips">
+    <span class="chip no">chat 源 <b>100% 非法</b>（eff_ok = 0/65,691）</span>
+    <span class="chip">契约 Literal["high","max"]，实测 medium 报 <code>Input should be 'high' or 'max' [type=literal_error]</code></span>
+  </div>
+  <pre class="code"><span class="tag no">现状 ❌</span>（ETL 写死）
+"chat_template_kwargs": {"reasoning_effort": "medium"}      <span class="cmt">← COALESCE(reasoning_effort, 'medium')，L0-L6 直接 FATAL</span>
+<span class="tag ok">修复后 ✅</span>（保留合法原值，非法归 max）
+"chat_template_kwargs": {"reasoning_effort": <span class="hl">"max"</span>}              <span class="cmt">← CASE WHEN IN('high','max') THEN 原值 ELSE 'max'</span></pre>
+  <div class="mini ok"><b>修法</b>三处统一：<code>CASE WHEN reasoning_effort IN ('high','max') THEN reasoning_effort ELSE 'max' END</code>（chat/responses 的 COALESCE + messages 源的 adaptive CASE）。与本地转换器 <code>to_glm52_sft.py</code> 强制 max 对齐。</div>
+  <div class="term"><b>三问判定</b>：① 数据在 ✓（请求真实 effort 在 dwd）② 表达 ✗（写死非法值；可无损映射）→ <b>格式·修</b>。</div>
+  <div class="chips">
+    <span class="chip ok">验收 V2：eff ∉ {high,max} = 0</span>
+    <span class="chip">messages 源 94% 已合法（adaptive→max），chat 源全军覆没（eff_ok=0）</span>
+  </div>
+  <div class="footnote">0830 快照按源实测：chat 0% / messages 94% / responses 44% 合法。修法与对齐依据见主文档 §5。</div>
+</div>
+</section>
+
+<!-- ============ 6 P1-4a ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">格式层确认 · P1-4a · 归属：格式·修（注意与 P1-4b 的边界）· 深究主文档 §6</div>
+  <h2>tools 空数组<span class="dim">「无工具」被表达成了非法形态——L0-L6 对 [] 直接 FATAL，对省略键 OK</span></h2>
+  <div class="chips">
+    <span class="chip no"><b>44,395 条（64%）</b>tools=[]</span>
+    <span class="chip">归因实测：99.4% 是整个 session 零工具调用（纯对话流量）</span>
+  </div>
+  <pre class="code"><span class="tag no">现状 ❌</span>
+{"messages": [...], "tools": [], "chat_template_kwargs": {...}}      <span class="cmt">← ELSE JSON_ARRAY() 把「无」表达成非法形态 = FATAL</span>
+<span class="tag ok">修复后 ✅</span>
+{"messages": [...], <span class="hl">"chat_template_kwargs": {...}</span>}                            <span class="cmt">← 无工具 = 省略键（99.4% 本来就没带）</span></pre>
+  <div class="mini ok"><b>修法</b>① <code>ELSE NULL</code>（空则省略键）② MAX_BY 条件化：取最后一次<b>带</b> tools 的请求（实测 2 条 session 中途带工具、最后一次没带 → 声明丢失，18 条款 3.x 配对会挂）。</div>
+  <div class="mini warn"><b>与 P1-4b 的边界（易混点）</b>本页修的是「无工具」的<b>表达方式</b>（[] → 省略键）；这批记录的<b>去留</b>（99.4% 纯对话无 agentic 训练价值 → 淘汰）归筛选层 P1-4b（Phase 2，18 条款 2.x/3.x）。修复后记录<b>仍留在格式层全量表</b>——它结构合法。格式层不做事价值判断。</div>
+  <div class="term"><b>三问判定</b>：① 数据在 ✓（无工具是事实）② 表达 ✗（[] 不是「无」的合法表达）→ <b>格式·修</b>。chat 源 66% 是无工具流量（messages 源仅 23%，Anthropic 客户端多为 agentic）。</div>
+  <div class="chips">
+    <span class="chip ok">验收 V3：tools=[] 计数 = 0（NULL 省键不算）</span>
+  </div>
+  <div class="footnote">messages 分支：<code>JSON_PARSE(NULLIF(macaron_tools_to_openai_format(...), '[]'))</code>。归因表（n_tool_use 交叉）见主文档 §10。</div>
+</div>
+</section>
+
+<!-- ============ 7 P1-5 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">格式层确认 · P1-5 · 归属：格式层丢弃 · 深究主文档 §7</div>
+  <h2>空 messages 记录<span class="dim">输入缺失时 ETL 硬造废记录，而不是不产出</span></h2>
+  <div class="chips">
+    <span class="chip no"><b>6 条</b>：responses 4（续话）+ chat 2（畸形）</span>
+    <span class="chip">chat 那 2 条 session_id 是 16 位 hex 非 UUID（另一类接入端）</span>
+  </div>
+  <div class="mini no"><b>两级因果</b>数据层：最后请求输入无效（responses 4 条 = 续话历史在服务端；chat 2 条 = 最后请求 body 解析不出，疑网关截断——dwd 有 body_truncated 字段标记这种场景）→ ETL 层：<code>ELSE JSON_ARRAY()</code> 兜底硬造空记录。chat 2 条与第 8 页「最后请求失败」同构：都是 MAX_BY 取到有问题的最后一行。</div>
+  <pre class="code"><span class="tag no">现状 ❌</span>（废记录照样产出）
+{"session_id": "01a00759-…95a3", "messages": [], "tools": [...], "chat_template_kwargs": {...}}
+<span class="cmt">      ← n_turns=75 的 session，messages 是空的</span>
+<span class="tag ok">修复后 ✅</span>
+<span class="cmt">（WHERE 过滤，整行不产出）</span>  <span class="hl">分支 WHERE：final_messages 无效/为空 → 不产出</span></pre>
+  <div class="term"><b>三问判定</b>：① 数据不在 ✗（input 空 / req_messages 非法，构造不出）→ <b>格式层丢弃</b>（不硬造）。附带效果：修好 P0-1 行级过滤后，chat 那 2 条可能被救回（回退到最后一次有效交换）或消失。</div>
+  <div class="chips">
+    <span class="chip ok">验收 V3：空 messages = 0</span>
+    <span class="chip">responses 4 条的根治在第 4 页（续话碎片检测）</span>
+  </div>
+  <div class="footnote">6 条明细（session/n_turns/归因逐条）见主文档 §7。</div>
+</div>
+</section>
+
+<!-- ============ 8 最后请求失败 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">格式层确认 · 最后请求失败 · 归属：格式（换取法）/ 全失败→丢弃 · 深究主文档 §3 修法①</div>
+  <h2>最后请求失败（无应答）<span class="dim">MAX_BY 取最新不问有效性——失败请求也在 dwd 里有行</span></h2>
+  <div class="chips">
+    <span class="chip">末尾请求 resp 为空；全失败 session 数量待修后对账（验收 V4）</span>
+  </div>
+  <div class="mini no"><b>机制</b>失败请求在 dwd 也有行——网关记了请求（request_body 正常）、上游失败（response_body 空 → resp_choices NULL）。<code>MAX_BY(x, ts)</code> 取 ts 最大那行的值，不问那行是否有效 → 取到失败那次：历史有了、应答拼不上。</div>
+  <pre class="code"><span class="cmt">背景：session 有 3 次请求，第 3 次失败（resp 空）</span>
+<span class="tag no">现状 ❌</span>
+MAX_BY(req_messages, ts) → 第 3 次的历史（最新，但它的 resp 拼不上）→ 缺口
+<span class="tag ok">修复后 ✅</span>
+行级 WHERE 排除无应答请求（<span class="hl">resp_choices IS NOT NULL AND != '' AND != '\N'</span>）
+→ 两个 MAX_BY 落在<b>同一个</b>最后有效请求上（历史+应答天然配对，不会错配）
+→ 少最后一轮（那轮本来就没答），但结构完整闭环；全 session 失败 → 整行消失</pre>
+  <div class="term"><b>三问判定</b>：① 部分在 ✓（最后交换缺一半，但<b>前一次有效交换在</b>）→ 换取法（取最后有效交换）= <b>格式·修</b>；全 session 失败 → ①✗ → 格式层丢弃。副作用（正向）：COUNT(*) 变成有效轮数。</div>
+  <div class="chips">
+    <span class="chip ok">验收 V4：chat 源行数下降量 = 无应答 session + 续话碎片，可解释</span>
+  </div>
+  <div class="footnote">这个行级 WHERE 同时是 P0-1 修法①的组成部分（CTE 里加），一改两得。</div>
+</div>
+</section>
+
+<!-- ============ 9 验收总览 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">格式层确认 · 验收总览 · 确认通过即可开工 Phase 1</div>
+  <h2>修法一览与验收标准<span class="dim">7 个问题全修完 = app_glm_day 成为结构合法全量表</span></h2>
+  <table class="tbl">
+    <tr><th>#</th><th>问题</th><th>修法</th><th>验收</th></tr>
+    <tr><td>P0-1</td><td>chat 缺 assistant 回复</td><td>CTE 取 resp_choices + <code>GET_JSON_OBJECT('$[0].message')</code> 拼接 + 行级 WHERE</td><td>V1 闭环 ≈100%</td></tr>
+    <tr><td>P0-2</td><td>responses 缺 assistant 回复</td><td>新 UDF <code>macaron_responses_to_glm_sft</code>（含碎片检测规则 4）</td><td>V1</td></tr>
+    <tr><td>续话碎片</td><td>构造不出完整对话</td><td>UDF 失配检测 → NULL 不产出</td><td>V3 空 messages=0</td></tr>
+    <tr><td>P1-3</td><td>effort 值域非法</td><td><code>CASE WHEN IN('high','max') THEN 原值 ELSE 'max'</code></td><td>V2 非法=0</td></tr>
+    <tr><td>P1-4a</td><td>tools 空数组</td><td><code>ELSE NULL</code> + MAX_BY 条件化（取最后一次带 tools 的请求）</td><td>V3 []=0</td></tr>
+    <tr><td>P1-5</td><td>空 messages</td><td>分支 WHERE 丢弃</td><td>V3</td></tr>
+    <tr><td>最后失败</td><td>MAX_BY 取到失败请求</td><td>行级 WHERE 只聚合有应答的请求</td><td>V4 对账可解释</td></tr>
+  </table>
+  <div class="grid2">
+    <div class="mini"><b>V1–V4（SQL 验收，主文档 §8）</b>V1 三源闭环率 ≈100%（messages 源基线 96.8%）· V2 effort 合法率 100% · V3 空数组与空记录 = 0 · V4 行数下降量可解释（无应答 session + 续话碎片）</div>
+    <div class="mini"><b>V5（本地 L0-L6 抽检）</b>导出 50 条过 <code>validate_glm52_sft.py --max-seq-len 98304</code>，四类 FATAL（effort/tools 空数组/extra 字段/空 messages）归零。</div>
+  </div>
+  <div class="term"><b>确认方式</b>：逐页过「根因 / 修法 / 现状 vs 修复后」，有异议报编号（P0-1 / P1-4a / 续话…）。确认通过 → 开工 Phase 1（一次 ETL 改动 + responses UDF）。质量筛选（Phase 2：18 条款 + _qualified 表）与交付层（导出剥 4 键）随后确认。</div>
+  <div class="chips">
+    <span class="chip">📄 完整评审稿（含归属总表/筛选层/交付层）：<a href="app-glm-day-fix-plan.html">app-glm-day-fix-plan.html</a></span>
+    <span class="chip">数据基线：20260830 快照 69,330 条</span>
+    <span class="chip ok">修复后参照物：messages 源 3,093 条 96.8% 闭环（UDF 已正确拼装）</span>
+  </div>
+  <div class="footnote">statis_day=20260830 全量快照（LIFECYCLE 3 天，复跑验收用最新分区）· 修法 SQL 全文见主文档 §3–§7 · ←/→ 翻页 · <a href="index.html">返回目录</a></div>
+</div>
+</section>
+
+</div>
+
+<div class="nav">
+  <a href="index.html" class="navhome" title="返回目录页">目录</a>
+  <button id="prev" aria-label="上一页">←</button>
+  <span class="counter" id="counter">1 / 9</span>
+  <button id="next" aria-label="下一页">→</button>
+</div>
+<div class="hint">← / → 翻页</div>
+
+<script>
+(function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var i = 0;
+  var counter = document.getElementById('counter');
+  var progress = document.querySelector('.progress');
+  function go(n) {
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach(function (s, k) { s.classList.toggle('active', k === i); });
+    counter.textContent = (i + 1) + ' / ' + slides.length;
+    progress.style.width = ((i + 1) / slides.length * 100) + '%';
+    var inner = slides[i].querySelector('.inner');
+    if (inner) inner.scrollTop = 0;
+    history.replaceState(null, '', '#p' + (i + 1));
+  }
+  document.getElementById('prev').onclick = function () { go(i - 1); };
+  document.getElementById('next').onclick = function () { go(i + 1); };
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); go(i + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); go(i - 1); }
+    else if (e.key === 'Home') { go(0); }
+    else if (e.key === 'End') { go(slides.length - 1); }
+  });
+  var m = location.hash.match(/^#p(\d+)$/);
+  go(m ? parseInt(m[1], 10) - 1 : 0);
+})();
+</script>
+</body>
+</html>
