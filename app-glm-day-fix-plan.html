@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>app_glm_day 修复方案：先格式修复、再质量筛选（评审稿 v3，按执行顺序重排）</title>
+<title>app_glm_day 修复方案：归属总表前置，只看一表即可评审（评审稿 v4）</title>
 <style>
   :root {
     --bg: #fafaf9;
@@ -71,111 +71,28 @@
 <body>
 <div class="container">
 <header class="hero">
-  <h1>app_glm_day 修复方案：先格式修复、再质量筛选（评审稿 v3）</h1>
-  <div class="subtitle">正文按执行顺序分三部分：第一部分格式修复（拼 resp、契约对齐、造不出不产出）→ 第二部分质量筛选（18 条款淘汰无价值记录）→ 第三部分交付（导出剥 4 键）；§1.2 归属总表为人工 review 版（三问速查 + 逐条判定依据）。statis_day=20260830 快照 69,330 条实测</div>
+  <h1>app_glm_day 修复方案：归属总表前置，只看一表即可评审（评审稿 v4）</h1>
+  <div class="subtitle">文档首节为自包含的问题归属总表（最小背景 + 三问速查「数据在？/表达对？/有价值？」+ 逐条判定依据引用实测数字），理论上只看这张表即可完成评审；其后按执行顺序：第一部分格式修复 → 第二部分质量筛选 → 第三部分交付。statis_day=20260830 快照 69,330 条实测</div>
   <div class="meta">
     <span>📝 本文主要由 AI agent 完成</span>
     <span>📊 MaxCompute 20260830 快照</span>
   </div>
 </header>
 <blockquote>
-<p><strong>v3 变更</strong>：按执行顺序重排——<strong>第一部分格式修复（先做）→ 第二部分质量筛选（后做）→ 第三部分交付</strong>。每个问题先在归属表（§1.2）定位置，正文按层分组，不再按问题编号混排。<strong>§1.2 为人工 review 版</strong>：三问速查（数据在？/表达对？/有价值？）+ 逐条判定依据（每条引用实测数字与证据，可复跑核对）。</p>
+<p><strong>v4 变更</strong>：<strong>归属总表前置为文档首节并自包含</strong>（最小背景 + 三问速查 + 逐条判定依据），理论上只看这张表即可完成评审，其余章节为深究材料。
+<strong>v3 变更</strong>：按执行顺序重排——第一部分格式修复（先做）→ 第二部分质量筛选（后做）→ 第三部分交付。</p>
 <p><strong>一句话结论</strong>：这张表目前是"未闭环、未对齐、未筛选"的中间产物。修复分两层：<strong>格式修复层</strong>（每条产出记录 = 结构合法的完整对话，造不出的不产出）→ <strong>质量筛选层</strong>（从合法记录里选有训练价值的，18 条款）。</p>
 </blockquote>
 <hr />
-<h2>0. 基线与口径说明</h2>
-<p><strong>分区语义</strong>：<code>statis_day</code> 是<strong>全量快照</strong>（非日增量），数字随快照累积增长：</p>
-<table>
-<thead>
-<tr>
-<th>statis_day</th>
-<th>总行数</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>20260827（已过期）</td>
-<td>4,486</td>
-</tr>
-<tr>
-<td>20260828</td>
-<td>49,876</td>
-</tr>
-<tr>
-<td>20260829</td>
-<td>66,016</td>
-</tr>
-<tr>
-<td><strong>20260830（最新基线）</strong></td>
-<td><strong>69,330</strong></td>
-</tr>
-</tbody>
-</table>
-<p><strong>LIFECYCLE 3 天</strong>：验证请用最新分区（0827 已被回收，本文实测数字基于 0830 快照）。</p>
-<p><strong>0830 快照按 source 实测</strong>（69,330 条 = chat 65,691 + messages 3,093 + responses 546）：</p>
-<table>
-<thead>
-<tr>
-<th>source</th>
-<th>行数</th>
-<th>空 messages</th>
-<th>tools=[]</th>
-<th><strong>assistant 结尾</strong></th>
-<th>effort ∈{high,max}</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>chat_completions</td>
-<td>65,691</td>
-<td>2</td>
-<td>43,557 (66%)</td>
-<td><strong>19 (0.03%)</strong></td>
-<td><strong>0 (0%)</strong></td>
-</tr>
-<tr>
-<td>messages</td>
-<td>3,093</td>
-<td>0</td>
-<td>710 (23%)</td>
-<td>2,995 (96.8%)</td>
-<td>2,908 (94%)</td>
-</tr>
-<tr>
-<td>responses</td>
-<td>546</td>
-<td>4</td>
-<td>128 (23%)</td>
-<td><strong>0 (0%)</strong></td>
-<td>239 (44%)</td>
-</tr>
-<tr>
-<td><strong>合计</strong></td>
-<td>69,330</td>
-<td>6</td>
-<td>44,395 (64%)</td>
-<td><strong>3,014 (4.3%)</strong></td>
-<td>3,147 (4.5%)</td>
-</tr>
-</tbody>
-</table>
-<p><strong>下游契约</strong>（训练侧 L0-L6 校验器，实测依据）：
-- 顶层只认 <code>messages/tools/chat_template_kwargs/meta</code> 四键，<code>extra="forbid"</code>（多一个字段直接 FATAL，实测 <code>Extra inputs are not permitted</code>）
-- <code>reasoning_effort: Literal["high","max"]</code>（实测 medium 报 <code>Input should be 'high' or 'max'</code>）
-- <code>tools</code> 为空数组直接 FATAL（<code>_reject_empty_tools</code>），省略键则 OK
-- <code>messages</code> 至少 1 条（<code>min_length=1</code>）
-- 本地转换器 <code>to_glm52_sft.py</code> 的既有约定：<strong>强制 <code>reasoning_effort="max"</code>、空 tools 省略键</strong>——格式层向它对齐</p>
-<hr />
-<h2>1. 两层架构：先格式修复，再质量筛选</h2>
-<h3>1.1 分类判据（一句话）</h3>
-<blockquote>
-<p><strong>数据在、但 ETL 表达错了 = 格式问题（修）</strong>
-<strong>数据在、表达也对、但内容没训练价值 = 筛选问题（滤）</strong>
-<strong>数据不在、构造不出合法记录 = 格式层丢弃（不产出，不硬造）</strong></p>
-</blockquote>
-<p>格式层的契约：<strong>产出的每条记录都是结构合法的完整对话</strong>（有问有答、契约对齐、字段语义正确）。它不做价值判断——无工具纯对话照样产出（tools 省略键）。质量层的契约：<strong>从合法记录里选有训练价值的</strong>（多轮、工具、闭环、非闲聊、非 cron、去重）。两层职责不交叉。</p>
-<h3>1.2 问题归属总表（人工 review 版）</h3>
-<p><strong>三问速查</strong>（§1.1 判据的机械版，逐行按下表「判定依据」列核对）：</p>
+<h2>问题归属总表（人工 review 版）——只看这一节即可完成评审</h2>
+<p><strong>最小背景</strong>（读懂下表所需）：</p>
+<ul>
+<li><strong>对象</strong>：<code>app_macaron_relay_stack_glm_day</code>（GLM-5.2 SFT 训练数据表，数仓 ETL 产物）。statis_day=20260830 快照 69,330 条 = chat_completions 65,691 + messages 3,093 + responses 546（全量快照、LIFECYCLE 3 天，数字随快照增长）</li>
+<li><strong>现状一句话</strong>：未闭环（chat 源 99.97% 缺模型回复）、未对齐（训练契约 FATAL）、未筛选（全量含单轮/闲聊/无工具）</li>
+<li><strong>训练契约</strong>（L0-L6 校验器实测）：顶层四键 <code>extra="forbid"</code> / <code>reasoning_effort: Literal["high","max"]</code> / tools 空数组 FATAL（省略键 OK）/ <code>messages</code> ≥1</li>
+<li><strong>修复路线</strong>：先格式修复（app_glm_day 修好 = 结构合法全量表）→ 再质量筛选（<code>_qualified</code> 新表，18 条款 glm 口径）→ 交付剥 4 键</li>
+</ul>
+<p><strong>三问速查</strong>（判据的机械版，判据全文见 §1.1；逐行按下表「判定依据」列核对）：</p>
 <table>
 <thead>
 <tr>
@@ -212,7 +129,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>归属总表</strong>（现象与数字均为 0830 快照实测，可复跑核对；逐条判定依据即三间的具体应用）：</p>
+<p><strong>归属总表</strong>（现象与数字均为 0830 快照实测，可复跑核对；判定依据 = 三问的具体答案；§ 列为深究章节）：</p>
 <table>
 <thead>
 <tr>
@@ -327,7 +244,99 @@
 </tr>
 </tbody>
 </table>
-<h3>1.3 两层流水线</h3>
+<hr />
+<h2>0. 基线与口径说明</h2>
+<p><strong>分区语义</strong>：<code>statis_day</code> 是<strong>全量快照</strong>（非日增量），数字随快照累积增长：</p>
+<table>
+<thead>
+<tr>
+<th>statis_day</th>
+<th>总行数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>20260827（已过期）</td>
+<td>4,486</td>
+</tr>
+<tr>
+<td>20260828</td>
+<td>49,876</td>
+</tr>
+<tr>
+<td>20260829</td>
+<td>66,016</td>
+</tr>
+<tr>
+<td><strong>20260830（最新基线）</strong></td>
+<td><strong>69,330</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>LIFECYCLE 3 天</strong>：验证请用最新分区（0827 已被回收，本文实测数字基于 0830 快照）。</p>
+<p><strong>0830 快照按 source 实测</strong>（69,330 条 = chat 65,691 + messages 3,093 + responses 546）：</p>
+<table>
+<thead>
+<tr>
+<th>source</th>
+<th>行数</th>
+<th>空 messages</th>
+<th>tools=[]</th>
+<th><strong>assistant 结尾</strong></th>
+<th>effort ∈{high,max}</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>chat_completions</td>
+<td>65,691</td>
+<td>2</td>
+<td>43,557 (66%)</td>
+<td><strong>19 (0.03%)</strong></td>
+<td><strong>0 (0%)</strong></td>
+</tr>
+<tr>
+<td>messages</td>
+<td>3,093</td>
+<td>0</td>
+<td>710 (23%)</td>
+<td>2,995 (96.8%)</td>
+<td>2,908 (94%)</td>
+</tr>
+<tr>
+<td>responses</td>
+<td>546</td>
+<td>4</td>
+<td>128 (23%)</td>
+<td><strong>0 (0%)</strong></td>
+<td>239 (44%)</td>
+</tr>
+<tr>
+<td><strong>合计</strong></td>
+<td>69,330</td>
+<td>6</td>
+<td>44,395 (64%)</td>
+<td><strong>3,014 (4.3%)</strong></td>
+<td>3,147 (4.5%)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>下游契约</strong>（训练侧 L0-L6 校验器，实测依据）：
+- 顶层只认 <code>messages/tools/chat_template_kwargs/meta</code> 四键，<code>extra="forbid"</code>（多一个字段直接 FATAL，实测 <code>Extra inputs are not permitted</code>）
+- <code>reasoning_effort: Literal["high","max"]</code>（实测 medium 报 <code>Input should be 'high' or 'max'</code>）
+- <code>tools</code> 为空数组直接 FATAL（<code>_reject_empty_tools</code>），省略键则 OK
+- <code>messages</code> 至少 1 条（<code>min_length=1</code>）
+- 本地转换器 <code>to_glm52_sft.py</code> 的既有约定：<strong>强制 <code>reasoning_effort="max"</code>、空 tools 省略键</strong>——格式层向它对齐</p>
+<hr />
+<h2>1. 两层架构：先格式修复，再质量筛选</h2>
+<h3>1.1 分类判据（一句话）</h3>
+<blockquote>
+<p><strong>数据在、但 ETL 表达错了 = 格式问题（修）</strong>
+<strong>数据在、表达也对、但内容没训练价值 = 筛选问题（滤）</strong>
+<strong>数据不在、构造不出合法记录 = 格式层丢弃（不产出，不硬造）</strong></p>
+</blockquote>
+<p>格式层的契约：<strong>产出的每条记录都是结构合法的完整对话</strong>（有问有答、契约对齐、字段语义正确）。它不做价值判断——无工具纯对话照样产出（tools 省略键）。质量层的契约：<strong>从合法记录里选有训练价值的</strong>（多轮、工具、闭环、非闲聊、非 cron、去重）。两层职责不交叉。</p>
+<h3>1.2 两层流水线（归属总表与三问速查已前置文首）</h3>
 <pre><code>stg → dwd（已有，不动）
         │
         ▼
@@ -762,7 +771,7 @@ WHERE statis_day = '${statis_day}'
 <hr />
 <p><em>证据存档：source×last_role 矩阵、effort 分布、空数组统计、tools 空值归因（n_tool_use 交叉）、空 messages 6 条明细、stg response_body 结构采样、dwd/app ETL 源文件（etl/app/app_macaron_relay_stack_glm_day.sql、etl/dwd/dwd_macaron_relay_stack_chat_completions_total_day.sql）。基线分区 20260830，v3 生成于 2026-08-31。</em></p>
 <footer>
-  <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿 v3（按执行顺序重排：格式 → 筛选 → 交付）。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>。</p>
+  <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿 v4（归属总表前置自包含）。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>。</p>
   <p style="margin-top:8px;">san-tian 的技术 blog · <a href="index.html">返回目录</a></p>
 </footer>
 </div>
