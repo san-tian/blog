@@ -288,6 +288,31 @@
     <span class="chip">diffstat：<b>2 files，+181/−12</b>（<a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/kernels/ops/attention/dsa/fused_dsa_quant_store.py">fused_dsa_quant_store.py</a> 新增 173 行 + <a href="https://github.com/san-tian/sglang/blob/0a60805df4/python/sglang/srt/mem_cache/memory_pool.py#L4204-L4216">memory_pool.py 接入</a>）</span>
     <span class="chip">读路径、656B 布局：<b>零改动</b></span>
   </div>
+  <details class="chain" style="margin:10px 0;">
+    <summary>📄 实际 diff：memory_pool.py 的 elif 分支被这样替换（点开）</summary>
+    <div style="margin-top:10px;">
+      <pre class="code"><span class="cmt"># git show 0a60805df4 -- python/sglang/srt/mem_cache/memory_pool.py（@@ -4202,21 +4202,17 @@）</span>
+        elif self.dsa_kv_cache_store_fp8:
+<span class="bad">-           # OPTIMIZATION: Quantize k_nope and k_rope separately to avoid concat overhead</span>
+<span class="bad">-           cache_k_nope_fp8, cache_k_rope_fp8 = quantize_k_cache_separate(</span>
+<span class="bad">-               cache_k_nope, cache_k_rope</span>
+<span class="bad">-           )</span>
+<span class="bad">-           set_mla_kv_buffer_triton(</span>
+<span class="add">+           # OPTIMIZATION: Fused per-block fp8 quant of k_nope + bf16 k_rope + paged store</span>
+<span class="add">+           from sglang.kernels.ops.attention.dsa.fused_dsa_quant_store import (</span>
+<span class="add">+               fused_dsa_quant_store,</span>
+<span class="add">+           )</span>
+<span class="add">+           fused_dsa_quant_store(</span>
+<span class="add">+               cache_k_nope.view(-1, 512),</span>
+<span class="add">+               cache_k_rope.view(-1, 64),</span>
+                dst_buffer,
+                loc,
+<span class="bad">-               cache_k_nope_fp8,</span>
+<span class="bad">-               cache_k_rope_fp8,</span>
+            )</pre>
+      <p style="font-size:13px; color:var(--text-dim); margin:6px 0 0;"><span style="color:var(--red)">红</span> = 被删掉的两步写法（quantize_k_cache_separate + set_mla_kv_buffer_triton，后者含 DCP 换算）；<span style="color:var(--green)">绿</span> = 新增的 fused_dsa_quant_store 调用。同位置只换了这一步，分支骨架（elif / 后续的 else）没动。</p>
+    </div>
+  </details>
   <div class="footnote">结合线索 1（关掉就正常）：怀疑范围收敛到「这一个 kernel 的写入行为」。下一步：DCP 下这个写入的 loc 到底是什么？</div>
 </div>
 </section>
