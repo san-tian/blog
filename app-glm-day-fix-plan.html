@@ -149,7 +149,7 @@
 <td>P1-5</td>
 <td>空 messages 记录</td>
 <td>6 条（4 续话 + 2 chat 畸形 body）</td>
-<td><code>ELSE JSON_ARRAY()</code> 兜底产出废记录</td>
+<td>最后请求的输入无效（续话：历史在服务端；chat：疑 body 截断/畸形）→ <code>ELSE JSON_ARRAY()</code> 兜底硬造空记录</td>
 <td>分支 WHERE 丢弃，不产出</td>
 <td>V3 空 messages=0</td>
 <td>§7</td>
@@ -158,7 +158,7 @@
 <td>—</td>
 <td>最后请求失败（无应答）</td>
 <td>末尾请求 resp 为空（量待修后对账 V4）</td>
-<td>MAX_BY 会取到失败请求，历史+应答缺一半</td>
+<td>失败请求在 dwd 也有行（网关记了请求、响应为空），<code>MAX_BY(…, ts)</code> 取最新不问有效性</td>
 <td>行级 WHERE 只聚合有应答的请求；全失败 session 自然消失</td>
 <td>V4 行数对账可解释</td>
 <td>§3 修法①</td>
@@ -223,12 +223,15 @@
 <pre><code class="language-json">现状 ❌: {&quot;messages&quot;: [...], &quot;tools&quot;: [], &quot;chat_template_kwargs&quot;: {...}}   ← 空数组 = L0-L6 FATAL
 修复后 ✅: {&quot;messages&quot;: [...], &quot;chat_template_kwargs&quot;: {...}}               ← 无工具 = 省略键（99.4% 本来就没带）
 </code></pre>
+<p>（注意：修复后这条记录<strong>仍留在格式层全量表</strong>——它结构合法；「无工具纯对话」的去留是第二部分 P1-4b / 筛选层的事。格式层只修「无」的表达方式，不判断该不该留。）</p>
 <p><strong>P1-5 · 空 messages 记录</strong>（6 条）</p>
 <pre><code class="language-json">现状 ❌: {&quot;session_id&quot;: &quot;01a00759-…95a3&quot;, &quot;messages&quot;: [], &quot;tools&quot;: [...], &quot;chat_template_kwargs&quot;: {...}}   ← 废记录照样产出
 修复后 ✅: （WHERE 过滤，整行不产出）
 </code></pre>
+<p>（输入为什么是空的：responses 4 条 = 续话客户端最后请求 input 空——历史在服务端；chat 2 条 = 最后请求 body 解析不出，与「最后请求失败」同构，都是 MAX_BY 取到有问题的最后一行。修好 P0-1 行级过滤后，chat 那 2 条可能被救回——回退到最后一次有效交换——或消失。）</p>
 <p><strong>最后请求失败</strong>（无应答；量待修后对账 V4）</p>
-<pre><code class="language-text">现状 ❌: session 有 3 次请求，第 3 次失败（resp 空）
+<pre><code class="language-text">背景: 失败请求在 dwd 也有行——网关记了请求（request_body 正常）、上游失败（response_body 空 → resp_choices NULL）
+现状 ❌: session 有 3 次请求，第 3 次失败（resp 空）
         → MAX_BY(req_messages, ts) 取第 3 次的历史，但它的 resp 拼不上 → 缺口
 修复后 ✅: 行级 WHERE 排除无应答请求 → 取第 2 次请求 + 第 2 次应答
         → 少最后一轮，但结构完整闭环；全 session 失败 → 整行消失

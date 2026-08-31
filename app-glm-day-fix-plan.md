@@ -19,8 +19,8 @@
 | — | 续话客户端碎片（previous_response_id） | 4 条 messages=[]（n_turns 75/288/212/33） | 历史在服务端、请求只有增量，MAX_BY 拿不到全量 | UDF 碎片检测（input 消息数 vs session 轮数失配 → NULL 不产出） | V3 空 messages=0 | §4 规则 4 |
 | P1-3 | reasoning_effort 值域非法 | chat 源 100% ∉ {high,max}（COALESCE 兜底 'medium'） | 写死非法值，契约 `Literal["high","max"]` | `CASE WHEN IN('high','max') THEN 原值 ELSE 'max'` | V2 非法值=0 | §5 |
 | P1-4a | tools 空数组 | 44,395 条（64%）`tools=[]`，L0-L6 直接 FATAL | `ELSE JSON_ARRAY()` 把「无工具」表达成非法形态 | `ELSE NULL`（空则省略键）+ MAX_BY 条件化（取最后一次**带** tools 的请求） | V3 `[]`=0 | §6 |
-| P1-5 | 空 messages 记录 | 6 条（4 续话 + 2 chat 畸形 body） | `ELSE JSON_ARRAY()` 兜底产出废记录 | 分支 WHERE 丢弃，不产出 | V3 空 messages=0 | §7 |
-| — | 最后请求失败（无应答） | 末尾请求 resp 为空（量待修后对账 V4） | MAX_BY 会取到失败请求，历史+应答缺一半 | 行级 WHERE 只聚合有应答的请求；全失败 session 自然消失 | V4 行数对账可解释 | §3 修法① |
+| P1-5 | 空 messages 记录 | 6 条（4 续话 + 2 chat 畸形 body） | 最后请求的输入无效（续话：历史在服务端；chat：疑 body 截断/畸形）→ `ELSE JSON_ARRAY()` 兜底硬造空记录 | 分支 WHERE 丢弃，不产出 | V3 空 messages=0 | §7 |
+| — | 最后请求失败（无应答） | 末尾请求 resp 为空（量待修后对账 V4） | 失败请求在 dwd 也有行（网关记了请求、响应为空），`MAX_BY(…, ts)` 取最新不问有效性 | 行级 WHERE 只聚合有应答的请求；全失败 session 自然消失 | V4 行数对账可解释 | §3 修法① |
 | P1-4b | 无工具纯对话 | 空 tools 里 99.4%（43,313+708+369 条）整个 session 零工具调用（n_tool_use=0/null） | ①✓ 客户端真没带 ②✓ 修完 P1-4a 后表达对（省略键）③✗ 纯聊天无 agentic 训练价值。**不在格式层 WHERE 掉的理由**：格式层不做事价值判断，且行数对账解释不了「为什么少了 44k」 | **筛选** | 18 条款 2.x/3.x 淘汰 | §10 |
 
 **格式层总验收**（§8）：V1 三源闭环率 ≈100% / V2 effort 合法率 100% / V3 空数组与空记录 = 0 / V4 行数下降量可解释（无应答 session + 续话碎片）/ V5 本地 L0-L6 抽检 50 条，四类 FATAL 归零。
@@ -100,6 +100,8 @@
 修复后 ✅: {"messages": [...], "chat_template_kwargs": {...}}               ← 无工具 = 省略键（99.4% 本来就没带）
 ```
 
+（注意：修复后这条记录**仍留在格式层全量表**——它结构合法；「无工具纯对话」的去留是第二部分 P1-4b / 筛选层的事。格式层只修「无」的表达方式，不判断该不该留。）
+
 **P1-5 · 空 messages 记录**（6 条）
 
 ```json
@@ -107,9 +109,12 @@
 修复后 ✅: （WHERE 过滤，整行不产出）
 ```
 
+（输入为什么是空的：responses 4 条 = 续话客户端最后请求 input 空——历史在服务端；chat 2 条 = 最后请求 body 解析不出，与「最后请求失败」同构，都是 MAX_BY 取到有问题的最后一行。修好 P0-1 行级过滤后，chat 那 2 条可能被救回——回退到最后一次有效交换——或消失。）
+
 **最后请求失败**（无应答；量待修后对账 V4）
 
 ```text
+背景: 失败请求在 dwd 也有行——网关记了请求（request_body 正常）、上游失败（response_body 空 → resp_choices NULL）
 现状 ❌: session 有 3 次请求，第 3 次失败（resp 空）
         → MAX_BY(req_messages, ts) 取第 3 次的历史，但它的 resp 拼不上 → 缺口
 修复后 ✅: 行级 WHERE 排除无应答请求 → 取第 2 次请求 + 第 2 次应答
