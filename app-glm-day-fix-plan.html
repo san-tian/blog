@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>app_glm_day 修复方案：GLM SFT 训练数据表的闭环 / 契约 / 筛选六查六修（评审稿）</title>
+<title>app_glm_day 修复方案：先格式修复、再质量筛选（评审稿 v2）</title>
 <style>
   :root {
     --bg: #fafaf9;
@@ -72,8 +72,8 @@
 <div class="container">
 
 <header class="hero">
-  <h1>app_glm_day 修复方案：GLM SFT 训练数据表的闭环 / 契约 / 筛选六查六修（评审稿）</h1>
-  <div class="subtitle">数仓 app_macaron_relay_stack_glm_day 体检与修复：statis_day=20260830 快照 69,330 条实测，6 个问题各附证据 / 根因 / SQL 与 UDF 修法 / 验收标准</div>
+  <h1>app_glm_day 修复方案：先格式修复、再质量筛选（评审稿 v2）</h1>
+  <div class="subtitle">数仓 app_macaron_relay_stack_glm_day 两层重构：格式层产出结构合法的完整对话（拼 resp、契约对齐、造不出不产出），筛选层 18 条款淘汰无价值记录；每个问题定归属（格式 / 筛选 / 格式层丢弃），statis_day=20260830 快照 69,330 条实测</div>
   <div class="meta">
     <span>📝 本文主要由 AI agent 完成</span>
     <span>📊 MaxCompute 20260830 快照</span>
@@ -81,7 +81,8 @@
 </header>
 
 <blockquote>
-<p><strong>一句话结论</strong>：这张表目前是"<strong>未闭环、未对齐、未筛选</strong>"的中间产物——96% 的记录缺模型回复、格式契约与训练侧 L0-L6 不对齐、没有达标筛选。共 6 个问题（2 个 P0、3 个 P1、1 个 P2），本文档给出每个问题的证据、根因和具体修法。</p>
+<p><strong>v2 变更</strong>：按「先格式修复、再质量筛选」两层重构。每个问题明确定归属：<strong>格式 / 筛选 / 格式层丢弃</strong>。新增 tools 空数组归因实测（99.4% 无工具流量）、空 messages 6 条明细、两层流水线与分层验收。</p>
+<p><strong>一句话结论</strong>：这张表目前是"未闭环、未对齐、未筛选"的中间产物。修复分两层：<strong>格式修复层</strong>（每条产出记录 = 结构合法的完整对话，造不出的不产出）→ <strong>质量筛选层</strong>（从合法记录里选有训练价值的，18 条款）。共 6 个问题 + 若干边缘 case，全部定归属。</p>
 </blockquote>
 <hr />
 <h2>0. 基线与口径说明</h2>
@@ -112,7 +113,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>LIFECYCLE 3 天</strong>：验证请用最新分区（今天的 0827 已被回收，本文所有实测数字基于 0830 快照）。</p>
+<p><strong>LIFECYCLE 3 天</strong>：验证请用最新分区（0827 已被回收，本文实测数字基于 0830 快照）。</p>
 <p><strong>0830 快照按 source 实测</strong>（69,330 条 = chat 65,691 + messages 3,093 + responses 546）：</p>
 <table>
 <thead>
@@ -160,13 +161,137 @@
 </tr>
 </tbody>
 </table>
+<p><strong>下游契约</strong>（训练侧 L0-L6 校验器，实测依据）：
+- 顶层只认 <code>messages/tools/chat_template_kwargs/meta</code> 四键，<code>extra="forbid"</code>（多一个字段直接 FATAL，实测 <code>Extra inputs are not permitted</code>）
+- <code>reasoning_effort: Literal["high","max"]</code>（实测 medium 报 <code>Input should be 'high' or 'max'</code>）
+- <code>tools</code> 为空数组直接 FATAL（<code>_reject_empty_tools</code>），省略键则 OK
+- <code>messages</code> 至少 1 条（<code>min_length=1</code>）
+- 本地转换器 <code>to_glm52_sft.py</code> 的既有约定：<strong>强制 <code>reasoning_effort="max"</code>、空 tools 省略键</strong>——格式层向它对齐</p>
 <hr />
-<h2>1. 问题清单（总览）</h2>
+<h2>1. 两层架构：先格式修复，再质量筛选</h2>
+<h3>1.1 分类判据（一句话）</h3>
+<blockquote>
+<p><strong>数据在、但 ETL 表达错了 = 格式问题（修）</strong>
+<strong>数据在、表达也对、但内容没训练价值 = 筛选问题（滤）</strong>
+<strong>数据不在、构造不出合法记录 = 格式层丢弃（不产出，不硬造）</strong></p>
+</blockquote>
+<p>格式层的契约：<strong>产出的每条记录都是结构合法的完整对话</strong>（有问有答、契约对齐、字段语义正确）。它不做价值判断——无工具纯对话照样产出（tools 省略键）。质量层的契约：<strong>从合法记录里选有训练价值的</strong>（多轮、工具、闭环、非闲聊、非 cron、去重）。两层职责不交叉。</p>
+<h3>1.2 问题归属总表</h3>
 <table>
 <thead>
 <tr>
 <th>#</th>
 <th>问题</th>
+<th>归属</th>
+<th>判据</th>
+<th>动作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P0-1</td>
+<td>chat 源缺 assistant 回复</td>
+<td><strong>格式</strong></td>
+<td>数据在（resp_choices），ETL 没拼</td>
+<td>拼 <code>choices[0].message</code></td>
+</tr>
+<tr>
+<td>P0-2</td>
+<td>responses 源缺 assistant 回复</td>
+<td><strong>格式</strong></td>
+<td>数据在（resp_output），ETL 没用</td>
+<td>UDF 转+拼</td>
+</tr>
+<tr>
+<td>—</td>
+<td>续话客户端（previous_response_id）</td>
+<td><strong>格式层丢弃</strong></td>
+<td>增量 input 构造不出完整对话</td>
+<td>UDF 检测碎片 → 返回 NULL → 不产出</td>
+</tr>
+<tr>
+<td>P1-3</td>
+<td>reasoning_effort 值域非法</td>
+<td><strong>格式</strong></td>
+<td>契约不对齐，可无损映射</td>
+<td>归一 high/max</td>
+</tr>
+<tr>
+<td>P1-4a</td>
+<td>tools 表达成 <code>[]</code></td>
+<td><strong>格式</strong></td>
+<td>"无工具"的合法表达是省略键，不是空数组</td>
+<td><code>ELSE NULL</code> + MAX_BY 条件化</td>
+</tr>
+<tr>
+<td>P1-4b</td>
+<td>无工具纯对话流量（99.4%）</td>
+<td><strong>筛选</strong></td>
+<td>记录合法，但无 agentic 训练价值</td>
+<td>18 条款 2.x/3.x 淘汰</td>
+</tr>
+<tr>
+<td>P1-5</td>
+<td>空 messages（6 条）</td>
+<td><strong>格式层丢弃</strong></td>
+<td>输入缺失（续话 4 条 + 畸形 body 2 条）</td>
+<td>WHERE 不产出</td>
+</tr>
+<tr>
+<td>—</td>
+<td>session 结束在 tool_call 无结果</td>
+<td><strong>筛选</strong></td>
+<td>结构完整（有 assistant）但未闭环</td>
+<td>18 条款 4.x</td>
+</tr>
+<tr>
+<td>—</td>
+<td>最后请求失败</td>
+<td><strong>格式</strong>（取最后有效交换）；全失败 → 格式层丢弃</td>
+<td>数据部分在</td>
+<td>MAX_BY 有效 ts / WHERE</td>
+</tr>
+<tr>
+<td>P2-6</td>
+<td>无 18 条款筛选</td>
+<td><strong>筛选</strong></td>
+<td>表的本意</td>
+<td>质量层 UDAF</td>
+</tr>
+<tr>
+<td>附-7</td>
+<td>顶层 9 列 vs 训练 4 键</td>
+<td><strong>交付层</strong></td>
+<td>表设计合理（查询用辅助列）</td>
+<td>导出时剥离，不改表</td>
+</tr>
+</tbody>
+</table>
+<h3>1.3 两层流水线</h3>
+<pre><code>stg → dwd（已有，不动）
+        │
+        ▼
+【格式修复 ETL】app_macaron_relay_stack_glm_day（修好后 = 结构合法的全量表）
+  职责：完整对话（拼 resp）、契约对齐（effort/tools 语义）、造不出 → 不产出
+  产出：含无工具纯对话（它们结构合法，只是没训练价值）
+        │
+        ▼
+【质量筛选 ETL】app_macaron_relay_stack_glm_day_qualified（新表）
+  职责：18 条款（glm 口径，豁免 7.1/7.3 signature）+ 无工具/未闭环/单轮/闲聊/cron/去重淘汰
+  产出：可直接进 L0-L6 的训练候选
+        │
+        ▼
+【交付层】导出时剥 4 键（messages/tools/chat_template_kwargs/meta）
+</code></pre>
+<p>两张表分离的好处：<strong>筛选前/后都能看</strong>（对照排查，同 opus 的 dwd vs app_opus_day 关系），且格式修复和质量筛选可以独立迭代、独立验收。</p>
+<hr />
+<h2>2. 问题清单（总览）</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>问题</th>
+<th>归属</th>
 <th>根因（ETL 现状）</th>
 <th>影响（0830 实测）</th>
 <th>优先级</th>
@@ -176,6 +301,7 @@
 <tr>
 <td>P0-1</td>
 <td>chat_completions 源缺 assistant 回复</td>
+<td>格式</td>
 <td>CTE 没取 <code>resp_choices</code>，messages 直接用 <code>req_messages</code></td>
 <td>65,691 条只有 19 条闭环（0.03%）</td>
 <td><strong>P0</strong></td>
@@ -183,6 +309,7 @@
 <tr>
 <td>P0-2</td>
 <td>responses 源缺 assistant 回复</td>
+<td>格式</td>
 <td><code>final_resp_output</code> 取了但 INSERT 没用（注释写了没做）</td>
 <td>546 条 0 条闭环</td>
 <td><strong>P0</strong></td>
@@ -190,48 +317,47 @@
 <tr>
 <td>P1-3</td>
 <td>reasoning_effort 值域非法</td>
-<td><code>COALESCE(reasoning_effort, 'medium')</code>；训练契约 <code>Literal["high","max"]</code></td>
-<td>chat 源 100% 非法（全是 medium 等）</td>
+<td>格式</td>
+<td><code>COALESCE(reasoning_effort, 'medium')</code>；契约 <code>Literal["high","max"]</code></td>
+<td>chat 源 100% 非法</td>
 <td>P1</td>
 </tr>
 <tr>
-<td>P1-4</td>
+<td>P1-4a</td>
 <td>tools 空数组</td>
-<td><code>ELSE JSON_ARRAY()</code> 兜底；校验器要求"空则省略键"</td>
+<td>格式</td>
+<td><code>ELSE JSON_ARRAY()</code> 兜底；契约要求空则省略键</td>
 <td>44,395 条 (64%)</td>
 <td>P1</td>
 </tr>
 <tr>
 <td>P1-5</td>
 <td>空 messages 记录</td>
-<td><code>ELSE JSON_ARRAY()</code> 兜底产出空记录</td>
+<td>格式层丢弃</td>
+<td><code>ELSE JSON_ARRAY()</code> 兜底产出废记录</td>
 <td>6 条</td>
 <td>P1</td>
 </tr>
 <tr>
 <td>P2-6</td>
 <td>无 18 条款达标筛选</td>
-<td>无 qualified_sessions CTE（opus_day 有，glm_day 没有）</td>
+<td>筛选</td>
+<td>无 qualified 筛选（opus_day 有，glm_day 没有）</td>
 <td>全量含单轮/无工具/不闭环/闲聊</td>
 <td>P2</td>
 </tr>
 <tr>
 <td>附-7</td>
 <td>顶层 9 列 vs 训练 4 键</td>
+<td>交付层</td>
 <td>表设计（查询用辅助列）</td>
-<td>导出层剥离，<strong>不改表</strong></td>
+<td>导出层剥离，不改表</td>
 <td>备注</td>
 </tr>
 </tbody>
 </table>
-<p><strong>下游契约</strong>（训练侧 L0-L6 校验器，实测依据）：
-- 顶层只认 <code>messages/tools/chat_template_kwargs/meta</code> 四键，<code>extra="forbid"</code>（多一个字段直接 FATAL，实测 <code>Extra inputs are not permitted</code>）
-- <code>reasoning_effort: Literal["high","max"]</code>（实测 medium 报 <code>Input should be 'high' or 'max'</code>）
-- <code>tools</code> 为空数组直接 FATAL（<code>_reject_empty_tools</code>），省略键则 OK
-- <code>messages</code> 至少 1 条（<code>min_length=1</code>）
-- 本地转换器 <code>to_glm52_sft.py</code> 的既有约定：<strong>强制 <code>reasoning_effort="max"</code>、空 tools 省略键</strong>——修复向它对齐</p>
 <hr />
-<h2>2. P0-1：chat_completions 源缺 assistant 回复</h2>
+<h2>3. P0-1：chat_completions 源缺 assistant 回复【格式】</h2>
 <h3>现状（etl/app/app_macaron_relay_stack_glm_day.sql）</h3>
 <pre><code class="language-sql">-- CTE：根本没取 resp_choices
 chat_sessions AS (
@@ -252,7 +378,7 @@ CASE
   ELSE JSON_ARRAY()
 END AS messages,
 </code></pre>
-<p><strong>为什么缺</strong>：chat completions 协议客户端每次重发完整历史（<code>req_messages</code> 含之前所有轮次），但<strong>本轮模型的回答在 <code>resp_choices</code> 里</strong>。ETL 只取了请求侧，响应侧取都没取 → 训练样本"有问无答"（24,417 条 user 结尾 + 18,440 条 tool 结尾，到工具结果就断）。</p>
+<p><strong>为什么缺</strong>：chat completions 协议客户端每次重发完整历史（<code>req_messages</code> 含之前所有轮次），但<strong>本轮模型的回答在 <code>resp_choices</code> 里</strong>。ETL 只取了请求侧 → 训练样本"有问无答"（24,417 条 user 结尾 + 18,440 条 tool 结尾）。</p>
 <p><strong>关键证据（stg 原始 response_body 实测）</strong>：<code>choices[0].message</code> 就是标准 GLM assistant 格式，可直接拼接：</p>
 <pre><code class="language-json">{&quot;id&quot;:&quot;...&quot;,&quot;object&quot;:&quot;chat.completion&quot;,&quot;model&quot;:&quot;glm-5.2&quot;,&quot;created&quot;:...,
  &quot;choices&quot;:[{&quot;index&quot;:0,&quot;message&quot;:{
@@ -261,7 +387,7 @@ END AS messages,
    &quot;reasoning_content&quot;:&quot;Found it! The exclusion regex is:...&quot;}}]}
 </code></pre>
 <h3>修法（SQL-only，无需新 UDF）</h3>
-<p><strong>① CTE 加取 resp_choices + 行级过滤只保留有效应答的请求</strong>（这同时修复 P1-5 的 chat 部分）：</p>
+<p><strong>① CTE 加取 resp_choices + 行级过滤只保留有效应答的请求</strong>（同时实现「最后请求失败→取最后有效交换」「全失败→消失」）：</p>
 <pre><code class="language-sql">chat_sessions AS (
   SELECT
     r.session_id,
@@ -271,7 +397,8 @@ END AS messages,
     MAX_BY(r.upstream_model, r.ts) AS actual_model,
     MAX_BY(r.req_messages, r.ts) AS final_messages,
     MAX_BY(r.resp_choices, r.ts) AS final_resp_choices,   -- [新增] 最后一次有效应答
-    MAX_BY(r.req_tools, r.ts) AS final_tools,
+    MAX_BY(r.req_tools, CASE WHEN r.req_tools IS NOT NULL AND r.req_tools != '' AND r.req_tools != '\\N'
+                             THEN r.ts END) AS final_tools,   -- [新增] 条件化：会话中途带工具、最后一次没带 → 取最后一次带 tools 的请求（否则声明丢失，18 条款 3.x 配对会挂）
     MAX_BY(r.req_reasoning_effort, r.ts) AS reasoning_effort,
     COUNT(*) AS session_n_turns,
     CAST(MAX_BY(r.n_messages, r.ts) AS BIGINT) + SUM(r.n_tool_calls) + 1 AS session_n_messages,
@@ -285,9 +412,9 @@ END AS messages,
 )
 </code></pre>
 <blockquote>
-<p>行级过滤的语义：<code>MAX_BY(req_messages, ts)</code> 变成"最后一次<strong>成功应答</strong>的请求"。若 session 最后一次请求失败，取到的是最后一次成功交换（历史+应答仍完整闭环）；整个 session 全失败则自然消失（本来就不可训练）。副作用（正向）：<code>COUNT(*)</code> 变成有效轮数。</p>
+<p>行级过滤的语义：<code>MAX_BY(req_messages, ts)</code> 变成"最后一次<strong>成功应答</strong>的请求"。session 尾部失败请求被跳过（历史+应答仍完整闭环）；整个 session 全失败则自然消失（构造不出，格式层丢弃）。副作用（正向）：<code>COUNT(*)</code> 变成有效轮数。</p>
 </blockquote>
-<p><strong>② INSERT 的 messages 拼回应答</strong>（同时修 P1-4/P1-5）：</p>
+<p><strong>② INSERT 的 messages 拼回应答</strong>（同时修 P1-3/P1-4a/P1-5 的 chat 部分）：</p>
 <pre><code class="language-sql">SELECT
   session_id, request_id, biz_date, model, actual_model,
   -- [修复] 历史去掉尾 ']'，拼上 choices[0].message，再闭合
@@ -298,7 +425,7 @@ END AS messages,
   CASE
     WHEN final_tools IS NOT NULL AND final_tools != '' AND final_tools != '\\N' AND JSON_VALID(final_tools)
     THEN JSON_PARSE(final_tools)
-    ELSE NULL                                              -- [修复 P1-4] 空数组 → NULL
+    ELSE NULL                                              -- [修复 P1-4a] 空数组 → NULL（省略键语义）
   END AS tools,
   JSON_OBJECT('reasoning_effort',
     CASE WHEN reasoning_effort IN ('high', 'max') THEN reasoning_effort ELSE 'max' END
@@ -312,49 +439,41 @@ WHERE final_messages IS NOT NULL AND final_messages != '' AND final_messages != 
   AND GET_JSON_OBJECT(final_resp_choices, '$[0].message') IS NOT NULL  -- 防御空 choices
 </code></pre>
 <p><strong>边界说明</strong>：
-- <code>message.content</code> 为 null（纯 tool_calls 应答）合法，<code>tool_calls</code> 字段原样保留，GLM 格式兼容
-- session 结束在 tool_call（客户端没续）→ 拼后以 assistant+tool_calls 结尾、无 tool result，这类由 P2 的达标筛选兜底淘汰
-- <strong>NUL 字节风险</strong>：dwd ETL 注释提过 reasoning 字段需在 parse UDF 里清洗 NUL（ODPS-0121095）。若 <code>resp_choices.message.reasoning_content</code> 含 NUL，需在 chat_completions parse UDF 里同样清洗（校验器 L2 有 <code>\x00</code> 保留标记检查，本地 L0-L6 会抓）
+- <code>message.content</code> 为 null（纯 tool_calls 应答）合法，<code>tool_calls</code> 字段原样保留
+- session 结束在 tool_call（客户端没续）→ 拼后以 assistant+tool_calls 结尾、无 tool result → <strong>结构完整但未闭环，归筛选层</strong>（18 条款 4.x 淘汰）
+- <strong>NUL 字节风险</strong>：dwd ETL 注释提过 reasoning 字段需在 parse UDF 里清洗 NUL（ODPS-0121095）。若 <code>resp_choices.message.reasoning_content</code> 含 NUL，需在 chat_completions parse UDF 里同样清洗
 - 多 choice（n&gt;1）取 <code>[0]</code></p>
 <hr />
-<h2>3. P0-2：responses 源缺 assistant 回复</h2>
+<h2>4. P0-2：responses 源缺 assistant 回复【格式 + 格式层丢弃】</h2>
 <h3>现状</h3>
 <pre><code class="language-sql">-- CTE 取了 final_resp_output，但 INSERT 里完全没用：
 -- 注释写着 &quot;[system_msg] + input_items + [assistant_response]&quot;
 -- 实际代码只拼了 instructions(可选) + final_input，assistant_response 从未出现
-CASE
-  WHEN final_input IS NOT NULL AND ... THEN
-    CASE WHEN final_instructions IS NOT NULL ...
-    THEN JSON_PARSE(CONCAT('[{&quot;role&quot;:&quot;system&quot;,&quot;content&quot;:', TO_JSON(final_instructions), '},', SUBSTR(final_input, 2)))
-    ELSE JSON_PARSE(final_input)
-    END
-  ELSE JSON_ARRAY()
-END AS messages,
 </code></pre>
-<p><strong>证据</strong>：0830 快照 546 条 responses 记录，assistant 结尾 <strong>0 条</strong>；4 条 messages 空（input 非法时 <code>JSON_ARRAY()</code> 兜底）。</p>
-<p><strong>另一证据</strong>：dwd 的 <code>req_input</code> 已被 parse UDF 归一成 chat messages 格式（实测 app 表里 responses 记录的 messages 是 <code>[{"role":"system","content":"...Codex CLI..."}]</code> 这种标准格式，不是 raw input items），所以 input 侧不用动，<strong>只需补 output → assistant 的转换</strong>。</p>
+<p><strong>证据</strong>：0830 快照 546 条 responses 记录，assistant 结尾 <strong>0 条</strong>。dwd 的 <code>req_input</code> 已被 parse UDF 归一成 chat messages 格式（实测 app 表 responses 记录的 messages 是 <code>[{"role":"system","content":"..."}]</code> 标准格式），input 侧不用动，<strong>只需补 output → assistant 的转换</strong>。</p>
+<h3>续话客户端（previous_response_id）→ 格式层丢弃</h3>
+<p>空 messages 的 4 条 responses 记录全是它（见 §6 P1-5 明细）：n_turns 75/288/212/33 的大 session，<code>req_input</code> 却为空或只有增量——<strong>靠服务端状态续话，input 拼不出全量历史</strong>。这类不是筛选问题（数据质量没问题），是构造不出（格式层丢弃）。</p>
 <h3>修法（需要一个小 UDF）</h3>
-<p>output items 是变长异构数组（<code>type: reasoning / message / function_call</code> 混排），SQL 字符串手术不可靠，建议参照现有 <code>macaron_anthropic_to_glm_sft</code> 的模式新增一个 UDF：</p>
+<p>output items 是变长异构数组（<code>type: reasoning / message / function_call</code> 混排），SQL 字符串手术不可靠，参照现有 <code>macaron_anthropic_to_glm_sft</code> 的模式新增：</p>
 <pre><code>macaron_responses_to_glm_sft(final_input STRING, final_instructions STRING, final_resp_output STRING)
-  -&gt; STRING（JSON 数组，完整 messages）
+  -&gt; STRING（JSON 数组，完整 messages；构造不出返回 NULL）
 </code></pre>
 <p>UDF 规则：
-1. <code>final_input</code> 已是 chat messages 数组（dwd 归一过）→ 原样作为基底；若是纯文本（input 传字符串的客户端）→ 包成 <code>[{"role":"user","content":...}]</code>
+1. <code>final_input</code> 已是 chat messages 数组（dwd 归一过）→ 原样作为基底；纯文本 input → 包成 <code>[{"role":"user","content":...}]</code>
 2. <code>final_instructions</code> 非空 → 头部插 system 消息
-3. <code>final_resp_output</code> 逐项转<strong>一条</strong> assistant 消息：
-   - <code>type=reasoning</code> → <code>reasoning_content</code>
-   - <code>type=message</code>（content 里 <code>output_text</code>）→ <code>content</code>
-   - <code>type=function_call</code> → <code>tool_calls[{id: call_id, type: function, function: {name, arguments}}]</code>
-4. 输入全空/非法 → 返回 <code>NULL</code>（ETL WHERE 丢弃）</p>
+3. <code>final_resp_output</code> 逐项转<strong>一条</strong> assistant 消息：<code>reasoning</code>→<code>reasoning_content</code>；<code>message</code>（output_text）→<code>content</code>；<code>function_call</code>→<code>tool_calls</code>
+4. <strong>碎片检测（格式层丢弃）</strong>：input 消息数与 session 轮数严重失配（如 input 只有 1 条 user 但 n_turns&gt;10）→ 返回 NULL（续话客户端，构造不出完整对话）
+5. 输入全空/非法 → 返回 NULL</p>
 <p>ETL 改动：</p>
 <pre><code class="language-sql">responses_sessions AS (
   SELECT
     ...,
     MAX_BY(r.req_input, r.ts) AS final_input,
     MAX_BY(r.req_instructions, r.ts) AS final_instructions,
-    MAX_BY(r.req_tools, r.ts) AS final_tools,
+    MAX_BY(r.req_tools, CASE WHEN &lt;tools 有效&gt; THEN r.ts END) AS final_tools,   -- 同 P0-1 条件化
     MAX_BY(r.req_reasoning_effort, r.ts) AS reasoning_effort,
     MAX_BY(r.resp_output, r.ts) AS final_resp_output,
+    COUNT(*) AS session_n_turns,   -- [新增] 供 UDF 碎片检测
     ...
   FROM dwd_macaron_relay_stack_responses_total_day r
   WHERE r.statis_day = '${statis_day}'
@@ -368,97 +487,197 @@ END AS messages,
     macaron_responses_to_glm_sft(final_input, final_instructions, final_resp_output)
   ) AS messages,
   -- tools / chat_template_kwargs / WHERE 同 chat 分支修法
+  -- WHERE 加：UDF 返回非 NULL（碎片/空 input 丢弃）
 </code></pre>
-<blockquote>
-<p>注：responses 源若客户端用 <code>previous_response_id</code>（服务端续话），<code>req_input</code> 只有增量，MAX_BY 拼不出全量历史——这类 session 建议在 UDF 里检测（如 input 只有 1 条 user 但 n_input_items 与 session 轮数不符）返回 NULL 丢弃，或接受现状由 P2 筛选兜底。</p>
-</blockquote>
 <hr />
-<h2>4. P1-3 / P1-4 / P1-5：三处小改（前面分支修法已含）</h2>
+<h2>5. P1-3 / P1-4a / P1-5：格式层小改</h2>
+<h3>P1-3 reasoning_effort 值域【格式】</h3>
 <table>
 <thead>
 <tr>
-<th>问题</th>
+<th>位置</th>
 <th>现状</th>
 <th>修法</th>
-<th>位置</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>P1-3 effort</td>
-<td>chat/responses: <code>COALESCE(reasoning_effort,'medium')</code>；messages: <code>CASE WHEN thinking_type='adaptive' THEN 'max' ELSE 'medium' END</code></td>
-<td>统一：<code>CASE WHEN effort IN ('high','max') THEN effort ELSE 'max' END</code>（保留合法原值，非法归 max，与本地 <code>to_glm52_sft.py</code> 强制 max 对齐）</td>
-<td>三处 chat_template_kwargs</td>
-</tr>
-<tr>
-<td>P1-4 tools</td>
-<td><code>ELSE JSON_ARRAY()</code></td>
-<td><code>ELSE NULL</code>（messages 分支：<code>JSON_PARSE(NULLIF(macaron_tools_to_openai_format(...), '[]'))</code>）</td>
-<td>三处 tools</td>
-</tr>
-<tr>
-<td>P1-5 空 messages</td>
-<td><code>ELSE JSON_ARRAY()</code> 兜底产出空记录</td>
-<td>分支 WHERE 丢弃（见上两节）</td>
 <td>chat/responses</td>
+<td><code>COALESCE(reasoning_effort,'medium')</code></td>
+<td><code>CASE WHEN effort IN ('high','max') THEN effort ELSE 'max' END</code></td>
+</tr>
+<tr>
+<td>messages</td>
+<td><code>CASE WHEN thinking_type='adaptive' THEN 'max' ELSE 'medium' END</code></td>
+<td>同上（统一）</td>
 </tr>
 </tbody>
 </table>
-<p>messages 分支（UDF 转换的那个）只需改两行：</p>
-<pre><code class="language-sql">  JSON_PARSE(NULLIF(macaron_tools_to_openai_format(final_tools, 'anthropic'), '[]')) AS tools,  -- '[]' → NULL
-  JSON_OBJECT('reasoning_effort', 'max') AS chat_template_kwargs,  -- 或 CASE 保留 high/max
-</code></pre>
-<blockquote>
-<p>messages 分支本身是健康的（96.8% 闭环），不用动 messages 构造。</p>
-</blockquote>
+<p>与本地 <code>to_glm52_sft.py</code> 强制 max 对齐；保留合法原值（high/max），非法归 max。</p>
+<h3>P1-4a tools 空数组【格式】+ 归因实测【筛选】</h3>
+<p><strong>格式侧</strong>：<code>ELSE JSON_ARRAY()</code> → <code>ELSE NULL</code>（messages 分支：<code>JSON_PARSE(NULLIF(macaron_tools_to_openai_format(...), '[]'))</code>）。</p>
+<p><strong>归因实测（0830 快照 44,395 条空 tools）</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>source</th>
+<th>n_tool_use</th>
+<th>条数</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>chat_completions</td>
+<td>0</td>
+<td>43,313</td>
+<td>整个 session 无工具调用（纯对话）</td>
+</tr>
+<tr>
+<td>messages</td>
+<td>0</td>
+<td>708</td>
+<td>同上</td>
+</tr>
+<tr>
+<td>chat/responses</td>
+<td>null</td>
+<td>369</td>
+<td>响应解析无工具信息</td>
+</tr>
+<tr>
+<td>messages</td>
+<td>209 / 18</td>
+<td><strong>2</strong></td>
+<td>唯二例外：用过工具但最后一次请求没带 tools</td>
+</tr>
+</tbody>
+</table>
+<p><strong>99.4% 是本来就没带工具的纯文本对话</strong>——记录本身结构合法（修完 P1-4a 后 tools 省略键），只是<strong>没有 agentic 训练价值，归筛选层</strong>（18 条款 2.x 任务类型 / 3.x 执行真实性淘汰）。chat_completions 源 66% 是这种流量（messages 源仅 23%，因为 Anthropic 协议客户端多为 agentic）。</p>
+<p>那 2 条例外（n_tool_use 209/18 但 tools 空）是 <code>MAX_BY(req_tools, ts)</code> 取最后一次请求的边缘 case——P0-1 修法里已把 tools 的 MAX_BY 条件化（取最后一次<strong>带 tools</strong> 的请求），归格式层修复。</p>
+<h3>P1-5 空 messages 记录【格式层丢弃】</h3>
+<p><strong>修法</strong>：分支 WHERE 丢弃（见 §3/§4），不产出废记录。</p>
+<p><strong>6 条明细与归因（0830 实测）</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>source</th>
+<th>session_id</th>
+<th>biz_date</th>
+<th>n_turns</th>
+<th>归因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>responses</td>
+<td>01a00759-…95a3</td>
+<td>20260830</td>
+<td><strong>75</strong></td>
+<td>req_input 空 → 续话客户端</td>
+</tr>
+<tr>
+<td>responses</td>
+<td>01a01e6d-…690a</td>
+<td>20260829</td>
+<td><strong>288</strong></td>
+<td>同上</td>
+</tr>
+<tr>
+<td>responses</td>
+<td>01a04036-…d963</td>
+<td>20260827</td>
+<td>33</td>
+<td>同上（0827 就发现的那条）</td>
+</tr>
+<tr>
+<td>responses</td>
+<td>01a04487-…9698</td>
+<td>20260828</td>
+<td><strong>212</strong></td>
+<td>同上</td>
+</tr>
+<tr>
+<td>chat</td>
+<td>1b0aa417378c8b93</td>
+<td>20260828</td>
+<td>12</td>
+<td>req_messages 空/非法（session_id 是 16 位 hex 非 UUID，另一类接入端；疑 body 截断/畸形，待确认）</td>
+</tr>
+<tr>
+<td>chat</td>
+<td>25ff2bfb720781b7</td>
+<td>20260829</td>
+<td>4</td>
+<td>同上</td>
+</tr>
+</tbody>
+</table>
+<p>responses 4 条全是大轮数 session + 空 input → <strong>previous_response_id 续话</strong>（input 只带增量，MAX_BY 拼不出全量历史）→ UDF 碎片检测丢弃（§4 规则 4）。</p>
 <hr />
-<h2>5. P2-6：18 条款达标筛选（建议二期）</h2>
-<p><strong>现状</strong>：<code>app_opus_day</code> 有 <code>qualified_sessions</code> CTE（UDAF <code>macaron_session_quality_check</code>，opus 口径含 signature），<code>app_glm_day</code> 没有。</p>
-<p><strong>为什么不能直接抄 opus 那段</strong>：
-1. UDAF 入参是 messages(Anthropic) 源的字段（<code>req_messages/resp_content/resp_stop_reason/reasoning_signature</code>），chat 源是 OpenAI 格式（<code>resp_choices/resp_finish_reason</code>），字段和格式都对不上
-2. opus 口径含 7.1/7.3 signature 检查，<strong>glm 口径豁免</strong>（glm 没签名不是缺陷），照抄会把大量合格 glm session 误杀</p>
-<p><strong>方案 A（推荐，二期做）</strong>：UDAF 加 <code>mode</code> 参数 + 三源字段适配</p>
+<h2>6. 质量筛选层（Layer 2）规格</h2>
+<p><strong>输入</strong>：格式修复后的 <code>app_macaron_relay_stack_glm_day</code>（结构合法全量）。
+<strong>输出</strong>：新表 <code>app_macaron_relay_stack_glm_day_qualified</code>（18 条款 pass）。</p>
+<p><strong>淘汰清单（全部归筛选层）</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>淘汰项</th>
+<th>条款</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>无工具纯对话（99.4% 的 tools 空记录）</td>
+<td>2.x 任务类型 / 3.x 执行真实性</td>
+<td>格式层修完是 tools 省略键的合法记录</td>
+</tr>
+<tr>
+<td>单轮/闲聊</td>
+<td>2.x</td>
+<td></td>
+</tr>
+<tr>
+<td>未闭环（assistant tool_call 结尾无结果）</td>
+<td>4.x 会话闭环</td>
+<td>P0-1 修完后仍存在的尾部 case</td>
+</tr>
+<tr>
+<td>cron/batch eval</td>
+<td>6.x</td>
+<td></td>
+</tr>
+<tr>
+<td>跨 session 重复</td>
+<td>5.x</td>
+<td></td>
+</tr>
+<tr>
+<td>signature 检查 7.1/7.3</td>
+<td><strong>豁免</strong>（glm 口径）</td>
+<td>glm 没签名不是缺陷</td>
+</tr>
+</tbody>
+</table>
+<p><strong>实现：UDAF + 三源字段适配</strong>（不能直接抄 opus 那段，两个原因：① UDAF 入参是 messages 源字段（<code>req_messages/resp_content/resp_stop_reason</code>），chat 源是 OpenAI 格式（<code>resp_choices/resp_finish_reason</code>）对不上；② opus 口径含 7.1/7.3 signature，glm 豁免）：</p>
 <pre><code class="language-sql">macaron_session_quality_check(
   req_messages, resp_content, resp_stop_reason, req_tools,
   reasoning_signature, session_id, ts,
   'glm'   -- [新增] 'opus'=全18条(默认) / 'glm'=豁免7.1/7.3
 ) = 'pass'
 </code></pre>
-<p>三源适配（chat 源）：</p>
-<table>
-<thead>
-<tr>
-<th>UDAF 入参</th>
-<th>chat_completions 适配</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>req_messages</td>
-<td><code>req_messages</code>（OpenAI 格式，UDF 需兼容双格式）</td>
-</tr>
-<tr>
-<td>resp_content</td>
-<td><code>GET_JSON_OBJECT(resp_choices, '$[0].message.content')</code></td>
-</tr>
-<tr>
-<td>resp_stop_reason</td>
-<td><code>resp_finish_reason</code></td>
-</tr>
-<tr>
-<td>req_tools</td>
-<td><code>req_tools</code></td>
-</tr>
-<tr>
-<td>reasoning_signature</td>
-<td><code>reasoning_signature</code>（dwd 有此列；glm 模式下不检查）</td>
-</tr>
-</tbody>
-</table>
-<p><strong>方案 B（务实，先跑通）</strong>：MC 只修 P0/P1（数据正确性），18 条款留在本地流水线（<code>msh_supplier_selftest.py</code>）跑——你们本地本来就有这步，短期不增加数仓工作量。</p>
-<p><strong>注意</strong>：UDAF 是逐 session 聚合，跨 session 去重（5.x）能否覆盖需与 UDF 实现确认（opus 线同款在用，对齐它即可）。</p>
+<p>chat 源适配：<code>resp_content ← GET_JSON_OBJECT(resp_choices,'$[0].message.content')</code>、<code>resp_stop_reason ← resp_finish_reason</code>、<code>reasoning_signature</code>（dwd 有此列，glm 模式不检查）。</p>
+<p><strong>两层串联（session_id join）</strong>：</p>
+<pre><code class="language-sql">-- Layer 2 ETL 骨架
+INSERT OVERWRITE TABLE app_macaron_relay_stack_glm_day_qualified PARTITION (statis_day='${statis_day}')
+SELECT g.* FROM app_macaron_relay_stack_glm_day g
+INNER JOIN qualified_sessions q ON g.session_id = q.session_id   -- qualified_sessions：三源 UDAF pass 的 session_id
+WHERE g.statis_day = '${statis_day}'
+</code></pre>
+<p><strong>注意</strong>：UDAF 逐 session 聚合，跨 session 去重（5.x）能否覆盖需与 UDF 实现确认（opus 线同款在用，对齐它即可）。<strong>方案 B（务实）</strong>：质量筛选留本地流水线（<code>msh_supplier_selftest.py</code>）跑——短期不增加数仓工作量，两层职责不变。</p>
 <hr />
-<h2>6. 附-7：导出层剥离（不改表）</h2>
+<h2>7. 交付层：导出剥离（不改表）</h2>
 <p>表的 9 列（session_id/request_id/biz_date/model/actual_model + 四键）<strong>保留不动</strong>（查询/排重有用），导出训练文件时剥成四键。已验证可用的导出 SQL：</p>
 <pre><code class="language-sql">SELECT CONCAT(
   '{&quot;messages&quot;:', JSON_FORMAT(messages),
@@ -466,41 +685,36 @@ END AS messages,
   ',&quot;chat_template_kwargs&quot;:', JSON_FORMAT(chat_template_kwargs),
   ',&quot;meta&quot;:', JSON_FORMAT(meta), '}'
 ) AS line
-FROM macaron_relay_stack.app_macaron_relay_stack_glm_day
+FROM macaron_relay_stack.app_macaron_relay_stack_glm_day_qualified
 WHERE statis_day = '${statis_day}'
-  AND ... 筛选条件 ...
 </code></pre>
-<p><strong>meta 无敏感字段</strong>（已核对：session_id/request_id/model/actual_model/n_*/source，无 signature/trace_id/user_id），脱敏层面 glm_day 无问题（opus_day 的 meta 保留 signature 是另一张表的事，不在本文档范围）。</p>
+<p><strong>meta 无敏感字段</strong>（已核对：session_id/request_id/model/actual_model/n_*/source，无 signature/trace_id/user_id）。</p>
 <hr />
-<h2>7. 验收标准（修复后跑）</h2>
-<pre><code class="language-sql">-- V1 闭环率：三个源的 last_role=assistant 都应接近 100%（messages 源基线 96.8%）
+<h2>8. 验收标准（分两层）</h2>
+<p><strong>格式层验收</strong>（修完 Layer 1 后，跑在 <code>app_glm_day</code> 上）：</p>
+<pre><code class="language-sql">-- V1 闭环率：三源 last_role=assistant 都应接近 100%（messages 源基线 96.8%）
 SELECT GET_JSON_OBJECT(JSON_FORMAT(meta),'$.source') AS src,
        GET_JSON_OBJECT(JSON_FORMAT(messages),
          CONCAT('$[', CAST(JSON_LENGTH(messages)-1 AS STRING), '].role')) AS last_role,
        COUNT(*) AS n
 FROM macaron_relay_stack.app_macaron_relay_stack_glm_day
-WHERE statis_day = '&lt;最新分区&gt;'
-GROUP BY 1, 2 ORDER BY n DESC;
+WHERE statis_day = '&lt;最新分区&gt;' GROUP BY 1, 2 ORDER BY n DESC;
 
 -- V2 effort 合法率：eff ∉ {high,max} 应为 0
 SELECT GET_JSON_OBJECT(JSON_FORMAT(chat_template_kwargs),'$.reasoning_effort') AS eff, COUNT(*) AS n
-FROM macaron_relay_stack.app_macaron_relay_stack_glm_day
-WHERE statis_day = '&lt;最新分区&gt;' GROUP BY 1;
+FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day='&lt;最新分区&gt;' GROUP BY 1;
 
--- V3 空 tools / 空 messages 应为 0（NULL 的 tools 不算空数组）
-SELECT SUM(CASE WHEN JSON_FORMAT(tools) = '[]' THEN 1 ELSE 0 END) AS empty_tools,
-       SUM(CASE WHEN JSON_LENGTH(messages) = 0 OR JSON_LENGTH(messages) IS NULL THEN 1 ELSE 0 END) AS empty_msgs
-FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day = '&lt;最新分区&gt;';
+-- V3 空 tools 数组 / 空 messages 应为 0（NULL 的 tools 不算空数组）
+SELECT SUM(CASE WHEN JSON_FORMAT(tools)='[]' THEN 1 ELSE 0 END) AS empty_tools,
+       SUM(CASE WHEN JSON_LENGTH(messages)=0 OR JSON_LENGTH(messages) IS NULL THEN 1 ELSE 0 END) AS empty_msgs
+FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day='&lt;最新分区&gt;';
 
--- V4 行数对账：修复后 chat 源行数会下降（丢弃全失败/空历史 session），下降量 = 无有效应答的 session 数，需可解释
+-- V4 行数对账：chat 源下降量 = 无有效应答的 session 数，需可解释
 </code></pre>
-<p><strong>V5 本地 L0-L6 抽检</strong>（训练侧最终验收）：</p>
-<pre><code class="language-bash"># 用第 6 节导出 SQL 拿 N 条 → line 去掉外层引号存 jsonl →
-python3 scripts/validate_glm52_sft.py sample.jsonl --max-seq-len 98304
-# 预期：reasoning_effort/tools 空数组/extra 字段三类 FATAL 归零
-</code></pre>
+<p><strong>V5 本地 L0-L6 抽检</strong>（格式层最终验收）：导出 50 条过 <code>validate_glm52_sft.py --max-seq-len 98304</code>，预期 reasoning_effort/tools 空数组/extra 字段/空 messages 四类 FATAL 归零。</p>
+<p><strong>筛选层验收</strong>（Layer 2 后）：<code>qualified</code> 表行数 / 全量表行数 = 通过率（glm 口径）；无 tools 记录为 0；未闭环为 0；对照本地 <code>msh_supplier_selftest.py</code> 抽样一致。</p>
 <hr />
-<h2>8. 不修项（已确认）</h2>
+<h2>9. 不修项（已确认）</h2>
 <table>
 <thead>
 <tr>
@@ -511,7 +725,7 @@ python3 scripts/validate_glm52_sft.py sample.jsonl --max-seq-len 98304
 <tbody>
 <tr>
 <td>顶层 9 列</td>
-<td>保留，导出层剥离（见第 6 节）</td>
+<td>保留，交付层剥离（见第 7 节）</td>
 </tr>
 <tr>
 <td>meta 内容</td>
@@ -519,7 +733,7 @@ python3 scripts/validate_glm52_sft.py sample.jsonl --max-seq-len 98304
 </tr>
 <tr>
 <td>messages 源 messages 构造</td>
-<td>96.8% 闭环，UDF 工作正常，不动</td>
+<td>96.8% 闭环，UDF 工作正常，不动（只改 effort/tools 两行）</td>
 </tr>
 <tr>
 <td>opus_day 的脱敏问题</td>
@@ -529,20 +743,23 @@ python3 scripts/validate_glm52_sft.py sample.jsonl --max-seq-len 98304
 <td>session_n_messages 等统计口径</td>
 <td>meta 信息性字段，不影响训练，不动</td>
 </tr>
+<tr>
+<td>无工具纯对话是否留在格式层全量表</td>
+<td><strong>留</strong>（tools 省略键的合法记录），筛选层淘汰</td>
+</tr>
 </tbody>
 </table>
-<h2>9. 建议实施顺序</h2>
+<h2>10. 建议实施顺序（对应两层）</h2>
 <ol>
-<li><strong>第一批（P0-1 + P1-3/4/5，一次 ETL 改动）</strong>：chat 分支 CTE+INSERT、responses 分支行过滤+WHERE、三处 effort/tools——除 responses 的 UDF 外全是 SQL 改动</li>
-<li><strong>第二批（P0-2）</strong>：<code>macaron_responses_to_glm_sft</code> UDF 开发 + responses 分支 messages 构造替换</li>
-<li><strong>第三批（P2-6，可选）</strong>：UDAF 加 glm 模式 + 三源适配；不做则维持本地自检</li>
-<li>每批跑第 7 节验收，V5 用最新分区抽 50 条过 L0-L6</li>
+<li><strong>Phase 1 = 格式修复层</strong>（一次 ETL 改动）：P0-1 chat 分支（CTE+INSERT）+ P0-2 responses UDF + P1-3/4a/5 三处小改 → 产出结构合法全量表，跑格式层验收 V1-V5</li>
+<li><strong>Phase 2 = 质量筛选层</strong>：UDAF 加 glm 模式 + 三源适配 + <code>_qualified</code> 表；或方案 B 留本地跑</li>
+<li>每层独立验收、独立迭代；两层产出都可查（对照排查同 opus 的 dwd vs app_opus_day 关系）</li>
 </ol>
 <hr />
-<p><em>证据存档（本文所有实测 SQL 可在新分区复跑）：source×last_role 矩阵、effort 分布、空数组统计、stg response_body 结构采样、dwd/app ETL 源文件（etl/app/app_macaron_relay_stack_glm_day.sql、etl/dwd/dwd_macaron_relay_stack_chat_completions_total_day.sql）。基线分区 20260830，生成于 2026-08-31。</em></p>
+<p><em>证据存档：source×last_role 矩阵、effort 分布、空数组统计、tools 空值归因（n_tool_use 交叉）、空 messages 6 条明细、stg response_body 结构采样、dwd/app ETL 源文件（etl/app/app_macaron_relay_stack_glm_day.sql、etl/dwd/dwd_macaron_relay_stack_chat_completions_total_day.sql）。基线分区 20260830，v2 生成于 2026-08-31。</em></p>
 
 <footer>
-  <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>。</p>
+  <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿 v2。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>。</p>
   <p style="margin-top:8px;">san-tian 的技术 blog · <a href="index.html">返回目录</a></p>
 </footer>
 

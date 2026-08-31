@@ -104,8 +104,8 @@
   <p class="subtitle">LLM serving · PD 分离 · 源码调研 · 部署复盘</p>
 
   <a class="post" href="app-glm-day-fix-plan.html">
-    <div class="title">[DRAFT] app_glm_day 修复方案：GLM SFT 训练数据表的闭环 / 契约 / 筛选六查六修（评审稿）</div>
-    <div class="desc">数仓 <code>app_macaron_relay_stack_glm_day</code>（GLM-5.2 SFT 训练数据表）体检与修复方案。20260830 快照 69,330 条实测：chat_completions 源 65,691 条仅 19 条（0.03%）以 assistant 收尾（ETL 取了 <code>req_messages</code> 没拼 <code>resp_choices</code>，训练样本有问无答）、responses 源 546 条 0 条闭环（<code>resp_output</code> 取了没用）、64% tools 空数组、chat 源 100% reasoning_effort 非法（medium vs 契约 Literal["high","max"]）、无 18 条款达标筛选。6 个问题各附证据 / 根因 / 具体 SQL 或 UDF 修法 / 验收标准（对照本地 L0-L6 校验器实测报错），P0 两个为「缺模型回复」的数据残缺 bug，P1 三个为格式契约不对齐，P2 为达标筛选二期方案。证据含 stg 原始 response_body 结构采样、dwd/app ETL 源码行级定位、全分区 SQL 统计。markdown 源文件见同仓 app-glm-day-fix-plan.md。</div>
+    <div class="title">[DRAFT] app_glm_day 修复方案：先格式修复、再质量筛选，每个问题定归属（闭环 / 契约 / 筛选，评审稿 v2）</div>
+    <div class="desc">数仓 <code>app_macaron_relay_stack_glm_day</code>（GLM-5.2 SFT 训练数据表）体检与两层重构修复方案。格式层产出结构合法的完整对话（拼 resp、契约对齐、造不出不产出），筛选层 18 条款淘汰无价值记录。20260830 快照 69,330 条实测：chat_completions 源仅 0.03% 以 assistant 收尾（ETL 没拼 resp_choices，训练样本有问无答）、responses 源 0 条闭环、64% tools 空数组（归因实测 99.4% 是无工具纯对话流量，归筛选层）、6 条空 messages 逐条归因（previous_response_id 续话 4 条 + 畸形 body 2 条）。分类判据：数据在但表达错 = 格式修复；数据在表达对但无训练价值 = 质量筛选；数据不在构造不出 = 格式层丢弃。P0 两个为「缺模型回复」的格式 bug，附 SQL/UDF 修法与分层验收标准。markdown 源文件见同仓 app-glm-day-fix-plan.md。</div>
     <div class="meta">
       <span class="tag agent">🤖 AI-assisted</span>
       <span class="tag">MaxCompute</span>
