@@ -210,19 +210,18 @@
 <section class="slide">
 <div class="inner">
   <div class="kicker">背景 · DCP 1/5：为什么有了 TP 还要它（本文首次详细解释）</div>
-  <h2>TP 切「头」，DCP 切「序列」——KV cache 是数据，不是权重</h2>
+  <h2>高 TP 下 KV 头不够分会被「复制」，DCP 按序列切消除复制</h2>
   <div class="grid2">
-    <div class="mini warn"><b>澄清：KV cache 不是权重，是数据</b>模型权重（参数矩阵）固定大小，只有 TP 切它；<b>KV cache 是运行时产生的 K/V 向量（数据）</b>，大小 = 序列 × 每 token 字节，随序列<b>线性</b>增长。它有两个维度可切：「头」和「序列」。</div>
-    <div class="mini ok"><b>TP 切「头」，DCP 切「序列」</b>TP 其实<b>也切 KV cache</b>，但只按<b>头</b>切（每卡 <code>头数/tp</code> 个头），「序列」这条轴每张卡都存完整；长上下文吃爆的是「序列」，只有 DCP 切它——每卡只存 <code>序列/dcp</code> 的 token。</div>
+    <div class="mini warn"><b>KV cache 是数据，但高 TP 下会被复制</b>每个 token 的 K/V 是独一无二的（数据本身固定）；但高 TP 下它会<b>被复制多份</b>——占用 = <b>数据本身 × 复制份数</b>。这就是省显存的突破口。</div>
+    <div class="mini"><b>为什么复制？头不够分</b>TP 按「头」切 KV，但 GQA 模型的 KV 头很少（如 4 个）。TP=8 分 4 个头 → 分不开，只能<b>每头复制 2 份</b>（复制倍数 = TP ÷ 头数 = 2）。</div>
   </div>
-  <table class="tbl">
-    <tr><th>并行方式</th><th>切什么</th><th>对 KV cache 的影响</th></tr>
-    <tr><td><b>DP</b> 数据并行</td><td>不切模型不切序列，每卡跑完整模型服务不同请求</td><td>不省单请求显存，只加吞吐</td></tr>
-    <tr><td><b>PP</b> 流水线并行</td><td>模型按「层」切几段</td><td>层内 KV 只落在该层所在卡</td></tr>
-    <tr><td><b>TP</b> 张量并行</td><td>模型权重按「头 / 隐藏维」切</td><td>KV 按<b>头</b>切：每卡 <code>头数/tp</code> 个头，但<b>整条序列仍在每张卡上</b></td></tr>
-    <tr><td><b>DCP</b> 数据/上下文并行</td><td>切<b>序列（context）维度</b></td><td>KV 按<b>序列</b>切：每卡只存 <code>1/dcp</code> 的 token</td></tr>
-  </table>
-  <div class="footnote"><b>每卡 KV cache 公式</b>：只有 TP = <code>(头数/tp) × 完整序列 × head_dim × 2 × 字节</code>；加 DCP = <code>头数 × (序列/dcp) × head_dim × 2 × 字节</code>。TP 和 DCP 正交——TP 切头、DCP 切序列，长上下文必须两个一起上。这就是为什么 dcp&gt;1 才需要那套「归属 + 行号换算」。</div>
+  <pre class="code"><span class="cmt"># 无 DCP（TP8，4 个 KV 头）：头不够分 → 复制</span>
+rank0、rank1 → 各存一份【KV头1 的全部 token】   <span class="bad">← 重复！</span>
+rank2、rank3 → 各存一份【KV头2 的全部 token】   <span class="bad">← 重复！</span>
+<span class="cmt"># 开 DCP：改按「序列」切，每卡存独一无二的序列段</span>
+rank0 → 【KV头1 的前半段 token】               <span class="add">← 不重复</span>
+rank1 → 【KV头1 的后半段 token】               <span class="add">← 不重复</span></pre>
+  <div class="footnote"><b>DCP 的解法</b>：把「按头切」换成「按序列切」，每卡存<b>独一无二的一段序列</b>，复制份数从 2 降到 1——无 DCP = 数据×2，开 DCP = 数据×1。省的不是「数据本身」（死的），是「复制的那份冗余」。<b>两种情形</b>：KV 头数 ≥ TP（无复制）→ DCP 不省内存、只降延迟；KV 头数 &lt; TP（GQA，复制）→ DCP 消除复制、容量翻倍。降延迟见 P7。</div>
 </div>
 </section>
 
@@ -254,20 +253,20 @@ safe_loc = tl.where(is_valid, loc, 0) // DCP_WORLD_SIZE                        <
 <section class="slide">
 <div class="inner">
   <div class="kicker">背景 · DCP 3/5：收益与代价</div>
-  <h2>每卡显存 ÷ dcp，代价是跨卡取 KV</h2>
+  <h2>消除复制 → 容量翻倍 + 解码加速；代价是跨卡通信</h2>
   <div class="grid2">
-    <div class="mini ok"><b>收益 · 说法 A（固定序列看每卡）</b>服务一条 L token 序列：无 DCP 一卡存 <code>L×每token字节</code>；DCP=4 每卡只存 <code>L/4×每token字节</code> → <b>每卡显存 ÷ 4</b></div>
-    <div class="mini ok"><b>收益 · 说法 B（固定每卡看总量）</b>每卡本地 buffer 仍是 <code>size</code> 行，但全局编号空间是 <code>[0, size×dcp)</code> → 4 卡合计能存 <b>size×4</b> 个 token。代码证据：<code>maybe_detect_oob(loc, 0, (size+page_size)×attn_dcp_size)</code></div>
+    <div class="mini ok"><b>收益 1 · 显存：消除复制</b>高 TP + 少 KV 头时，无 DCP 的 KV 被复制（复制倍数 = TP ÷ 头数）；DCP 按序列切消除复制。实测（8×昇腾，Qwen3.6-27B，TP8）：全机 KV 容量 1.32M → 2.61M token（<b>1.98 倍</b>）</div>
+    <div class="mini ok"><b>收益 2 · 延迟：解码加速</b>每卡只算自己那半序列的 attention → 每 token 时间（TPOT）下降：64K 时 −13.8%，128K 时 −22.4%，250K 时 <b>−31.2%</b>（上下文越长越赚）</div>
   </div>
   <div class="chips">
     <span class="chip">📏 DSA indexer KV = <b>656 字节/token</b>（512 fp8 + 16 scale + 128 rope）</span>
-    <span class="chip">100 万 token → 656 MB；DCP=4 → 每卡 164 MB</span>
+    <span class="chip">本文的 bug 就在这条 indexer KV 的 DCP 写入路径上</span>
   </div>
   <div class="grid2">
-    <div class="mini warn"><b>代价 · 通信</b>attention 是「每个 query 看所有 token」的全对全——序列切到 4 卡后，每卡都要拿到<b>别的卡</b>手里的 KV</div>
+    <div class="mini warn"><b>代价 · 通信</b>attention 是「每个 query 看所有 token」的全对全——序列切到多卡后，每卡都要拿到<b>别的卡</b>手里的 KV（all-gather + all-reduce，见 P8）</div>
     <div class="mini ok"><b>DSA 的化解</b>DSA 本就是稀疏 attention：先用 656B 压缩 KV 让 indexer 选出 top-k，<b>只把这 top-k 个 token 的 KV 跨卡取来</b>，不用传全量——通信开销被稀疏性压下去</div>
   </div>
-  <div class="footnote">这也是为什么这条 656B「indexer KV」的写路径如此关键：它写错了（越界），indexer 选错 token，整条稀疏 attention 链就乱——与本文 bug 直接相关。</div>
+  <div class="footnote">关键澄清：<b>数据本身（每个 token 的 K/V）是死的，减不掉；DCP 省的是「复制的那份冗余」</b>——无复制（KV 头数 ≥ TP）时只降延迟不省显存，有复制（KV 头数 &lt; TP）时才省显存。这也是为什么这条 656B indexer KV 的写路径如此关键：写错了 indexer 选错 token，整条稀疏 attention 链就乱。</div>
 </div>
 </section>
 
