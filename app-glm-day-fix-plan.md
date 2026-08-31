@@ -1,5 +1,6 @@
-# app_macaron_relay_stack_glm_day 修复方案（评审稿 v4）
+# app_macaron_relay_stack_glm_day 修复方案（评审稿 v5）
 
+> **v5 变更**：**格式层确认表置于文档最前**（Phase 1 签核清单：7 个问题 × 现象/根因/修法/验收）+ **逐问题「现状 vs 修复后」示例**（现状为 0830 实测结构，修复后参照 messages 源已达成形态）；归属总表按层排序（格式 → 筛选 → 交付）。
 > **v4 变更**：**归属总表前置为文档首节并自包含**（最小背景 + 三问速查 + 逐条判定依据），理论上只看这张表即可完成评审，其余章节为深究材料。
 > **v3 变更**：按执行顺序重排——第一部分格式修复（先做）→ 第二部分质量筛选（后做）→ 第三部分交付。
 >
@@ -7,7 +8,117 @@
 
 ---
 
-## 问题归属总表（人工 review 版）——只看这一节即可完成评审
+## 格式层问题确认表（Phase 1，先确认这一层）
+
+**本次确认对象：格式修复层的 7 个问题**。确认通过即可开工 Phase 1（产出结构合法全量表）；质量筛选是 Phase 2，随后确认。逐行过「根因」「修法」两列，有异议报行号；**每个问题的现状 vs 修复后示例见下方「逐问题示例」**；修法 SQL / 边界说明 / 证据在对应 §。
+
+| # | 问题 | 现象（0830 实测） | 根因（ETL 现状一行） | 修法（一行） | 修后验收 | § |
+|---|---|---|---|---|---|---|
+| P0-1 | chat 源缺 assistant 回复 | 65,691 条仅 19 条（0.03%）以 assistant 结尾 | CTE 没取 `resp_choices`，messages 只用请求侧历史 | CTE 取 resp_choices + `GET_JSON_OBJECT('$[0].message')` 拼接 | V1 闭环率 ≈100% | §3 |
+| P0-2 | responses 源缺 assistant 回复 | 546 条 0 条闭环 | `final_resp_output` 取了但 INSERT 从未用（注释写了没做） | 新 UDF `macaron_responses_to_glm_sft`（input+instructions+output → 完整 messages） | V1 同上 | §4 |
+| — | 续话客户端碎片（previous_response_id） | 4 条 messages=[]（n_turns 75/288/212/33） | 历史在服务端、请求只有增量，MAX_BY 拿不到全量 | UDF 碎片检测（input 消息数 vs session 轮数失配 → NULL 不产出） | V3 空 messages=0 | §4 规则 4 |
+| P1-3 | reasoning_effort 值域非法 | chat 源 100% ∉ {high,max}（COALESCE 兜底 'medium'） | 写死非法值，契约 `Literal["high","max"]` | `CASE WHEN IN('high','max') THEN 原值 ELSE 'max'` | V2 非法值=0 | §5 |
+| P1-4a | tools 空数组 | 44,395 条（64%）`tools=[]`，L0-L6 直接 FATAL | `ELSE JSON_ARRAY()` 把「无工具」表达成非法形态 | `ELSE NULL`（空则省略键）+ MAX_BY 条件化（取最后一次**带** tools 的请求） | V3 `[]`=0 | §6 |
+| P1-5 | 空 messages 记录 | 6 条（4 续话 + 2 chat 畸形 body） | `ELSE JSON_ARRAY()` 兜底产出废记录 | 分支 WHERE 丢弃，不产出 | V3 空 messages=0 | §7 |
+| — | 最后请求失败（无应答） | 末尾请求 resp 为空（量待修后对账 V4） | MAX_BY 会取到失败请求，历史+应答缺一半 | 行级 WHERE 只聚合有应答的请求；全失败 session 自然消失 | V4 行数对账可解释 | §3 修法① |
+| P1-4b | 无工具纯对话 | 空 tools 里 99.4%（43,313+708+369 条）整个 session 零工具调用（n_tool_use=0/null） | ①✓ 客户端真没带 ②✓ 修完 P1-4a 后表达对（省略键）③✗ 纯聊天无 agentic 训练价值。**不在格式层 WHERE 掉的理由**：格式层不做事价值判断，且行数对账解释不了「为什么少了 44k」 | **筛选** | 18 条款 2.x/3.x 淘汰 | §10 |
+
+**格式层总验收**（§8）：V1 三源闭环率 ≈100% / V2 effort 合法率 100% / V3 空数组与空记录 = 0 / V4 行数下降量可解释（无应答 session + 续话碎片）/ V5 本地 L0-L6 抽检 50 条，四类 FATAL 归零。
+
+### 逐问题示例：现状（错的）vs 修复后（对的）
+
+> 现状样例为 0830 快照实测结构；**修复后样例的参照物 = messages 源**（3,093 条，96.8% assistant 结尾——该源走 `macaron_anthropic_to_glm_sft` UDF 已正确拼装），chat/responses 两源修完应达到同等形态。每个示例只展示与该问题相关的增量。筛选层（Phase 2）「哪类记录被淘汰」的示例在 Phase 2 确认时再补。
+
+**P0-1 · chat 源缺 assistant 回复**（65,691 条仅 19 条闭环；24,417 条 user 结尾 + 18,440 条 tool 结尾）
+
+现状 ❌（对话到工具结果就断，模型的回答在 `resp_choices` 里没拼）：
+
+```json
+"messages": [
+  ...,
+  {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "<文件内容>"}
+]
+```
+
+修复后 ✅（拼接 `resp_choices[0].message`，结构为 stg 实测 response_body）：
+
+```json
+"messages": [
+  ...,
+  {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "<文件内容>"},
+  {"role": "assistant", "reasoning_content": "先扫入口函数…", "content": "第 42 行的解引用没有判空，需要加空值检查"}
+]
+```
+
+**P0-2 · responses 源缺 assistant 回复**（546 条 0 条闭环）
+
+现状 ❌（input 拼了、output 没拼——ETL 注释写了 `[assistant_response]` 但代码没做）：
+
+```json
+"messages": [
+  {"role": "system", "content": "You are a coding agent running in the Codex CLI…"},
+  {"role": "user", "content": "修复这个失败的测试"}
+]
+```
+
+修复后 ✅（`resp_output` 逐项转一条 assistant：reasoning→reasoning_content、message→content、function_call→tool_calls）：
+
+```json
+"messages": [
+  {"role": "system", "content": "You are a coding agent running in the Codex CLI…"},
+  {"role": "user", "content": "修复这个失败的测试"},
+  {"role": "assistant", "reasoning_content": "先跑一遍测试复现…", "content": "失败原因是…",
+   "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "run_tests", "arguments": "{}"}}]}
+]
+```
+
+**续话客户端碎片**（4 条 messages=[]，n_turns 75/288/212/33）
+
+现状 ❌（288 轮的大 session 只捞出空数组；隐蔽形态是 1-2 条消息的「结构合法残片」）：
+
+```json
+{"session_id": "01a01e6d-…690a", "messages": [], "chat_template_kwargs": {"reasoning_effort": "medium"}}
+```
+
+修复后 ✅（构造不出完整对话 → 整行不产出，不是修数据）：
+
+```text
+（该 session 从表中消失——UDF 碎片检测：input 消息数 vs session 轮数失配 → 返回 NULL）
+```
+
+**P1-3 · reasoning_effort 值域非法**（chat 源 100% 非法）
+
+```json
+现状 ❌: "chat_template_kwargs": {"reasoning_effort": "medium"}   ← COALESCE 兜底，L0-L6 报 literal_error
+修复后 ✅: "chat_template_kwargs": {"reasoning_effort": "max"}    ← 请求原值 high/max 保留，其余归 max
+```
+
+**P1-4a · tools 空数组**（44,395 条，64%）
+
+```json
+现状 ❌: {"messages": [...], "tools": [], "chat_template_kwargs": {...}}   ← 空数组 = L0-L6 FATAL
+修复后 ✅: {"messages": [...], "chat_template_kwargs": {...}}               ← 无工具 = 省略键（99.4% 本来就没带）
+```
+
+**P1-5 · 空 messages 记录**（6 条）
+
+```json
+现状 ❌: {"session_id": "01a00759-…95a3", "messages": [], "tools": [...], "chat_template_kwargs": {...}}   ← 废记录照样产出
+修复后 ✅: （WHERE 过滤，整行不产出）
+```
+
+**最后请求失败**（无应答；量待修后对账 V4）
+
+```text
+现状 ❌: session 有 3 次请求，第 3 次失败（resp 空）
+        → MAX_BY(req_messages, ts) 取第 3 次的历史，但它的 resp 拼不上 → 缺口
+修复后 ✅: 行级 WHERE 排除无应答请求 → 取第 2 次请求 + 第 2 次应答
+        → 少最后一轮，但结构完整闭环；全 session 失败 → 整行消失
+```
+
+---
+
+## 问题归属总表（全局 review）——三问判定，按层排序
 
 **最小背景**（读懂下表所需）：
 
@@ -25,7 +136,7 @@
 | ✓ | ✓ | ✗ | **筛选·滤** |
 | ✓ | ✓ | ✓ | 通过，进交付 |
 
-**归属总表**（现象与数字均为 0830 快照实测，可复跑核对；判定依据 = 三问的具体答案；§ 列为深究章节）：
+**归属总表**（现象与数字均为 0830 快照实测，可复跑核对；判定依据 = 三问的具体答案；§ 列为深究章节；**行序按层排列：格式 7 → 筛选 3 → 交付 1**）：
 
 | # | 问题 | 现象（0830 实测） | 判定依据（三问怎么答的） | 归属 | 动作 | § |
 |---|---|---|---|---|---|---|
@@ -34,7 +145,6 @@
 | — | 续话客户端碎片（previous_response_id） | 4 条 messages=[] 且 n_turns 75/288/212/33；隐蔽形态是 1-2 条消息的结构合法残片 | ①✗ 对话历史在服务端（response ID 链式），请求日志只有增量，MAX_BY 单请求设计拿不到全量。注：理论上可全量缝合（对齐本地 session_to_trace.py），v1 不做（responses 源仅占 0.8%） | **格式层丢弃** | UDF 碎片检测（input 消息数 vs session 轮数失配 → NULL） | §4 规则 4 + §7 |
 | P1-3 | reasoning_effort 值域非法 | chat 源 100% 非法（COALESCE 兜底 'medium'），契约 Literal["high","max"] | ①✓ 请求真实 effort 在 dwd ②✗ 写死非法值；可无损映射（high/max 保留、其余归 max） | **格式** | CASE 保留合法值、ELSE 'max' | §5 |
 | P1-4a | tools 表达成 `[]` | 44,395 条（64%）；L0-L6 对 `[]` FATAL、对省略键 OK | ①✓ 「无工具」是事实 ②✗ `ELSE JSON_ARRAY()` 把「无」表达成了非法形态（合法表达是省略键） | **格式** | `ELSE NULL` + MAX_BY 条件化（2 条中途带工具的边缘 case） | §6 |
-| P1-4b | 无工具纯对话 | 空 tools 里 99.4%（43,313+708+369 条）整个 session 零工具调用（n_tool_use=0/null） | ①✓ 客户端真没带 ②✓ 修完 P1-4a 后表达对（省略键）③✗ 纯聊天无 agentic 训练价值。**不在格式层 WHERE 掉的理由**：格式层不做事价值判断，且行数对账解释不了「为什么少了 44k」 | **筛选** | 18 条款 2.x/3.x 淘汰 | §10 |
 | P1-5 | 空 messages | 6 条：4 条续话（上表）+ 2 条 chat 畸形（session_id 16 位 hex 非 UUID，疑 body 截断/解析失败） | ①✗ input 空 / req_messages 非法，构造不出 | **格式层丢弃** | WHERE 不产出（不硬造） | §7 |
 | — | 未闭环尾部（session 结束在 tool_call 无结果） | P0-1 修完后的残余（最后一轮 tool_call、客户端未续）；数量待修后实测 | ①✓ ②✓ 拼完 resp 后结构完整（有 assistant）③✗ 对话没走完，作训练样本不完整 | **筛选** | 18 条款 4.x 淘汰 | §9 + §11 |
 | — | 最后请求失败（无应答） | 末尾请求 resp 为空；全失败 session 数量待修后对账（验收 V4） | ①部分✓ 最后交换缺一半，但前一次有效交换在 → 换取法；全 session 失败 → ①✗ 丢弃 | **格式**（换取法）；全失败 → 格式层丢弃 | 行级 WHERE 过滤无应答请求 | §3 修法① |

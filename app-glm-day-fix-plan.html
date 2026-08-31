@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>app_glm_day 修复方案：归属总表前置，只看一表即可评审（评审稿 v4）</title>
+<title>app_glm_day 修复方案：格式层确认表前置 + 逐问题现状/修复后示例（评审稿 v5）</title>
 <style>
   :root {
     --bg: #fafaf9;
@@ -71,20 +71,170 @@
 <body>
 <div class="container">
 <header class="hero">
-  <h1>app_glm_day 修复方案：归属总表前置，只看一表即可评审（评审稿 v4）</h1>
-  <div class="subtitle">文档首节为自包含的问题归属总表（最小背景 + 三问速查「数据在？/表达对？/有价值？」+ 逐条判定依据引用实测数字），理论上只看这张表即可完成评审；其后按执行顺序：第一部分格式修复 → 第二部分质量筛选 → 第三部分交付。statis_day=20260830 快照 69,330 条实测</div>
+  <h1>app_glm_day 修复方案：格式层确认表前置 + 逐问题现状/修复后示例（评审稿 v5）</h1>
+  <div class="subtitle">文档最前是格式层确认表（Phase 1 签核清单：7 个问题 × 现象/根因/修法/验收）+ 每个问题的「现状（错的）vs 修复后（对的）」示例；其后归属总表（三问判定，按层排序）→ 第一部分格式修复 → 第二部分质量筛选 → 第三部分交付。statis_day=20260830 快照 69,330 条实测</div>
   <div class="meta">
     <span>📝 本文主要由 AI agent 完成</span>
     <span>📊 MaxCompute 20260830 快照</span>
   </div>
 </header>
 <blockquote>
-<p><strong>v4 变更</strong>：<strong>归属总表前置为文档首节并自包含</strong>（最小背景 + 三问速查 + 逐条判定依据），理论上只看这张表即可完成评审，其余章节为深究材料。
+<p><strong>v5 变更</strong>：<strong>格式层确认表置于文档最前</strong>（Phase 1 签核清单：7 个问题 × 现象/根因/修法/验收）+ <strong>逐问题「现状 vs 修复后」示例</strong>（现状为 0830 实测结构，修复后参照 messages 源已达成形态）；归属总表按层排序（格式 → 筛选 → 交付）。
+<strong>v4 变更</strong>：<strong>归属总表前置为文档首节并自包含</strong>（最小背景 + 三问速查 + 逐条判定依据），理论上只看这张表即可完成评审，其余章节为深究材料。
 <strong>v3 变更</strong>：按执行顺序重排——第一部分格式修复（先做）→ 第二部分质量筛选（后做）→ 第三部分交付。</p>
 <p><strong>一句话结论</strong>：这张表目前是"未闭环、未对齐、未筛选"的中间产物。修复分两层：<strong>格式修复层</strong>（每条产出记录 = 结构合法的完整对话，造不出的不产出）→ <strong>质量筛选层</strong>（从合法记录里选有训练价值的，18 条款）。</p>
 </blockquote>
 <hr />
-<h2>问题归属总表（人工 review 版）——只看这一节即可完成评审</h2>
+<h2>格式层问题确认表（Phase 1，先确认这一层）</h2>
+<p><strong>本次确认对象：格式修复层的 7 个问题</strong>。确认通过即可开工 Phase 1（产出结构合法全量表）；质量筛选是 Phase 2，随后确认。逐行过「根因」「修法」两列，有异议报行号；<strong>每个问题的现状 vs 修复后示例见下方「逐问题示例」</strong>；修法 SQL / 边界说明 / 证据在对应 §。</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>问题</th>
+<th>现象（0830 实测）</th>
+<th>根因（ETL 现状一行）</th>
+<th>修法（一行）</th>
+<th>修后验收</th>
+<th>§</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P0-1</td>
+<td>chat 源缺 assistant 回复</td>
+<td>65,691 条仅 19 条（0.03%）以 assistant 结尾</td>
+<td>CTE 没取 <code>resp_choices</code>，messages 只用请求侧历史</td>
+<td>CTE 取 resp_choices + <code>GET_JSON_OBJECT('$[0].message')</code> 拼接</td>
+<td>V1 闭环率 ≈100%</td>
+<td>§3</td>
+</tr>
+<tr>
+<td>P0-2</td>
+<td>responses 源缺 assistant 回复</td>
+<td>546 条 0 条闭环</td>
+<td><code>final_resp_output</code> 取了但 INSERT 从未用（注释写了没做）</td>
+<td>新 UDF <code>macaron_responses_to_glm_sft</code>（input+instructions+output → 完整 messages）</td>
+<td>V1 同上</td>
+<td>§4</td>
+</tr>
+<tr>
+<td>—</td>
+<td>续话客户端碎片（previous_response_id）</td>
+<td>4 条 messages=[]（n_turns 75/288/212/33）</td>
+<td>历史在服务端、请求只有增量，MAX_BY 拿不到全量</td>
+<td>UDF 碎片检测（input 消息数 vs session 轮数失配 → NULL 不产出）</td>
+<td>V3 空 messages=0</td>
+<td>§4 规则 4</td>
+</tr>
+<tr>
+<td>P1-3</td>
+<td>reasoning_effort 值域非法</td>
+<td>chat 源 100% ∉ {high,max}（COALESCE 兜底 'medium'）</td>
+<td>写死非法值，契约 <code>Literal["high","max"]</code></td>
+<td><code>CASE WHEN IN('high','max') THEN 原值 ELSE 'max'</code></td>
+<td>V2 非法值=0</td>
+<td>§5</td>
+</tr>
+<tr>
+<td>P1-4a</td>
+<td>tools 空数组</td>
+<td>44,395 条（64%）<code>tools=[]</code>，L0-L6 直接 FATAL</td>
+<td><code>ELSE JSON_ARRAY()</code> 把「无工具」表达成非法形态</td>
+<td><code>ELSE NULL</code>（空则省略键）+ MAX_BY 条件化（取最后一次<strong>带</strong> tools 的请求）</td>
+<td>V3 <code>[]</code>=0</td>
+<td>§6</td>
+</tr>
+<tr>
+<td>P1-5</td>
+<td>空 messages 记录</td>
+<td>6 条（4 续话 + 2 chat 畸形 body）</td>
+<td><code>ELSE JSON_ARRAY()</code> 兜底产出废记录</td>
+<td>分支 WHERE 丢弃，不产出</td>
+<td>V3 空 messages=0</td>
+<td>§7</td>
+</tr>
+<tr>
+<td>—</td>
+<td>最后请求失败（无应答）</td>
+<td>末尾请求 resp 为空（量待修后对账 V4）</td>
+<td>MAX_BY 会取到失败请求，历史+应答缺一半</td>
+<td>行级 WHERE 只聚合有应答的请求；全失败 session 自然消失</td>
+<td>V4 行数对账可解释</td>
+<td>§3 修法①</td>
+</tr>
+<tr>
+<td>P1-4b</td>
+<td>无工具纯对话</td>
+<td>空 tools 里 99.4%（43,313+708+369 条）整个 session 零工具调用（n_tool_use=0/null）</td>
+<td>①✓ 客户端真没带 ②✓ 修完 P1-4a 后表达对（省略键）③✗ 纯聊天无 agentic 训练价值。<strong>不在格式层 WHERE 掉的理由</strong>：格式层不做事价值判断，且行数对账解释不了「为什么少了 44k」</td>
+<td><strong>筛选</strong></td>
+<td>18 条款 2.x/3.x 淘汰</td>
+<td>§10</td>
+</tr>
+</tbody>
+</table>
+<p><strong>格式层总验收</strong>（§8）：V1 三源闭环率 ≈100% / V2 effort 合法率 100% / V3 空数组与空记录 = 0 / V4 行数下降量可解释（无应答 session + 续话碎片）/ V5 本地 L0-L6 抽检 50 条，四类 FATAL 归零。</p>
+<h3>逐问题示例：现状（错的）vs 修复后（对的）</h3>
+<blockquote>
+<p>现状样例为 0830 快照实测结构；<strong>修复后样例的参照物 = messages 源</strong>（3,093 条，96.8% assistant 结尾——该源走 <code>macaron_anthropic_to_glm_sft</code> UDF 已正确拼装），chat/responses 两源修完应达到同等形态。每个示例只展示与该问题相关的增量。筛选层（Phase 2）「哪类记录被淘汰」的示例在 Phase 2 确认时再补。</p>
+</blockquote>
+<p><strong>P0-1 · chat 源缺 assistant 回复</strong>（65,691 条仅 19 条闭环；24,417 条 user 结尾 + 18,440 条 tool 结尾）</p>
+<p>现状 ❌（对话到工具结果就断，模型的回答在 <code>resp_choices</code> 里没拼）：</p>
+<pre><code class="language-json">&quot;messages&quot;: [
+  ...,
+  {&quot;role&quot;: &quot;tool&quot;, &quot;tool_call_id&quot;: &quot;c1&quot;, &quot;name&quot;: &quot;read_file&quot;, &quot;content&quot;: &quot;&lt;文件内容&gt;&quot;}
+]
+</code></pre>
+<p>修复后 ✅（拼接 <code>resp_choices[0].message</code>，结构为 stg 实测 response_body）：</p>
+<pre><code class="language-json">&quot;messages&quot;: [
+  ...,
+  {&quot;role&quot;: &quot;tool&quot;, &quot;tool_call_id&quot;: &quot;c1&quot;, &quot;name&quot;: &quot;read_file&quot;, &quot;content&quot;: &quot;&lt;文件内容&gt;&quot;},
+  {&quot;role&quot;: &quot;assistant&quot;, &quot;reasoning_content&quot;: &quot;先扫入口函数…&quot;, &quot;content&quot;: &quot;第 42 行的解引用没有判空，需要加空值检查&quot;}
+]
+</code></pre>
+<p><strong>P0-2 · responses 源缺 assistant 回复</strong>（546 条 0 条闭环）</p>
+<p>现状 ❌（input 拼了、output 没拼——ETL 注释写了 <code>[assistant_response]</code> 但代码没做）：</p>
+<pre><code class="language-json">&quot;messages&quot;: [
+  {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;You are a coding agent running in the Codex CLI…&quot;},
+  {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;修复这个失败的测试&quot;}
+]
+</code></pre>
+<p>修复后 ✅（<code>resp_output</code> 逐项转一条 assistant：reasoning→reasoning_content、message→content、function_call→tool_calls）：</p>
+<pre><code class="language-json">&quot;messages&quot;: [
+  {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;You are a coding agent running in the Codex CLI…&quot;},
+  {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;修复这个失败的测试&quot;},
+  {&quot;role&quot;: &quot;assistant&quot;, &quot;reasoning_content&quot;: &quot;先跑一遍测试复现…&quot;, &quot;content&quot;: &quot;失败原因是…&quot;,
+   &quot;tool_calls&quot;: [{&quot;id&quot;: &quot;c1&quot;, &quot;type&quot;: &quot;function&quot;, &quot;function&quot;: {&quot;name&quot;: &quot;run_tests&quot;, &quot;arguments&quot;: &quot;{}&quot;}}]}
+]
+</code></pre>
+<p><strong>续话客户端碎片</strong>（4 条 messages=[]，n_turns 75/288/212/33）</p>
+<p>现状 ❌（288 轮的大 session 只捞出空数组；隐蔽形态是 1-2 条消息的「结构合法残片」）：</p>
+<pre><code class="language-json">{&quot;session_id&quot;: &quot;01a01e6d-…690a&quot;, &quot;messages&quot;: [], &quot;chat_template_kwargs&quot;: {&quot;reasoning_effort&quot;: &quot;medium&quot;}}
+</code></pre>
+<p>修复后 ✅（构造不出完整对话 → 整行不产出，不是修数据）：</p>
+<pre><code class="language-text">（该 session 从表中消失——UDF 碎片检测：input 消息数 vs session 轮数失配 → 返回 NULL）
+</code></pre>
+<p><strong>P1-3 · reasoning_effort 值域非法</strong>（chat 源 100% 非法）</p>
+<pre><code class="language-json">现状 ❌: &quot;chat_template_kwargs&quot;: {&quot;reasoning_effort&quot;: &quot;medium&quot;}   ← COALESCE 兜底，L0-L6 报 literal_error
+修复后 ✅: &quot;chat_template_kwargs&quot;: {&quot;reasoning_effort&quot;: &quot;max&quot;}    ← 请求原值 high/max 保留，其余归 max
+</code></pre>
+<p><strong>P1-4a · tools 空数组</strong>（44,395 条，64%）</p>
+<pre><code class="language-json">现状 ❌: {&quot;messages&quot;: [...], &quot;tools&quot;: [], &quot;chat_template_kwargs&quot;: {...}}   ← 空数组 = L0-L6 FATAL
+修复后 ✅: {&quot;messages&quot;: [...], &quot;chat_template_kwargs&quot;: {...}}               ← 无工具 = 省略键（99.4% 本来就没带）
+</code></pre>
+<p><strong>P1-5 · 空 messages 记录</strong>（6 条）</p>
+<pre><code class="language-json">现状 ❌: {&quot;session_id&quot;: &quot;01a00759-…95a3&quot;, &quot;messages&quot;: [], &quot;tools&quot;: [...], &quot;chat_template_kwargs&quot;: {...}}   ← 废记录照样产出
+修复后 ✅: （WHERE 过滤，整行不产出）
+</code></pre>
+<p><strong>最后请求失败</strong>（无应答；量待修后对账 V4）</p>
+<pre><code class="language-text">现状 ❌: session 有 3 次请求，第 3 次失败（resp 空）
+        → MAX_BY(req_messages, ts) 取第 3 次的历史，但它的 resp 拼不上 → 缺口
+修复后 ✅: 行级 WHERE 排除无应答请求 → 取第 2 次请求 + 第 2 次应答
+        → 少最后一轮，但结构完整闭环；全 session 失败 → 整行消失
+</code></pre>
+<hr />
+<h2>问题归属总表（全局 review）——三问判定，按层排序</h2>
 <p><strong>最小背景</strong>（读懂下表所需）：</p>
 <ul>
 <li><strong>对象</strong>：<code>app_macaron_relay_stack_glm_day</code>（GLM-5.2 SFT 训练数据表，数仓 ETL 产物）。statis_day=20260830 快照 69,330 条 = chat_completions 65,691 + messages 3,093 + responses 546（全量快照、LIFECYCLE 3 天，数字随快照增长）</li>
@@ -129,7 +279,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>归属总表</strong>（现象与数字均为 0830 快照实测，可复跑核对；判定依据 = 三问的具体答案；§ 列为深究章节）：</p>
+<p><strong>归属总表</strong>（现象与数字均为 0830 快照实测，可复跑核对；判定依据 = 三问的具体答案；§ 列为深究章节；<strong>行序按层排列：格式 7 → 筛选 3 → 交付 1</strong>）：</p>
 <table>
 <thead>
 <tr>
@@ -187,15 +337,6 @@
 <td><strong>格式</strong></td>
 <td><code>ELSE NULL</code> + MAX_BY 条件化（2 条中途带工具的边缘 case）</td>
 <td>§6</td>
-</tr>
-<tr>
-<td>P1-4b</td>
-<td>无工具纯对话</td>
-<td>空 tools 里 99.4%（43,313+708+369 条）整个 session 零工具调用（n_tool_use=0/null）</td>
-<td>①✓ 客户端真没带 ②✓ 修完 P1-4a 后表达对（省略键）③✗ 纯聊天无 agentic 训练价值。<strong>不在格式层 WHERE 掉的理由</strong>：格式层不做事价值判断，且行数对账解释不了「为什么少了 44k」</td>
-<td><strong>筛选</strong></td>
-<td>18 条款 2.x/3.x 淘汰</td>
-<td>§10</td>
 </tr>
 <tr>
 <td>P1-5</td>
@@ -771,7 +912,7 @@ WHERE statis_day = '${statis_day}'
 <hr />
 <p><em>证据存档：source×last_role 矩阵、effort 分布、空数组统计、tools 空值归因（n_tool_use 交叉）、空 messages 6 条明细、stg response_body 结构采样、dwd/app ETL 源文件（etl/app/app_macaron_relay_stack_glm_day.sql、etl/dwd/dwd_macaron_relay_stack_chat_completions_total_day.sql）。基线分区 20260830，v3 生成于 2026-08-31。</em></p>
 <footer>
-  <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿 v4（归属总表前置自包含）。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>。</p>
+  <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿 v5（格式层确认表前置 + 逐问题示例）。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>。</p>
   <p style="margin-top:8px;">san-tian 的技术 blog · <a href="index.html">返回目录</a></p>
 </footer>
 </div>
