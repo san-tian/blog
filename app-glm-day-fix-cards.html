@@ -83,22 +83,32 @@
 <!-- ============ 1 封面 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">app_macaron_relay_stack_glm_day 修复 · 格式层确认（Phase 1）· statis_day=20260830 快照 · 评审稿 v5 配套</div>
+  <div class="kicker">app_macaron_relay_stack_glm_day 修复 · 格式层确认（Phase 1）· statis_day=20260830 快照 · 评审稿 v6 配套</div>
   <h2>格式层 7 个问题<span class="dim">每个问题一页：现象 → 根因 → 现状 vs 修复后 → 修法 → 验收</span></h2>
   <div class="term"><b>三问速查</b>：① 构造所需的数据在？ ② ETL 当前表达对？ ③ 有训练价值？—— ①✗ → <b>格式层丢弃</b>（不产出，不硬造）· ①✓②✗ → <b>格式·修</b>（本卡片 7 页全是）· ①✓②✓③✗ → <b>筛选·滤</b>（Phase 2，如无工具纯对话）</div>
-  <ul class="pts">
-    <li><b>P0-1</b> chat 源缺 assistant 回复（65,691 条仅 19 条闭环，0.03%）→ 第 2 页</li>
-    <li><b>P0-2</b> responses 源缺 assistant 回复（546 条 0 条闭环）→ 第 3 页</li>
-    <li><b>续话客户端碎片</b> previous_response_id（4 条空 messages）→ 第 4 页</li>
-    <li><b>P1-3</b> reasoning_effort 值域非法（修法：整个删除 chat_template_kwargs）→ 第 5 页</li>
-    <li><b>P1-4a</b> tools 空数组（44,395 条，64%）→ 第 6 页</li>
-    <li><b>P1-5</b> 空 messages 记录（6 条）→ 第 7 页</li>
-    <li><b>最后请求失败</b>（无应答，MAX_BY 取到失败请求）→ 第 8 页</li>
-    <li><b>验收总览</b>（V1–V5 + 修法一览）→ 第 9 页</li>
-  </ul>
+  <pre class="code"><span class="cmt">定位地图：这些格式问题出在上游哪里？——表基本没问题，问题集中在 app ETL 这一步</span>
+stg_relay_macaron_parquet_business_v5       网关日志（请求级，pt 小时分区）      <span class="hl">✅ 如实记录</span>（含失败请求的错误响应体）
+   ↓ dwd ETL：UDF 解析 request_body / response_body → 结构化字段
+dwd_macaron_relay_stack_{chat,responses,…}  请求级结构化（statis_day 快照）      <span class="hl">✅ 数据基本没问题</span>（resp_choices / resp_output / req_tools 都在）
+   ↓ app ETL：<b>etl/app/app_macaron_relay_stack_glm_day.sql</b>             <b style="color:#dc2626">❌ 7 个问题全在这一步</b>
+     WITH chat_sessions / responses_sessions / messages_sessions   ← CTE 聚合层（MAX_BY 取最后一次请求）
+     INSERT … SELECT … UNION ALL …                                ← INSERT 分支层（拼接 / 兜底 / 写死）
+app_macaron_relay_stack_glm_day             session 级 GLM SFT 格式</pre>
+  <div class="mini ok"><b>定位结论</b>dwd/stg 数据层基本没问题（应答、工具、原始值都如实解析）；7 个问题集中在<b>同一个 ETL 文件的两层</b>——CTE 聚合层（MAX_BY 的取法：没取 resp_choices、不问有效性）和 INSERT 分支层（没拼 output、ELSE JSON_ARRAY() 兜底、COALESCE 写死）。源头在数据侧的只有两处：续话客户端（协议特性）和 chat 2 条畸形 body（stg→dwd 解析，P1-5 触发源之一）。<b>Phase 1 = 改一个文件</b>。</div>
+  <table class="tbl">
+    <tr><th>#</th><th>问题</th><th>定位（哪一步 / ETL 内位置）</th><th>页</th></tr>
+    <tr><td>P0-1</td><td>chat 缺 assistant 回复</td><td>app ETL · <b>chat_sessions CTE</b>（没取 resp_choices）+ chat 分支 INSERT（只用 final_messages）</td><td>2</td></tr>
+    <tr><td>P0-2</td><td>responses 缺 assistant 回复</td><td>app ETL · <b>responses 分支 INSERT</b>（final_resp_output 在 CTE 取了但没用）</td><td>3</td></tr>
+    <tr><td>—</td><td>续话客户端碎片</td><td>app ETL 设计 · MAX_BY 单请求 vs 续话客户端（<b>数据源特性</b>，stg/dwd 如实记录增量）</td><td>4</td></tr>
+    <tr><td>P1-3</td><td>effort 值域非法</td><td>app ETL · 三分支 INSERT 的 <b>JSON_OBJECT('reasoning_effort', COALESCE)</b>（修法：整个删除该键）</td><td>5</td></tr>
+    <tr><td>P1-4a</td><td>tools 空数组</td><td>app ETL · 三分支 INSERT 的 <b>ELSE JSON_ARRAY()</b></td><td>6</td></tr>
+    <tr><td>P1-5</td><td>空 messages</td><td>app ETL · 两分支 <b>ELSE JSON_ARRAY() 兜底</b>（触发源在数据侧：续话 4 + chat 畸形 2）</td><td>7</td></tr>
+    <tr><td>—</td><td>最后请求失败</td><td>app ETL · <b>CTE 聚合 MAX_BY</b> 取最新不问有效性（修在 CTE 的 WHERE）</td><td>8</td></tr>
+    <tr><td>—</td><td>验收总览</td><td>V1–V5 + 修法一览</td><td>9</td></tr>
+  </table>
   <div class="chips">
     <span class="chip">基线：<b>20260830 快照 69,330 条</b>（chat 65,691 / messages 3,093 / responses 546）</span>
-    <span class="chip">契约：L0-L6 实测（四键 extra=forbid · Literal["high","max"] · 空 tools FATAL · messages≥1）</span>
+    <span class="chip">契约：L0-L6 实测（四键 extra=forbid · 空 tools FATAL · messages≥1 · chat_template_kwargs 可整体省略）</span>
     <span class="chip">📄 详细版：<a href="app-glm-day-fix-plan.html">app-glm-day-fix-plan.html</a>（含筛选层/交付层）</span>
   </div>
   <div class="footnote">数据：MaxCompute macaron_relay_stack.app_macaron_relay_stack_glm_day，statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收用最新分区）。←/→ 翻页 · 右下角「目录」随时返回。</div>
