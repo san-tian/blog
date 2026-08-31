@@ -241,6 +241,8 @@
 现状 ❌: MAX_BY(req_messages, ts) → ts=300 的全量历史（第 1+2 轮 + user₃——历史不缺）
         MAX_BY(resp_choices, ts) → NULL（那行恰好是 NULL，不会回退到第 2 轮的应答）
         → 对话以 user₃ 结尾、没有任何应答（有问无答）→ 不闭环
+        ⚠ 朴素修法的坑：若只在 INSERT 层防御（resp=NULL 丢整条）而漏掉 CTE 行级过滤——
+          连完全正常的前 2 轮也一起丢，一次失败连累整个 session
 修复后 ✅: 行级 WHERE 排除无应答请求 → 只剩 ts=100/200，两个 MAX_BY 都落在 ts=200
         取到 [user₁, a₁, user₂] + a₂（同一行，天然配对）→ 2 轮完整闭环
         user₃ 整轮丢（它没得到应答，保留就是有问无答的尾巴）；全 session 失败 → 整行消失
