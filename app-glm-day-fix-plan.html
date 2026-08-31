@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>app_glm_day 修复方案：GLM SFT 训练数据表的闭环 / 契约 / 筛选六查六修（评审稿）</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --card: #ffffff;
+    --card-2: #f8f8f7;
+    --border: #e7e5e4;
+    --text: #1c1917;
+    --text-dim: #78716c;
+    --accent: #1d4ed8;
+    --accent-2: #1d4ed8;
+    --green: #059669;
+    --red: #dc2626;
+    --yellow: #d97706;
+    --code-bg: #f8fafc;
+    --inline-code-bg: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    margin: 0;
+    padding: 0;
+    font-size: 16px;
+  }
+  .container { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+  header.hero { text-align: center; margin-bottom: 56px; padding-bottom: 32px; border-bottom: 1px solid var(--border); }
+  header.hero h1 { font-size: 2.1em; font-weight: 700; line-height: 1.3; color: #111111; margin: 0 0 16px; }
+  header.hero .subtitle { color: var(--text-dim); font-size: 1em; margin: 0 auto; max-width: 620px; }
+  header.hero .meta { margin-top: 20px; color: var(--text-dim); font-size: 0.85em; }
+  header.hero .meta span { display: inline-block; padding: 4px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 999px; margin: 0 4px; }
+  h2 { color: #111111; font-size: 1.5em; font-weight: 650; margin: 56px 0 20px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h3 { color: #111111; font-size: 1.18em; font-weight: 600; margin: 36px 0 14px; }
+  h4 { color: var(--text); font-size: 1.02em; font-weight: 600; margin: 24px 0 10px; }
+  p { margin: 14px 0; }
+  strong { color: #111111; font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: "JetBrains Mono", "Fira Code", "SF Mono", Consolas, "Liberation Mono", Menlo, monospace; background: var(--inline-code-bg); color: #2563eb; padding: 2px 6px; border-radius: 4px; font-size: 0.88em; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 18px 0; font-size: 0.85em; line-height: 1.6; }
+  pre code { background: none; color: var(--text); padding: 0; border-radius: 0; font-size: 1em; }
+  blockquote { margin: 20px 0; padding: 14px 20px; border-left: 4px solid var(--accent); background: var(--card); border-radius: 0 8px 8px 0; color: var(--text); }
+  blockquote.keyinsight { border-left-color: var(--accent-2); }
+  blockquote.keyinsight::before { content: "💡 关键洞察"; display: block; color: var(--accent-2); font-weight: 700; font-size: 0.85em; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .background { background: var(--card); border-left: 4px solid var(--yellow); padding: 18px 24px; border-radius: 0 8px 8px 0; margin: 24px 0; }
+  .callout-summary { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin: 24px 0; }
+  .callout-summary h3 { margin: 0 0 16px; font-size: 1.1em; color: var(--accent); }
+  .callout-summary .point { margin: 12px 0; padding-left: 0; line-height: 1.7; }
+  .callout-summary .badge { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 0.75em; font-weight: 600; margin-right: 8px; }
+  .callout-summary .badge.ok { background: rgba(5, 150, 105, 0.12); color: var(--green); }
+  .callout-summary .badge.no { background: rgba(220, 38, 38, 0.12); color: var(--red); }
+  .callout-summary .badge.q { background: rgba(217, 119, 6, 0.12); color: var(--yellow); }
+  table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.92em; display: block; overflow-x: auto; }
+  th, td { border: 1px solid var(--border); padding: 10px 14px; text-align: left; vertical-align: top; }
+  th { background: var(--card-2); color: #111111; font-weight: 600; }
+  tr:nth-child(even) td { background: var(--card); }
+  td code, th code { font-size: 0.85em; }
+  ul, ol { padding-left: 1.5em; }
+  li { margin: 6px 0; }
+  footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85em; text-align: center; }
+  @media (max-width: 640px) { .container { padding: 24px 16px 64px; } header.hero h1 { font-size: 1.6em; } table { font-size: 0.82em; } }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header class="hero">
+  <h1>app_glm_day 修复方案：GLM SFT 训练数据表的闭环 / 契约 / 筛选六查六修（评审稿）</h1>
+  <div class="subtitle">数仓 app_macaron_relay_stack_glm_day 体检与修复：statis_day=20260830 快照 69,330 条实测，6 个问题各附证据 / 根因 / SQL 与 UDF 修法 / 验收标准</div>
+  <div class="meta">
+    <span>📝 本文主要由 AI agent 完成</span>
+    <span>📊 MaxCompute 20260830 快照</span>
+  </div>
+</header>
+
+<blockquote>
+<p><strong>一句话结论</strong>：这张表目前是"<strong>未闭环、未对齐、未筛选</strong>"的中间产物——96% 的记录缺模型回复、格式契约与训练侧 L0-L6 不对齐、没有达标筛选。共 6 个问题（2 个 P0、3 个 P1、1 个 P2），本文档给出每个问题的证据、根因和具体修法。</p>
+</blockquote>
+<hr />
+<h2>0. 基线与口径说明</h2>
+<p><strong>分区语义</strong>：<code>statis_day</code> 是<strong>全量快照</strong>（非日增量），数字随快照累积增长：</p>
+<table>
+<thead>
+<tr>
+<th>statis_day</th>
+<th>总行数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>20260827（已过期）</td>
+<td>4,486</td>
+</tr>
+<tr>
+<td>20260828</td>
+<td>49,876</td>
+</tr>
+<tr>
+<td>20260829</td>
+<td>66,016</td>
+</tr>
+<tr>
+<td><strong>20260830（最新基线）</strong></td>
+<td><strong>69,330</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>LIFECYCLE 3 天</strong>：验证请用最新分区（今天的 0827 已被回收，本文所有实测数字基于 0830 快照）。</p>
+<p><strong>0830 快照按 source 实测</strong>（69,330 条 = chat 65,691 + messages 3,093 + responses 546）：</p>
+<table>
+<thead>
+<tr>
+<th>source</th>
+<th>行数</th>
+<th>空 messages</th>
+<th>tools=[]</th>
+<th><strong>assistant 结尾</strong></th>
+<th>effort ∈{high,max}</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>chat_completions</td>
+<td>65,691</td>
+<td>2</td>
+<td>43,557 (66%)</td>
+<td><strong>19 (0.03%)</strong></td>
+<td><strong>0 (0%)</strong></td>
+</tr>
+<tr>
+<td>messages</td>
+<td>3,093</td>
+<td>0</td>
+<td>710 (23%)</td>
+<td>2,995 (96.8%)</td>
+<td>2,908 (94%)</td>
+</tr>
+<tr>
+<td>responses</td>
+<td>546</td>
+<td>4</td>
+<td>128 (23%)</td>
+<td><strong>0 (0%)</strong></td>
+<td>239 (44%)</td>
+</tr>
+<tr>
+<td><strong>合计</strong></td>
+<td>69,330</td>
+<td>6</td>
+<td>44,395 (64%)</td>
+<td><strong>3,014 (4.3%)</strong></td>
+<td>3,147 (4.5%)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>1. 问题清单（总览）</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>问题</th>
+<th>根因（ETL 现状）</th>
+<th>影响（0830 实测）</th>
+<th>优先级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P0-1</td>
+<td>chat_completions 源缺 assistant 回复</td>
+<td>CTE 没取 <code>resp_choices</code>，messages 直接用 <code>req_messages</code></td>
+<td>65,691 条只有 19 条闭环（0.03%）</td>
+<td><strong>P0</strong></td>
+</tr>
+<tr>
+<td>P0-2</td>
+<td>responses 源缺 assistant 回复</td>
+<td><code>final_resp_output</code> 取了但 INSERT 没用（注释写了没做）</td>
+<td>546 条 0 条闭环</td>
+<td><strong>P0</strong></td>
+</tr>
+<tr>
+<td>P1-3</td>
+<td>reasoning_effort 值域非法</td>
+<td><code>COALESCE(reasoning_effort, 'medium')</code>；训练契约 <code>Literal["high","max"]</code></td>
+<td>chat 源 100% 非法（全是 medium 等）</td>
+<td>P1</td>
+</tr>
+<tr>
+<td>P1-4</td>
+<td>tools 空数组</td>
+<td><code>ELSE JSON_ARRAY()</code> 兜底；校验器要求"空则省略键"</td>
+<td>44,395 条 (64%)</td>
+<td>P1</td>
+</tr>
+<tr>
+<td>P1-5</td>
+<td>空 messages 记录</td>
+<td><code>ELSE JSON_ARRAY()</code> 兜底产出空记录</td>
+<td>6 条</td>
+<td>P1</td>
+</tr>
+<tr>
+<td>P2-6</td>
+<td>无 18 条款达标筛选</td>
+<td>无 qualified_sessions CTE（opus_day 有，glm_day 没有）</td>
+<td>全量含单轮/无工具/不闭环/闲聊</td>
+<td>P2</td>
+</tr>
+<tr>
+<td>附-7</td>
+<td>顶层 9 列 vs 训练 4 键</td>
+<td>表设计（查询用辅助列）</td>
+<td>导出层剥离，<strong>不改表</strong></td>
+<td>备注</td>
+</tr>
+</tbody>
+</table>
+<p><strong>下游契约</strong>（训练侧 L0-L6 校验器，实测依据）：
+- 顶层只认 <code>messages/tools/chat_template_kwargs/meta</code> 四键，<code>extra="forbid"</code>（多一个字段直接 FATAL，实测 <code>Extra inputs are not permitted</code>）
+- <code>reasoning_effort: Literal["high","max"]</code>（实测 medium 报 <code>Input should be 'high' or 'max'</code>）
+- <code>tools</code> 为空数组直接 FATAL（<code>_reject_empty_tools</code>），省略键则 OK
+- <code>messages</code> 至少 1 条（<code>min_length=1</code>）
+- 本地转换器 <code>to_glm52_sft.py</code> 的既有约定：<strong>强制 <code>reasoning_effort="max"</code>、空 tools 省略键</strong>——修复向它对齐</p>
+<hr />
+<h2>2. P0-1：chat_completions 源缺 assistant 回复</h2>
+<h3>现状（etl/app/app_macaron_relay_stack_glm_day.sql）</h3>
+<pre><code class="language-sql">-- CTE：根本没取 resp_choices
+chat_sessions AS (
+  SELECT
+    r.session_id,
+    ...
+    MAX_BY(r.req_messages, r.ts) AS final_messages,   -- 只有请求侧
+    MAX_BY(r.req_tools, r.ts) AS final_tools,
+    -- ✗ 没有 MAX_BY(r.resp_choices, r.ts)
+  FROM dwd_macaron_relay_stack_chat_completions_total_day r
+  WHERE r.statis_day = '${statis_day}'
+  GROUP BY r.session_id
+)
+
+-- INSERT：messages = 客户端重发的请求历史，最后一条是 user/tool
+CASE
+  WHEN final_messages IS NOT NULL AND ... THEN JSON_PARSE(final_messages)
+  ELSE JSON_ARRAY()
+END AS messages,
+</code></pre>
+<p><strong>为什么缺</strong>：chat completions 协议客户端每次重发完整历史（<code>req_messages</code> 含之前所有轮次），但<strong>本轮模型的回答在 <code>resp_choices</code> 里</strong>。ETL 只取了请求侧，响应侧取都没取 → 训练样本"有问无答"（24,417 条 user 结尾 + 18,440 条 tool 结尾，到工具结果就断）。</p>
+<p><strong>关键证据（stg 原始 response_body 实测）</strong>：<code>choices[0].message</code> 就是标准 GLM assistant 格式，可直接拼接：</p>
+<pre><code class="language-json">{&quot;id&quot;:&quot;...&quot;,&quot;object&quot;:&quot;chat.completion&quot;,&quot;model&quot;:&quot;glm-5.2&quot;,&quot;created&quot;:...,
+ &quot;choices&quot;:[{&quot;index&quot;:0,&quot;message&quot;:{
+   &quot;role&quot;:&quot;assistant&quot;,
+   &quot;content&quot;:&quot;Let me check how many total custom class names...&quot;,
+   &quot;reasoning_content&quot;:&quot;Found it! The exclusion regex is:...&quot;}}]}
+</code></pre>
+<h3>修法（SQL-only，无需新 UDF）</h3>
+<p><strong>① CTE 加取 resp_choices + 行级过滤只保留有效应答的请求</strong>（这同时修复 P1-5 的 chat 部分）：</p>
+<pre><code class="language-sql">chat_sessions AS (
+  SELECT
+    r.session_id,
+    MAX_BY(r.request_id, r.ts) AS request_id,
+    MAX(r.request_date) AS biz_date,
+    MAX_BY(r.model, r.ts) AS model,
+    MAX_BY(r.upstream_model, r.ts) AS actual_model,
+    MAX_BY(r.req_messages, r.ts) AS final_messages,
+    MAX_BY(r.resp_choices, r.ts) AS final_resp_choices,   -- [新增] 最后一次有效应答
+    MAX_BY(r.req_tools, r.ts) AS final_tools,
+    MAX_BY(r.req_reasoning_effort, r.ts) AS reasoning_effort,
+    COUNT(*) AS session_n_turns,
+    CAST(MAX_BY(r.n_messages, r.ts) AS BIGINT) + SUM(r.n_tool_calls) + 1 AS session_n_messages,
+    SUM(CASE WHEN r.n_choices &gt; 0 THEN 1 ELSE 0 END) AS total_n_thinking,
+    MAX_BY(r.n_tool_calls, r.ts) AS total_n_tool_use
+  FROM dwd_macaron_relay_stack_chat_completions_total_day r
+  WHERE r.statis_day = '${statis_day}'
+    AND r.resp_choices IS NOT NULL
+    AND r.resp_choices != '' AND r.resp_choices != '\\N'    -- [新增] 无应答的请求不参与聚合
+  GROUP BY r.session_id
+)
+</code></pre>
+<blockquote>
+<p>行级过滤的语义：<code>MAX_BY(req_messages, ts)</code> 变成"最后一次<strong>成功应答</strong>的请求"。若 session 最后一次请求失败，取到的是最后一次成功交换（历史+应答仍完整闭环）；整个 session 全失败则自然消失（本来就不可训练）。副作用（正向）：<code>COUNT(*)</code> 变成有效轮数。</p>
+</blockquote>
+<p><strong>② INSERT 的 messages 拼回应答</strong>（同时修 P1-4/P1-5）：</p>
+<pre><code class="language-sql">SELECT
+  session_id, request_id, biz_date, model, actual_model,
+  -- [修复] 历史去掉尾 ']'，拼上 choices[0].message，再闭合
+  JSON_PARSE(CONCAT(
+    SUBSTR(final_messages, 1, LENGTH(final_messages) - 1), ',',
+    GET_JSON_OBJECT(final_resp_choices, '$[0].message'), ']'
+  )) AS messages,
+  CASE
+    WHEN final_tools IS NOT NULL AND final_tools != '' AND final_tools != '\\N' AND JSON_VALID(final_tools)
+    THEN JSON_PARSE(final_tools)
+    ELSE NULL                                              -- [修复 P1-4] 空数组 → NULL
+  END AS tools,
+  JSON_OBJECT('reasoning_effort',
+    CASE WHEN reasoning_effort IN ('high', 'max') THEN reasoning_effort ELSE 'max' END
+  ) AS chat_template_kwargs,                                -- [修复 P1-3]
+  JSON_OBJECT( ... 原样不变 ... ) AS meta
+FROM chat_sessions
+WHERE final_messages IS NOT NULL AND final_messages != '' AND final_messages != '\\N'
+  AND final_messages != '[]'                               -- [修复 P1-5] 空历史丢弃
+  AND JSON_VALID(final_messages)
+  AND SUBSTR(final_messages, 1, 1) = '['                   -- 防御 'null'/对象等非法输入
+  AND GET_JSON_OBJECT(final_resp_choices, '$[0].message') IS NOT NULL  -- 防御空 choices
+</code></pre>
+<p><strong>边界说明</strong>：
+- <code>message.content</code> 为 null（纯 tool_calls 应答）合法，<code>tool_calls</code> 字段原样保留，GLM 格式兼容
+- session 结束在 tool_call（客户端没续）→ 拼后以 assistant+tool_calls 结尾、无 tool result，这类由 P2 的达标筛选兜底淘汰
+- <strong>NUL 字节风险</strong>：dwd ETL 注释提过 reasoning 字段需在 parse UDF 里清洗 NUL（ODPS-0121095）。若 <code>resp_choices.message.reasoning_content</code> 含 NUL，需在 chat_completions parse UDF 里同样清洗（校验器 L2 有 <code>\x00</code> 保留标记检查，本地 L0-L6 会抓）
+- 多 choice（n&gt;1）取 <code>[0]</code></p>
+<hr />
+<h2>3. P0-2：responses 源缺 assistant 回复</h2>
+<h3>现状</h3>
+<pre><code class="language-sql">-- CTE 取了 final_resp_output，但 INSERT 里完全没用：
+-- 注释写着 &quot;[system_msg] + input_items + [assistant_response]&quot;
+-- 实际代码只拼了 instructions(可选) + final_input，assistant_response 从未出现
+CASE
+  WHEN final_input IS NOT NULL AND ... THEN
+    CASE WHEN final_instructions IS NOT NULL ...
+    THEN JSON_PARSE(CONCAT('[{&quot;role&quot;:&quot;system&quot;,&quot;content&quot;:', TO_JSON(final_instructions), '},', SUBSTR(final_input, 2)))
+    ELSE JSON_PARSE(final_input)
+    END
+  ELSE JSON_ARRAY()
+END AS messages,
+</code></pre>
+<p><strong>证据</strong>：0830 快照 546 条 responses 记录，assistant 结尾 <strong>0 条</strong>；4 条 messages 空（input 非法时 <code>JSON_ARRAY()</code> 兜底）。</p>
+<p><strong>另一证据</strong>：dwd 的 <code>req_input</code> 已被 parse UDF 归一成 chat messages 格式（实测 app 表里 responses 记录的 messages 是 <code>[{"role":"system","content":"...Codex CLI..."}]</code> 这种标准格式，不是 raw input items），所以 input 侧不用动，<strong>只需补 output → assistant 的转换</strong>。</p>
+<h3>修法（需要一个小 UDF）</h3>
+<p>output items 是变长异构数组（<code>type: reasoning / message / function_call</code> 混排），SQL 字符串手术不可靠，建议参照现有 <code>macaron_anthropic_to_glm_sft</code> 的模式新增一个 UDF：</p>
+<pre><code>macaron_responses_to_glm_sft(final_input STRING, final_instructions STRING, final_resp_output STRING)
+  -&gt; STRING（JSON 数组，完整 messages）
+</code></pre>
+<p>UDF 规则：
+1. <code>final_input</code> 已是 chat messages 数组（dwd 归一过）→ 原样作为基底；若是纯文本（input 传字符串的客户端）→ 包成 <code>[{"role":"user","content":...}]</code>
+2. <code>final_instructions</code> 非空 → 头部插 system 消息
+3. <code>final_resp_output</code> 逐项转<strong>一条</strong> assistant 消息：
+   - <code>type=reasoning</code> → <code>reasoning_content</code>
+   - <code>type=message</code>（content 里 <code>output_text</code>）→ <code>content</code>
+   - <code>type=function_call</code> → <code>tool_calls[{id: call_id, type: function, function: {name, arguments}}]</code>
+4. 输入全空/非法 → 返回 <code>NULL</code>（ETL WHERE 丢弃）</p>
+<p>ETL 改动：</p>
+<pre><code class="language-sql">responses_sessions AS (
+  SELECT
+    ...,
+    MAX_BY(r.req_input, r.ts) AS final_input,
+    MAX_BY(r.req_instructions, r.ts) AS final_instructions,
+    MAX_BY(r.req_tools, r.ts) AS final_tools,
+    MAX_BY(r.req_reasoning_effort, r.ts) AS reasoning_effort,
+    MAX_BY(r.resp_output, r.ts) AS final_resp_output,
+    ...
+  FROM dwd_macaron_relay_stack_responses_total_day r
+  WHERE r.statis_day = '${statis_day}'
+    AND r.resp_output IS NOT NULL
+    AND r.resp_output != '' AND r.resp_output != '\\N'    -- [新增]
+  GROUP BY r.session_id
+)
+
+-- INSERT：
+  JSON_PARSE(
+    macaron_responses_to_glm_sft(final_input, final_instructions, final_resp_output)
+  ) AS messages,
+  -- tools / chat_template_kwargs / WHERE 同 chat 分支修法
+</code></pre>
+<blockquote>
+<p>注：responses 源若客户端用 <code>previous_response_id</code>（服务端续话），<code>req_input</code> 只有增量，MAX_BY 拼不出全量历史——这类 session 建议在 UDF 里检测（如 input 只有 1 条 user 但 n_input_items 与 session 轮数不符）返回 NULL 丢弃，或接受现状由 P2 筛选兜底。</p>
+</blockquote>
+<hr />
+<h2>4. P1-3 / P1-4 / P1-5：三处小改（前面分支修法已含）</h2>
+<table>
+<thead>
+<tr>
+<th>问题</th>
+<th>现状</th>
+<th>修法</th>
+<th>位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P1-3 effort</td>
+<td>chat/responses: <code>COALESCE(reasoning_effort,'medium')</code>；messages: <code>CASE WHEN thinking_type='adaptive' THEN 'max' ELSE 'medium' END</code></td>
+<td>统一：<code>CASE WHEN effort IN ('high','max') THEN effort ELSE 'max' END</code>（保留合法原值，非法归 max，与本地 <code>to_glm52_sft.py</code> 强制 max 对齐）</td>
+<td>三处 chat_template_kwargs</td>
+</tr>
+<tr>
+<td>P1-4 tools</td>
+<td><code>ELSE JSON_ARRAY()</code></td>
+<td><code>ELSE NULL</code>（messages 分支：<code>JSON_PARSE(NULLIF(macaron_tools_to_openai_format(...), '[]'))</code>）</td>
+<td>三处 tools</td>
+</tr>
+<tr>
+<td>P1-5 空 messages</td>
+<td><code>ELSE JSON_ARRAY()</code> 兜底产出空记录</td>
+<td>分支 WHERE 丢弃（见上两节）</td>
+<td>chat/responses</td>
+</tr>
+</tbody>
+</table>
+<p>messages 分支（UDF 转换的那个）只需改两行：</p>
+<pre><code class="language-sql">  JSON_PARSE(NULLIF(macaron_tools_to_openai_format(final_tools, 'anthropic'), '[]')) AS tools,  -- '[]' → NULL
+  JSON_OBJECT('reasoning_effort', 'max') AS chat_template_kwargs,  -- 或 CASE 保留 high/max
+</code></pre>
+<blockquote>
+<p>messages 分支本身是健康的（96.8% 闭环），不用动 messages 构造。</p>
+</blockquote>
+<hr />
+<h2>5. P2-6：18 条款达标筛选（建议二期）</h2>
+<p><strong>现状</strong>：<code>app_opus_day</code> 有 <code>qualified_sessions</code> CTE（UDAF <code>macaron_session_quality_check</code>，opus 口径含 signature），<code>app_glm_day</code> 没有。</p>
+<p><strong>为什么不能直接抄 opus 那段</strong>：
+1. UDAF 入参是 messages(Anthropic) 源的字段（<code>req_messages/resp_content/resp_stop_reason/reasoning_signature</code>），chat 源是 OpenAI 格式（<code>resp_choices/resp_finish_reason</code>），字段和格式都对不上
+2. opus 口径含 7.1/7.3 signature 检查，<strong>glm 口径豁免</strong>（glm 没签名不是缺陷），照抄会把大量合格 glm session 误杀</p>
+<p><strong>方案 A（推荐，二期做）</strong>：UDAF 加 <code>mode</code> 参数 + 三源字段适配</p>
+<pre><code class="language-sql">macaron_session_quality_check(
+  req_messages, resp_content, resp_stop_reason, req_tools,
+  reasoning_signature, session_id, ts,
+  'glm'   -- [新增] 'opus'=全18条(默认) / 'glm'=豁免7.1/7.3
+) = 'pass'
+</code></pre>
+<p>三源适配（chat 源）：</p>
+<table>
+<thead>
+<tr>
+<th>UDAF 入参</th>
+<th>chat_completions 适配</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>req_messages</td>
+<td><code>req_messages</code>（OpenAI 格式，UDF 需兼容双格式）</td>
+</tr>
+<tr>
+<td>resp_content</td>
+<td><code>GET_JSON_OBJECT(resp_choices, '$[0].message.content')</code></td>
+</tr>
+<tr>
+<td>resp_stop_reason</td>
+<td><code>resp_finish_reason</code></td>
+</tr>
+<tr>
+<td>req_tools</td>
+<td><code>req_tools</code></td>
+</tr>
+<tr>
+<td>reasoning_signature</td>
+<td><code>reasoning_signature</code>（dwd 有此列；glm 模式下不检查）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>方案 B（务实，先跑通）</strong>：MC 只修 P0/P1（数据正确性），18 条款留在本地流水线（<code>msh_supplier_selftest.py</code>）跑——你们本地本来就有这步，短期不增加数仓工作量。</p>
+<p><strong>注意</strong>：UDAF 是逐 session 聚合，跨 session 去重（5.x）能否覆盖需与 UDF 实现确认（opus 线同款在用，对齐它即可）。</p>
+<hr />
+<h2>6. 附-7：导出层剥离（不改表）</h2>
+<p>表的 9 列（session_id/request_id/biz_date/model/actual_model + 四键）<strong>保留不动</strong>（查询/排重有用），导出训练文件时剥成四键。已验证可用的导出 SQL：</p>
+<pre><code class="language-sql">SELECT CONCAT(
+  '{&quot;messages&quot;:', JSON_FORMAT(messages),
+  CASE WHEN tools IS NOT NULL THEN CONCAT(',&quot;tools&quot;:', JSON_FORMAT(tools)) ELSE '' END,  -- NULL 省键
+  ',&quot;chat_template_kwargs&quot;:', JSON_FORMAT(chat_template_kwargs),
+  ',&quot;meta&quot;:', JSON_FORMAT(meta), '}'
+) AS line
+FROM macaron_relay_stack.app_macaron_relay_stack_glm_day
+WHERE statis_day = '${statis_day}'
+  AND ... 筛选条件 ...
+</code></pre>
+<p><strong>meta 无敏感字段</strong>（已核对：session_id/request_id/model/actual_model/n_*/source，无 signature/trace_id/user_id），脱敏层面 glm_day 无问题（opus_day 的 meta 保留 signature 是另一张表的事，不在本文档范围）。</p>
+<hr />
+<h2>7. 验收标准（修复后跑）</h2>
+<pre><code class="language-sql">-- V1 闭环率：三个源的 last_role=assistant 都应接近 100%（messages 源基线 96.8%）
+SELECT GET_JSON_OBJECT(JSON_FORMAT(meta),'$.source') AS src,
+       GET_JSON_OBJECT(JSON_FORMAT(messages),
+         CONCAT('$[', CAST(JSON_LENGTH(messages)-1 AS STRING), '].role')) AS last_role,
+       COUNT(*) AS n
+FROM macaron_relay_stack.app_macaron_relay_stack_glm_day
+WHERE statis_day = '&lt;最新分区&gt;'
+GROUP BY 1, 2 ORDER BY n DESC;
+
+-- V2 effort 合法率：eff ∉ {high,max} 应为 0
+SELECT GET_JSON_OBJECT(JSON_FORMAT(chat_template_kwargs),'$.reasoning_effort') AS eff, COUNT(*) AS n
+FROM macaron_relay_stack.app_macaron_relay_stack_glm_day
+WHERE statis_day = '&lt;最新分区&gt;' GROUP BY 1;
+
+-- V3 空 tools / 空 messages 应为 0（NULL 的 tools 不算空数组）
+SELECT SUM(CASE WHEN JSON_FORMAT(tools) = '[]' THEN 1 ELSE 0 END) AS empty_tools,
+       SUM(CASE WHEN JSON_LENGTH(messages) = 0 OR JSON_LENGTH(messages) IS NULL THEN 1 ELSE 0 END) AS empty_msgs
+FROM macaron_relay_stack.app_macaron_relay_stack_glm_day WHERE statis_day = '&lt;最新分区&gt;';
+
+-- V4 行数对账：修复后 chat 源行数会下降（丢弃全失败/空历史 session），下降量 = 无有效应答的 session 数，需可解释
+</code></pre>
+<p><strong>V5 本地 L0-L6 抽检</strong>（训练侧最终验收）：</p>
+<pre><code class="language-bash"># 用第 6 节导出 SQL 拿 N 条 → line 去掉外层引号存 jsonl →
+python3 scripts/validate_glm52_sft.py sample.jsonl --max-seq-len 98304
+# 预期：reasoning_effort/tools 空数组/extra 字段三类 FATAL 归零
+</code></pre>
+<hr />
+<h2>8. 不修项（已确认）</h2>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>顶层 9 列</td>
+<td>保留，导出层剥离（见第 6 节）</td>
+</tr>
+<tr>
+<td>meta 内容</td>
+<td>无敏感字段，L0-L6 不校验 meta 内容，不动</td>
+</tr>
+<tr>
+<td>messages 源 messages 构造</td>
+<td>96.8% 闭环，UDF 工作正常，不动</td>
+</tr>
+<tr>
+<td>opus_day 的脱敏问题</td>
+<td>另一张表，另行处理</td>
+</tr>
+<tr>
+<td>session_n_messages 等统计口径</td>
+<td>meta 信息性字段，不影响训练，不动</td>
+</tr>
+</tbody>
+</table>
+<h2>9. 建议实施顺序</h2>
+<ol>
+<li><strong>第一批（P0-1 + P1-3/4/5，一次 ETL 改动）</strong>：chat 分支 CTE+INSERT、responses 分支行过滤+WHERE、三处 effort/tools——除 responses 的 UDF 外全是 SQL 改动</li>
+<li><strong>第二批（P0-2）</strong>：<code>macaron_responses_to_glm_sft</code> UDF 开发 + responses 分支 messages 构造替换</li>
+<li><strong>第三批（P2-6，可选）</strong>：UDAF 加 glm 模式 + 三源适配；不做则维持本地自检</li>
+<li>每批跑第 7 节验收，V5 用最新分区抽 50 条过 L0-L6</li>
+</ol>
+<hr />
+<p><em>证据存档（本文所有实测 SQL 可在新分区复跑）：source×last_role 矩阵、effort 分布、空数组统计、stg response_body 结构采样、dwd/app ETL 源文件（etl/app/app_macaron_relay_stack_glm_day.sql、etl/dwd/dwd_macaron_relay_stack_chat_completions_total_day.sql）。基线分区 20260830，生成于 2026-08-31。</em></p>
+
+<footer>
+  <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>。</p>
+  <p style="margin-top:8px;">san-tian 的技术 blog · <a href="index.html">返回目录</a></p>
+</footer>
+
+</div>
+</body>
+</html>
