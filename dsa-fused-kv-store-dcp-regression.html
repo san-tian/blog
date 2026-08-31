@@ -104,6 +104,17 @@
   .nav button:hover { background: var(--inline-code-bg); }
   .counter { font-size: 13px; color: var(--text-dim); min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
   .hint { position: fixed; bottom: 26px; left: 26px; font-size: 12px; color: #b8b3ad; z-index: 20; }
+  .toc-btn { position: fixed; top: 16px; left: 20px; z-index: 30; border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 999px; padding: 8px 16px; font-size: 14px; cursor: pointer; box-shadow: 0 4px 16px rgba(0,0,0,.10); }
+  .toc-btn:hover { background: var(--card-2); }
+  .toc { position: fixed; top: 60px; left: 20px; z-index: 29; width: 304px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px); overflow-y: auto; background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,.16); padding: 6px; display: none; }
+  .toc.open { display: block; }
+  .toc-head { display: flex; justify-content: space-between; align-items: center; font-weight: 700; font-size: 14px; padding: 6px 8px 8px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
+  .toc-close { border: none; background: transparent; color: var(--text-dim); font-size: 16px; cursor: pointer; padding: 2px 6px; }
+  .toc-close:hover { color: var(--text); }
+  .toc-group { font-size: 11.5px; font-weight: 700; color: var(--accent); letter-spacing: .06em; padding: 8px 10px 3px; }
+  .toc-item { font-size: 13px; color: var(--text-dim); padding: 5px 10px 5px 20px; cursor: pointer; border-radius: 6px; line-height: 1.5; }
+  .toc-item:hover { background: var(--card-2); color: var(--text); }
+  .toc-item.active { background: #eff6ff; color: #1d4ed8; font-weight: 600; }
   @media (max-width: 760px) {
     .inner { padding: 26px 20px; } .grid3, .grid4 { grid-template-columns: 1fr 1fr; } .grid2 { grid-template-columns: 1fr; }
     .inner h2 { font-size: 21px; } .hint { display: none; }
@@ -120,7 +131,7 @@
   <div class="kicker">排查报告 · 源码静态核对 · 无上机实验</div>
   <h2>indexer KV share（DSA 融合写 kernel）<br>为什么「只能兼容 dcp=8」？</h2>
   <p style="font-size:17px; margin: 6px 0 4px;">结论一句话：<b>新 kernel 丢掉了 DCP 的「虚拟 id → 物理行」映射，把虚拟 id 当物理行号直接写</b>——先错位、后越界。它对任何 dcp&gt;1 都不正确，dcp=8 的「正常」只是没跑到越界拐点。</p>
-  <p style="font-size:14px; color:var(--text-dim); margin-top:12px;">术语约定：未讲过的术语接下来每词一页详讲（DSA、indexer）；讲过的（KV cache、kernel、MLA、DCP 概念）直接引用旧文，术语索引见 <a href="glossary.md">glossary.md</a>；全文名词统一。</p>
+  <p style="font-size:14px; color:var(--text-dim); margin-top:12px;">术语约定：未讲过的术语接下来每词一页详讲（DSA、indexer、DCP）；讲过的（KV cache、kernel、MLA）直接引用旧文，术语索引见 <a href="glossary.md">glossary.md</a>；全文名词统一。</p>
   <div class="funnel" style="margin-top:18px;">
     <span class="step done">现象</span><span class="sep">→</span>
     <span class="step">① 变量隔离</span><span class="sep">→</span>
@@ -167,7 +178,7 @@
     <div class="mini"><b>与本文的关系</b>indexer 打分与 attention 计算读<b>同一份 K</b>（同一行 656B）——优化名 "indexer KV share" 的由来；本文排查的正是这份数据的写入 kernel</div>
   </div>
   <div class="chips">
-    <span class="chip">📄 <b>DCP</b>：概念已讲过——<a href="dynamic-context-parallelism.md">《DCP 实测》</a>；本文只讲 sglang 实现的换算细节（第 8 页）</span>
+    <span class="chip">📄 <b>DCP</b>：本文第 5-8 页详解（概念 / 省显存 / 怎么用）；实测见 <a href="dynamic-context-parallelism.md">《DCP 实测》</a></span>
     <span class="chip">📄 <b>KV cache / kernel / MLA</b>：旧文已讲过，直接使用（<a href="glossary.md">glossary.md</a>）</span>
   </div>
   <div class="footnote">名词约定：slot / 行 = KV cache 的一个 token 槽位；loc = 写入目标 slot 编号；rank = 一个 DCP 参与方（一张 GPU 一个 rank）；「乱码」= 模型输出变成无意义文字。indexer 为本文首次详细解释，已登记术语索引。</div>
@@ -197,7 +208,94 @@
 </div>
 </section>
 
-<!-- ============ 5 现象 ============ -->
+<!-- ============ 5 背景·DCP 1/4：KV cache 与并行地图 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">背景 · DCP 1/4：为什么需要它（本文首次详细解释）</div>
+  <h2>KV cache 随序列线性涨，DCP 是切「序列」的那把刀</h2>
+  <div class="grid2">
+    <div class="mini"><b>KV cache 是什么</b>自回归生成时，每个历史 token 的 K、V 算一次存起来反复读（避免每步重算 O(n²)）。大小 = <b>序列长度 × 每 token 字节数</b>，随序列<b>线性</b>增长——长上下文下它是显存里最大的一块</div>
+    <div class="mini"><b>问题</b>几十万～上百万 token 时，单张 GPU 装不下整条序列的 KV，必须切到多张卡。切哪一维、怎么切，就是下面这张地图</div>
+  </div>
+  <table class="tbl">
+    <tr><th>并行方式</th><th>切什么</th><th>对 KV cache 的影响</th></tr>
+    <tr><td><b>DP</b> 数据并行</td><td>不切模型不切序列，每卡跑完整模型服务不同请求</td><td>不省单请求显存，只加吞吐</td></tr>
+    <tr><td><b>PP</b> 流水线并行</td><td>模型按「层」切几段</td><td>层内 KV 只落在该层所在卡</td></tr>
+    <tr><td><b>TP</b> 张量并行</td><td>模型权重按「头 / 隐藏维」切</td><td>KV 按<b>头</b>切：每卡 <code>头数/tp</code> 个头，但<b>整条序列仍在每张卡上</b></td></tr>
+    <tr><td><b>DCP</b> 数据/上下文并行</td><td>切<b>序列（context）维度</b></td><td>KV 按<b>序列</b>切：每卡只存 <code>1/dcp</code> 的 token</td></tr>
+  </table>
+  <div class="footnote">关键区别：TP 切「头」，每张卡还是要存<b>完整序列</b>，所以长上下文下 TP 帮不上 KV 的忙；DCP 才直接切「序列长度」——KV cache 增长最快的那个因子。这就是为什么 dcp&gt;1 才需要做那套「归属 + 行号换算」。</div>
+</div>
+</section>
+
+<!-- ============ 6 背景·DCP 2/4：轮转切分 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">背景 · DCP 2/4：怎么切</div>
+  <h2>轮转切分：v % dcp 定归属，v // dcp 定本地行</h2>
+  <p style="font-size:14px; color:var(--text-dim); margin:4px 0 10px;">不是「卡 0 存前 1/4、卡 1 存后 1/4」的连续切，而是<b>轮转</b>：每个 token 拿全局编号 v，按 <code>v % dcp</code> 归卡。</p>
+  <table class="tbl">
+    <tr><th>全局编号 v（dcp=4）</th><th>归属 rank = v % 4</th><th>本卡物理行 = v // 4</th></tr>
+    <tr><td>0, 4, 8, 12, …</td><td>0</td><td>0, 1, 2, 3, …</td></tr>
+    <tr><td>1, 5, 9, 13, …</td><td>1</td><td>0, 1, 2, 3, …</td></tr>
+    <tr><td>2, 6, 10, 14, …</td><td>2</td><td>0, 1, 2, 3, …</td></tr>
+    <tr><td>3, 7, 11, 15, …</td><td>3</td><td>0, 1, 2, 3, …</td></tr>
+  </table>
+  <p style="font-size:14px; color:var(--text-dim); margin:6px 0 8px;">这就是写 kernel 里那两行（所有 DCP 写路径都有，<b>除了</b>本文的 bug kernel）：</p>
+  <pre class="code">is_valid = (loc != reserved_skip_index) &amp; (loc % DCP_WORLD_SIZE == DCP_RANK)   <span class="cmt"># ① 归属过滤：只写归我管的 token</span>
+safe_loc = tl.where(is_valid, loc, 0) // DCP_WORLD_SIZE                        <span class="cmt"># ② 全局编号 → 本卡行</span></pre>
+  <div class="grid2">
+    <div class="mini ok"><b>① 归属过滤（v % dcp == rank）</b>每个 token 只被它的 owner 卡写一份——不滤的话每张卡会把所有 token 都写一遍，本地 buffer 装不下、数据也重复</div>
+    <div class="mini ok"><b>② 行号换算（v // dcp）</b>全局编号 v 在本卡落到第 v//dcp 行——因为轮转下卡 r 的第 k 个 token 的全局号是 k×dcp + r</div>
+  </div>
+  <div class="footnote">轮转（而非连续切）的理由：token 是逐条流式到达的，轮转让每条新 token 均匀落到各卡（t → t % dcp），无需提前知道总长度也能保持每卡负载均衡。</div>
+</div>
+</section>
+
+<!-- ============ 7 背景·DCP 3/4：显存的账与代价 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">背景 · DCP 3/4：收益与代价</div>
+  <h2>每卡显存 ÷ dcp，代价是跨卡取 KV</h2>
+  <div class="grid2">
+    <div class="mini ok"><b>收益 · 说法 A（固定序列看每卡）</b>服务一条 L token 序列：无 DCP 一卡存 <code>L×每token字节</code>；DCP=4 每卡只存 <code>L/4×每token字节</code> → <b>每卡显存 ÷ 4</b></div>
+    <div class="mini ok"><b>收益 · 说法 B（固定每卡看总量）</b>每卡本地 buffer 仍是 <code>size</code> 行，但全局编号空间是 <code>[0, size×dcp)</code> → 4 卡合计能存 <b>size×4</b> 个 token。代码证据：<code>maybe_detect_oob(loc, 0, (size+page_size)×attn_dcp_size)</code></div>
+  </div>
+  <div class="chips">
+    <span class="chip">📏 DSA indexer KV = <b>656 字节/token</b>（512 fp8 + 16 scale + 128 rope）</span>
+    <span class="chip">100 万 token → 656 MB；DCP=4 → 每卡 164 MB</span>
+  </div>
+  <div class="grid2">
+    <div class="mini warn"><b>代价 · 通信</b>attention 是「每个 query 看所有 token」的全对全——序列切到 4 卡后，每卡都要拿到<b>别的卡</b>手里的 KV</div>
+    <div class="mini ok"><b>DSA 的化解</b>DSA 本就是稀疏 attention：先用 656B 压缩 KV 让 indexer 选出 top-k，<b>只把这 top-k 个 token 的 KV 跨卡取来</b>，不用传全量——通信开销被稀疏性压下去</div>
+  </div>
+  <div class="footnote">这也是为什么这条 656B「indexer KV」的写路径如此关键：它写错了（越界），indexer 选错 token，整条稀疏 attention 链就乱——与本文 bug 直接相关。</div>
+</div>
+</section>
+
+<!-- ============ 8 背景·DCP 4/4：怎么用 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">背景 · DCP 4/4：怎么用</div>
+  <h2>开 <code>--dcp-size N</code>，剩下的框架自动做</h2>
+  <p style="font-size:14px; color:var(--text-dim); margin:4px 0 8px;">你<b>不需要写任何 per-rank 逻辑</b>，只需启动参数开 DCP：</p>
+  <pre class="code"><span class="cmt"># decode 端（本文排查的写 kernel 跑在这边）</span>
+--tp 8 --dcp-size 4        <span class="cmt"># 8 个 TP rank 组成 4 个 DCP 组</span>
+<span class="cmt"># prefill 端</span>
+--enable-prefill-cp --cp-strategy interleave</pre>
+  <div class="grid3">
+    <div class="mini"><b>① 定身份</b>scheduler 给每 rank 算 <code>attn_dcp_rank = tp_rank % dcp_size</code>、<code>attn_dcp_size = dcp_size</code>（scheduler.py:485-486）</div>
+    <div class="mini"><b>② 全局访问点</b>kernel 里用 <code>get_parallel().attn_dcp_rank / attn_dcp_size</code> 读；DCP 关时退化为 size=1、rank=0</div>
+    <div class="mini"><b>③ 发 widened id</b>调度器发「全局虚拟编号」v ∈ [0, size×dcp)，读写两侧各自做 v//dcp 换算</div>
+  </div>
+  <div class="chips">
+    <span class="chip">📜 契约原文（memory_pool.py:4240-4245）："loc is widened under DCP; the kernel divides by the world size itself."</span>
+  </div>
+  <div class="footnote"><b>dcp=1 时自动退化</b>：<code>v % 1 == 0</code> 恒真、<code>v // 1 == v</code>——同一份代码在单卡时自动变成非 DCP 行为，所以那两行换算<b>永远</b>都在（哪怕单卡）。本文的 bug 就是新 fused kernel 把这两行漏了，把全局编号 v 直接当本地行号写。</div>
+</div>
+</section>
+
+<!-- ============ 9 现象 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">现象 · 三个变量：dcp 值 / 优化开关 / 时间</div>
@@ -218,7 +316,7 @@
 </div>
 </section>
 
-<!-- ============ 6 排查路径总览（漏斗） ============ -->
+<!-- ============ 10 排查路径总览（漏斗） ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">排查路径 · 从宽到窄的五层收敛</div>
@@ -254,7 +352,7 @@
 </div>
 </section>
 
-<!-- ============ 7 收敛① 变量隔离 ============ -->
+<!-- ============ 11 收敛① 变量隔离 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -292,7 +390,7 @@
 </div>
 </section>
 
-<!-- ============ 8 收敛② 虚拟 id ============ -->
+<!-- ============ 12 收敛② 虚拟 id ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -357,7 +455,7 @@
 </div>
 </section>
 
-<!-- ============ 9 收敛③ 全库契约 ============ -->
+<!-- ============ 13 收敛③ 全库契约 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -388,7 +486,7 @@ DCP_RANK=get_parallel().attn_dcp_rank,  DCP_WORLD_SIZE=get_parallel().attn_dcp_s
 </div>
 </section>
 
-<!-- ============ 10 收敛④ 根因 ============ -->
+<!-- ============ 14 收敛④ 根因 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -418,7 +516,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
   <div class="footnote">commit 之前同一位置走 <code>quantize_k_cache_separate + set_mla_kv_buffer_triton</code>（DCP 感知）：见 <a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> 的 parent。commit 自带的字节级一致性测试只在 dcp=1 下等价（loc 语义一变就测不出来）。</div>
 </div>
 </section>
-<!-- ============ 11 根因对照：正确 vs 错误 ============ -->
+<!-- ============ 15 根因对照：正确 vs 错误 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -460,7 +558,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
   <div class="footnote"><b>与 indexer share 的关系</b>：indexer share = 这行 656B 的 KV 同时被 indexer（选路打分）和 attention（计算）共享——这个概念<b>早就存在，不是本 commit 加的</b>。本 commit 只动了「往这行 KV 写入」的 kernel（两步融合成一步），融合时丢了 DCP 换算。所以 bug 在「写路径」，不在「共享」本身。</div>
 </div>
 </section>
-<!-- ============ 12 正确写回 kernel 全貌 ============ -->
+<!-- ============ 16 正确写回 kernel 全貌 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -547,7 +645,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 13 错误 fused kernel 全貌 ============ -->
+<!-- ============ 17 错误 fused kernel 全貌 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -609,7 +707,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 14 定位·空间 ============ -->
+<!-- ============ 18 定位·空间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -678,7 +776,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 15 定位·时间 ============ -->
+<!-- ============ 19 定位·时间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -720,7 +818,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 16 现象核对 ① 开头正常 ============ -->
+<!-- ============ 20 现象核对 ① 开头正常 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -757,7 +855,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 17 现象核对 ② 几小时后 ============ -->
+<!-- ============ 21 现象核对 ② 几小时后 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -780,7 +878,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 18 现象核对 ③ 不是所有请求 ============ -->
+<!-- ============ 22 现象核对 ③ 不是所有请求 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -817,7 +915,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 19 现象核对 ④ 关掉就好了 ============ -->
+<!-- ============ 23 现象核对 ④ 关掉就好了 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -903,7 +1001,7 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 </section>
 
-<!-- ============ 20 现象核对 ⑤ dcp=8 没炸 ============ -->
+<!-- ============ 24 现象核对 ⑤ dcp=8 没炸 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -925,7 +1023,7 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 </section>
 
-<!-- ============ 21 修复 ============ -->
+<!-- ============ 25 修复 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">修复 · 把旧 kernel 的两行映射补回来</div>
@@ -949,7 +1047,7 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 </section>
 
-<!-- ============ 22 证据索引 ============ -->
+<!-- ============ 26 证据索引 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">证据索引 · 每条结论的源码出处（点击直达 GitHub）</div>
@@ -975,7 +1073,7 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 </section>
 
-<!-- ============ 23 总结 ============ -->
+<!-- ============ 27 总结 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">总结 · 三句话</div>
@@ -1007,23 +1105,74 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 <div class="hint">← / → 翻页</div>
 
+<button class="toc-btn" id="tocBtn" aria-label="目录">☰ 目录</button>
+<nav class="toc" id="toc" aria-label="目录">
+  <div class="toc-head">目录 <button class="toc-close" id="tocClose" aria-label="关闭">✕</button></div>
+  <div id="tocList"></div>
+</nav>
+
 <script>
 (function () {
   var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
   var i = 0;
   var counter = document.getElementById('counter');
   var progress = document.querySelector('.progress');
+  var toc = document.getElementById('toc');
+  var tocList = document.getElementById('tocList');
+  var tocItems = [];
+  function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function slideTitle(s) {
+    var h2 = s.querySelector('.inner h2');
+    if (!h2) return '';
+    var c = h2.cloneNode(true);
+    c.querySelectorAll('br').forEach(function (b) { b.replaceWith(' '); });
+    return c.textContent.replace(/\s+/g, ' ').trim();
+  }
+  (function buildToc() {
+    var groups = [];
+    slides.forEach(function (s, k) {
+      var kicker = s.querySelector('.kicker');
+      var group = kicker ? kicker.textContent.trim().split('·')[0].trim() : '';
+      group = group.replace(/\s*[①②③④⑤⑥⑦⑧⑨⑩].*$/, '');
+      if (!group) group = '其他';
+      var g = groups[groups.length - 1];
+      if (!g || g.name !== group) { g = { name: group, items: [] }; groups.push(g); }
+      g.items.push({ title: slideTitle(s), index: k });
+    });
+    var html = '';
+    groups.forEach(function (g) {
+      html += '<div class="toc-group">' + esc(g.name) + '</div>';
+      g.items.forEach(function (it) {
+        html += '<div class="toc-item" data-i="' + it.index + '">' + (it.index + 1) + '. ' + esc(it.title) + '</div>';
+      });
+    });
+    tocList.innerHTML = html;
+    tocItems = Array.prototype.slice.call(tocList.querySelectorAll('.toc-item'));
+  })();
   function go(n) {
     i = Math.max(0, Math.min(slides.length - 1, n));
     slides.forEach(function (s, k) { s.classList.toggle('active', k === i); });
     counter.textContent = (i + 1) + ' / ' + slides.length;
     progress.style.width = ((i + 1) / slides.length * 100) + '%';
+    tocItems.forEach(function (el) {
+      el.classList.toggle('active', parseInt(el.getAttribute('data-i'), 10) === i);
+    });
+    var active = tocList.querySelector('.toc-item.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
     var inner = slides[i].querySelector('.inner');
     if (inner) inner.scrollTop = 0;
     history.replaceState(null, '', '#p' + (i + 1));
   }
   document.getElementById('prev').onclick = function () { go(i - 1); };
   document.getElementById('next').onclick = function () { go(i + 1); };
+  document.getElementById('tocBtn').onclick = function () { toc.classList.toggle('open'); };
+  document.getElementById('tocClose').onclick = function () { toc.classList.remove('open'); };
+  tocList.addEventListener('click', function (e) {
+    var el = e.target.closest ? e.target.closest('.toc-item') : null;
+    if (!el) return;
+    go(parseInt(el.getAttribute('data-i'), 10));
+    toc.classList.remove('open');
+  });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); go(i + 1); }
     else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); go(i - 1); }
