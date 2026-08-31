@@ -158,8 +158,8 @@
 <tr>
 <td>—</td>
 <td>最后请求失败（无应答）</td>
-<td>末尾请求 resp 为空（量待修后对账 V4）</td>
-<td>失败请求在 dwd 也有行（网关记了请求、响应为空），<code>MAX_BY(…, ts)</code> 取最新不问有效性</td>
+<td>末尾请求 resp 解析不出（量待修后对账 V4；实测 pt=2026083000 单小时：200×14,626 / 502×13 / 400×1，502 响应体是错误 JSON）</td>
+<td>失败请求在 dwd 也有行（网关记了请求；response_body 是错误 JSON 如 <code>{"error":{"code":502,…}}</code>，解析不出 choices → resp_choices NULL），<code>MAX_BY(…, ts)</code> 取最新不问有效性</td>
 <td>行级 WHERE 只聚合有应答的请求；全失败 session 自然消失</td>
 <td>V4 行数对账可解释</td>
 <td>§3 修法①</td>
@@ -231,7 +231,7 @@
 </code></pre>
 <p>（输入为什么是空的：responses 4 条 = 续话客户端最后请求 input 空——历史在服务端；chat 2 条 = 最后请求 body 解析不出，与「最后请求失败」同构，都是 MAX_BY 取到有问题的最后一行。修好 P0-1 行级过滤后，chat 那 2 条可能被救回——回退到最后一次有效交换——或消失。）</p>
 <p><strong>最后请求失败</strong>（无应答；量待修后对账 V4）</p>
-<pre><code class="language-text">背景: 失败请求在 dwd 也有行——网关记了请求（request_body 正常）、上游失败（response_body 空 → resp_choices NULL）
+<pre><code class="language-text">背景: 失败请求在 dwd 也有行——网关记了请求（request_body 正常，完整历史），上游失败（response_body 是错误 JSON 如 {&quot;error&quot;:{&quot;code&quot;:502,&quot;message&quot;:&quot;Upstream access forbidden…&quot;}}，解析不出 choices → resp_choices NULL；实测单小时 502×13/400×1）
 现状 ❌: session 有 3 次请求，第 3 次失败（resp 空）
         → MAX_BY(req_messages, ts) 取第 3 次的历史，但它的 resp 拼不上 → 缺口
 修复后 ✅: 行级 WHERE 排除无应答请求 → 取第 2 次请求 + 第 2 次应答
@@ -920,6 +920,7 @@ WHERE statis_day = '${statis_day}'
 </ol>
 <hr />
 <p><em>证据存档：source×last_role 矩阵、effort 分布、空数组统计、tools 空值归因（n_tool_use 交叉）、空 messages 6 条明细、stg response_body 结构采样、dwd/app ETL 源文件（etl/app/app_macaron_relay_stack_glm_day.sql、etl/dwd/dwd_macaron_relay_stack_chat_completions_total_day.sql）。基线分区 20260830，v3 生成于 2026-08-31。</em></p>
+
 <footer>
   <p>本文为数仓 app_macaron_relay_stack_glm_day 修复评审稿 v6（格式层确认表前置 + 逐问题示例；P1-3 修法改为删除字段）。数据基于 MaxCompute statis_day=20260830 全量快照（表 LIFECYCLE 3 天，复跑验收请用最新分区）。markdown 源文件见同仓 <a href="app-glm-day-fix-plan.md">app-glm-day-fix-plan.md</a>，卡片版见 <a href="app-glm-day-fix-cards.html">app-glm-day-fix-cards.html</a>。</p>
   <p style="margin-top:8px;">san-tian 的技术 blog · <a href="index.html">返回目录</a></p>

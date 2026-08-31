@@ -21,7 +21,7 @@
 | P1-3 | reasoning_effort 值域非法 | chat 源 100% ∉ {high,max}（COALESCE 兜底 'medium'） | 写死非法值，契约 `Literal["high","max"]` | **整个删除**：`NULL AS chat_template_kwargs` 不产出（契约 Optional，实测省略键过 L0-L6；映射不好管理就不映射，effort 由下游决定） | V2 全部 NULL | §5 |
 | P1-4a | tools 空数组 | 44,395 条（64%）`tools=[]`，L0-L6 直接 FATAL | `ELSE JSON_ARRAY()` 把「无工具」表达成非法形态 | `ELSE NULL`（空则省略键）+ MAX_BY 条件化（取最后一次**带** tools 的请求） | V3 `[]`=0 | §6 |
 | P1-5 | 空 messages 记录 | 6 条（4 续话 + 2 chat 畸形 body） | 最后请求的输入无效（续话：历史在服务端；chat：疑 body 截断/畸形）→ `ELSE JSON_ARRAY()` 兜底硬造空记录 | 分支 WHERE 丢弃，不产出 | V3 空 messages=0 | §7 |
-| — | 最后请求失败（无应答） | 末尾请求 resp 为空（量待修后对账 V4） | 失败请求在 dwd 也有行（网关记了请求、响应为空），`MAX_BY(…, ts)` 取最新不问有效性 | 行级 WHERE 只聚合有应答的请求；全失败 session 自然消失 | V4 行数对账可解释 | §3 修法① |
+| — | 最后请求失败（无应答） | 末尾请求 resp 解析不出（量待修后对账 V4；实测 pt=2026083000 单小时：200×14,626 / 502×13 / 400×1，502 响应体是错误 JSON） | 失败请求在 dwd 也有行（网关记了请求；response_body 是错误 JSON 如 `{"error":{"code":502,…}}`，解析不出 choices → resp_choices NULL），`MAX_BY(…, ts)` 取最新不问有效性 | 行级 WHERE 只聚合有应答的请求；全失败 session 自然消失 | V4 行数对账可解释 | §3 修法① |
 | P1-4b | 无工具纯对话 | 空 tools 里 99.4%（43,313+708+369 条）整个 session 零工具调用（n_tool_use=0/null） | ①✓ 客户端真没带 ②✓ 修完 P1-4a 后表达对（省略键）③✗ 纯聊天无 agentic 训练价值。**不在格式层 WHERE 掉的理由**：格式层不做事价值判断，且行数对账解释不了「为什么少了 44k」 | **筛选** | 18 条款 2.x/3.x 淘汰 | §10 |
 
 **格式层总验收**（§8）：V1 三源闭环率 ≈100% / V2 chat_template_kwargs 全部 NULL（不产出） / V3 空数组与空记录 = 0 / V4 行数下降量可解释（无应答 session + 续话碎片）/ V5 本地 L0-L6 抽检 50 条，FATAL 归零（chat_template_kwargs 不产出后无 effort 类）。
@@ -115,7 +115,7 @@
 **最后请求失败**（无应答；量待修后对账 V4）
 
 ```text
-背景: 失败请求在 dwd 也有行——网关记了请求（request_body 正常）、上游失败（response_body 空 → resp_choices NULL）
+背景: 失败请求在 dwd 也有行——网关记了请求（request_body 正常，完整历史），上游失败（response_body 是错误 JSON 如 {"error":{"code":502,"message":"Upstream access forbidden…"}}，解析不出 choices → resp_choices NULL；实测单小时 502×13/400×1）
 现状 ❌: session 有 3 次请求，第 3 次失败（resp 空）
         → MAX_BY(req_messages, ts) 取第 3 次的历史，但它的 resp 拼不上 → 缺口
 修复后 ✅: 行级 WHERE 排除无应答请求 → 取第 2 次请求 + 第 2 次应答

@@ -274,8 +274,15 @@ UDF 碎片检测：<span class="hl">input 消息数 vs session 轮数严重失�
   <div class="chips">
     <span class="chip">末尾请求 resp 为空；全失败 session 数量待修后对账（验收 V4）</span>
   </div>
-  <div class="mini no"><b>机制</b>失败请求在 dwd 也有行——网关记了请求（request_body 正常）、上游失败（response_body 空 → resp_choices NULL）。<code>MAX_BY(x, ts)</code> 取 ts 最大那行的值，不问那行是否有效 → 取到失败那次：历史有了、应答拼不上。</div>
-  <pre class="code"><span class="cmt">背景：session 有 3 次请求，第 3 次失败（resp 空）</span>
+  <div class="mini no"><b>机制</b>失败请求在 dwd 也有行——网关记了请求（request_body 正常，完整历史），上游失败时 response_body 是<b>错误 JSON</b>（不是空），解析不出 choices → resp_choices = NULL。<b>实测</b>（pt=2026083000 单小时）：200 共 14,626 条，<b>502 × 13、400 × 1</b>——502 的响应体是 <code>{"error":{"code":502,"message":"Upstream access forbidden…","type":"upstream_error"}}</code>。</div>
+  <table class="tbl">
+    <tr><th>ts</th><th>req_messages</th><th>resp_choices</th><th>说明</th></tr>
+    <tr><td>100</td><td>第 1 轮历史</td><td>第 1 轮应答</td><td>成功</td></tr>
+    <tr><td>200</td><td>第 2 轮历史</td><td>第 2 轮应答</td><td>成功</td></tr>
+    <tr><td><b>300</b></td><td><b>第 3 轮历史（最新最全）</b></td><td><b style="color:#dc2626">NULL</b></td><td>上游 502 → 响应体是错误 JSON，解析不出 choices</td></tr>
+  </table>
+  <div class="mini warn"><b>MAX_BY 的关键误区</b>：它不是「取最后一个非空的值」，是「取时间最新<b>那一行</b>的值」——那行恰好是 NULL 就拿到 NULL，<b>不会回退到上一行</b>：<code>MAX_BY(resp_choices, ts)</code> = 第 3 轮的 NULL，而不是第 2 轮的应答。</div>
+  <pre class="code"><span class="cmt">背景：session 有 3 次请求，第 3 次失败（resp 是错误 JSON → 解析出 resp_choices = NULL）</span>
 <span class="tag no">现状 ❌</span>
 MAX_BY(req_messages, ts) → 第 3 次的历史（最新，但它的 resp 拼不上）→ 缺口
 <span class="tag ok">修复后 ✅</span>
