@@ -828,8 +828,9 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
     <span class="step cur">现象核对</span>
   </div>
   <div class="kicker" style="margin-top:2px;">现象核对 ④/5 · 关掉 Indexer Share 就好了</div>
-  <h2>为什么关掉就好了？</h2>
-  <pre class="code"><span class="cmt"># 关掉 = 回退这个 commit = 用回旧两步路径，写 kernel 里有 DCP 换算：</span>
+  <h2>为什么关掉（或回退）就好了？</h2>
+  <pre class="code"><span class="cmt"># 无论「关掉 indexer share（换 bf16）」还是「回退 commit（fp8 退回两步）」，
+# 写都回到带 DCP 换算的旧 kernel set_mla_kv_buffer_triton：</span>
 is_valid = (loc != reserved_skip_index) &amp; (loc % DCP_WORLD_SIZE == DCP_RANK)   <span class="cmt">① 归属过滤：只写自己 rank 的 token</span>
 safe_loc = tl.where(is_valid, loc, 0)
 safe_loc = safe_loc // DCP_WORLD_SIZE                                         <span class="cmt">② 虚拟 id → 本卡物理行</span>
@@ -839,10 +840,10 @@ tl.store(dst_ptr + safe_loc * stride + offs, src, mask=… &amp; is_valid)
 cache_loc = tl.load(loc_ptr + token_id)                                       <span class="bad">✗ 无过滤、无换算</span>
 tl.store(nope_buf_ptr + cache_loc * stride + offs, y_q)                      <span class="bad">✗ 行号错 + v≥size 越界</span></pre>
   <div class="grid2">
-    <div class="mini ok"><b>旧 kernel（关掉后）</b>把虚拟 id 换算成本卡行号（v // dcp），且只写自己 rank 的 token → 行号永远 &lt; size，<b>永不越界</b></div>
+    <div class="mini ok"><b>旧 kernel（关掉/回退后）</b>把虚拟 id 换算成本卡行号（v // dcp），且只写自己 rank 的 token → 行号永远 &lt; size，<b>永不越界</b></div>
     <div class="mini no"><b>新 kernel（开着）</b><code>cache_loc = loc</code> 原样当行号 → 行号错，v≥size 时越界写相邻内存</div>
   </div>
-  <div class="footnote">关掉/恢复的唯一变量就是「写 kernel」——所以「关掉就好了」是「变量隔离」的正面证据，与代码 diff（旧 kernel 有 mask+divide、新 kernel 没有）完全对得上。</div>
+  <div class="footnote">澄清：indexer share（fp8 共享 KV 布局）是更早就有的 feature，本 commit 只是把它的写路径融合了。所以「关掉 indexer share」（换 bf16）和「回退 commit」（fp8 退回两步）是<b>两个不同动作</b>，但殊途同归——都绕开 fused kernel、回到带 DCP 换算的 <code>set_mla_kv_buffer_triton</code>，所以都好。</div>
 </div>
 </section>
 
