@@ -176,7 +176,7 @@
     <div class="mini"><b>与本文的关系</b>indexer 打分与 attention 计算读<b>同一份 K</b>（同一行 656B）——优化名 "indexer KV share" 的由来；本文排查的正是这份数据的写入 kernel</div>
   </div>
   <div class="chips">
-    <span class="chip">📄 <b>DCP</b>：本文第 5-8 页详解（概念 / 省显存 / 怎么用）；实测见 <a href="dynamic-context-parallelism.md">《DCP 实测》</a></span>
+    <span class="chip">📄 <b>DCP</b>：本文第 5-9 页详解（概念 / 省显存 / 怎么用）；实测见 <a href="dynamic-context-parallelism.md">《DCP 实测》</a></span>
     <span class="chip">📄 <b>KV cache / kernel / MLA</b>：旧文已讲过，直接使用（<a href="glossary.md">glossary.md</a>）</span>
   </div>
   <div class="footnote">名词约定：slot / 行 = KV cache 的一个 token 槽位；loc = 写入目标 slot 编号；rank = 一个 DCP 参与方（一张 GPU 一个 rank）；「乱码」= 模型输出变成无意义文字。indexer 为本文首次详细解释，已登记术语索引。</div>
@@ -206,10 +206,10 @@
 </div>
 </section>
 
-<!-- ============ 5 背景·DCP 1/4：KV cache 与并行地图 ============ -->
+<!-- ============ 5 背景·DCP 1/5：KV cache 与并行地图 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">背景 · DCP 1/4：为什么需要它（本文首次详细解释）</div>
+  <div class="kicker">背景 · DCP 1/5：为什么需要它（本文首次详细解释）</div>
   <h2>KV cache 随序列线性涨，DCP 是切「序列」的那把刀</h2>
   <div class="grid2">
     <div class="mini"><b>KV cache 是什么</b>自回归生成时，每个历史 token 的 K、V 算一次存起来反复读（避免每步重算 O(n²)）。大小 = <b>序列长度 × 每 token 字节数</b>，随序列<b>线性</b>增长——长上下文下它是显存里最大的一块</div>
@@ -226,10 +226,10 @@
 </div>
 </section>
 
-<!-- ============ 6 背景·DCP 2/4：轮转切分 ============ -->
+<!-- ============ 6 背景·DCP 2/5：轮转切分 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">背景 · DCP 2/4：怎么切</div>
+  <div class="kicker">背景 · DCP 2/5：怎么切</div>
   <h2>轮转切分：v % dcp 定归属，v // dcp 定本地行</h2>
   <p style="font-size:14px; color:var(--text-dim); margin:4px 0 10px;">不是「卡 0 存前 1/4、卡 1 存后 1/4」的连续切，而是<b>轮转</b>：每个 token 拿全局编号 v，按 <code>v % dcp</code> 归卡。</p>
   <table class="tbl">
@@ -250,10 +250,10 @@ safe_loc = tl.where(is_valid, loc, 0) // DCP_WORLD_SIZE                        <
 </div>
 </section>
 
-<!-- ============ 7 背景·DCP 3/4：显存的账与代价 ============ -->
+<!-- ============ 7 背景·DCP 3/5：显存的账与代价 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">背景 · DCP 3/4：收益与代价</div>
+  <div class="kicker">背景 · DCP 3/5：收益与代价</div>
   <h2>每卡显存 ÷ dcp，代价是跨卡取 KV</h2>
   <div class="grid2">
     <div class="mini ok"><b>收益 · 说法 A（固定序列看每卡）</b>服务一条 L token 序列：无 DCP 一卡存 <code>L×每token字节</code>；DCP=4 每卡只存 <code>L/4×每token字节</code> → <b>每卡显存 ÷ 4</b></div>
@@ -271,10 +271,35 @@ safe_loc = tl.where(is_valid, loc, 0) // DCP_WORLD_SIZE                        <
 </div>
 </section>
 
-<!-- ============ 8 背景·DCP 4/4：怎么用 ============ -->
+<!-- ============ 8 背景·DCP 4/5：通信在何时、用什么 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">背景 · DCP 4/4：怎么用</div>
+  <div class="kicker">背景 · DCP 4/5：代价的展开——通信</div>
+  <h2>attention 这一步通信：all-gather 汇集 KV，all-reduce 合并输出</h2>
+  <p style="font-size:14px; color:var(--text-dim); margin:4px 0 8px;">通信发生在 <b>attention 计算这一步、每个 decode step 都要做</b>（不是加载权重时）。序列切到 4 卡后，attention 是「每个 query 看所有 token」的全对全，每卡必须拿到别的卡手里的 KV。共三处，全在 <code>comm.py</code>：</p>
+  <table class="tbl">
+    <tr><th>时机</th><th>collective</th><th>目的</th><th>代码</th></tr>
+    <tr><td>汇集 KV</td><td><b>all-gather</b></td><td>每卡把 1/dcp 的 prefix KV 广播给所有卡，拼成完整 KV</td><td><code>comm.py:181</code> all_gather_into_tensor</td></tr>
+    <tr><td>汇集 Q</td><td><b>all-gather</b></td><td>query 也是分片的，同样广播</td><td><code>comm.py:266</code> all_gather</td></tr>
+    <tr><td>合并局部 attention</td><td><b>all-gather LSE</b> + <b>all-reduce</b>（或 reduce-scatter）</td><td>每卡只算了自己分片的「局部输出 Oᵢ + LSEᵢ」，要合并成全局 softmax</td><td><code>comm.py:92 / 114 / 161</code></td></tr>
+  </table>
+  <pre class="code"><span class="cmt"># ① 汇集 KV：all-gather（拼完整数据，不是求和）</span>
+parallel.dcp_group.all_gather_into_tensor(gathered_kv_a, kv_a)   <span class="cmt"># comm.py:181</span>
+<span class="cmt"># ② 合并局部 attention 结果（LSE 修正）</span>
+lses = cp_group.all_gather(cp_attn_lse, dim=0)                   <span class="cmt"># comm.py:92  先广播各自 LSE</span>
+out  = cp_group.all_reduce(out)                                  <span class="cmt"># comm.py:114 再求和缩放后的输出</span></pre>
+  <div class="grid2">
+    <div class="mini"><b>为什么 KV 用 all-gather 不是 all-reduce</b>语义不同：<b>all-reduce = 求和</b>（训练里把各卡梯度加起来）；<b>all-gather = 拼接</b>（把分片拼成完整数据）。KV 是要「读到完整数据」，不是求和——所以用 all-gather</div>
+    <div class="mini"><b>合并公式（为何要 LSE）</b>数值稳定的 softmax 用 max + sum-exp；分片后每卡只算部分 keys，得到 (Oᵢ, LSEᵢ)。合并：<code>O = Σᵢ Oᵢ × exp(LSEᵢ − LSE_global)</code>，LSE_global = logsumexp(所有 LSEᵢ)。所以先 all-gather LSE、再 all-reduce 输出</div>
+  </div>
+  <div class="footnote">all-reduce 只出现在「合并局部输出」这一步（求和语义）；汇集 KV/Q 都是 all-gather（拼接语义）。MHA 后端用 all-reduce（comm.py:114）、MLA 后端用 reduce-scatter（comm.py:161）——都是 Σ 求和，只是结果落位不同。</div>
+</div>
+</section>
+
+<!-- ============ 9 背景·DCP 5/5：怎么用 ============ -->
+<section class="slide">
+<div class="inner">
+  <div class="kicker">背景 · DCP 5/5：怎么用</div>
   <h2>开 <code>--dcp-size N</code>，剩下的框架自动做</h2>
   <p style="font-size:14px; color:var(--text-dim); margin:4px 0 8px;">你<b>不需要写任何 per-rank 逻辑</b>，只需启动参数开 DCP：</p>
   <pre class="code"><span class="cmt"># decode 端（本文排查的写 kernel 跑在这边）</span>
@@ -293,7 +318,7 @@ safe_loc = tl.where(is_valid, loc, 0) // DCP_WORLD_SIZE                        <
 </div>
 </section>
 
-<!-- ============ 9 现象 ============ -->
+<!-- ============ 10 现象 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">现象 · 三个变量：dcp 值 / 优化开关 / 时间</div>
@@ -314,7 +339,7 @@ safe_loc = tl.where(is_valid, loc, 0) // DCP_WORLD_SIZE                        <
 </div>
 </section>
 
-<!-- ============ 10 排查路径总览（漏斗） ============ -->
+<!-- ============ 11 排查路径总览（漏斗） ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">排查路径 · 从宽到窄的五层收敛</div>
@@ -350,7 +375,7 @@ safe_loc = tl.where(is_valid, loc, 0) // DCP_WORLD_SIZE                        <
 </div>
 </section>
 
-<!-- ============ 11 收敛① 变量隔离 ============ -->
+<!-- ============ 12 收敛① 变量隔离 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -388,7 +413,7 @@ safe_loc = tl.where(is_valid, loc, 0) // DCP_WORLD_SIZE                        <
 </div>
 </section>
 
-<!-- ============ 12 收敛② 虚拟 id ============ -->
+<!-- ============ 13 收敛② 虚拟 id ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -453,7 +478,7 @@ safe_loc = tl.where(is_valid, loc, 0) // DCP_WORLD_SIZE                        <
 </div>
 </section>
 
-<!-- ============ 13 收敛③ 全库契约 ============ -->
+<!-- ============ 14 收敛③ 全库契约 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -484,7 +509,7 @@ DCP_RANK=get_parallel().attn_dcp_rank,  DCP_WORLD_SIZE=get_parallel().attn_dcp_s
 </div>
 </section>
 
-<!-- ============ 14 收敛④ 根因 ============ -->
+<!-- ============ 15 收敛④ 根因 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -514,7 +539,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
   <div class="footnote">commit 之前同一位置走 <code>quantize_k_cache_separate + set_mla_kv_buffer_triton</code>（DCP 感知）：见 <a href="https://github.com/san-tian/sglang/commit/0a60805df4">commit 0a60805df4</a> 的 parent。commit 自带的字节级一致性测试只在 dcp=1 下等价（loc 语义一变就测不出来）。</div>
 </div>
 </section>
-<!-- ============ 15 根因对照：正确 vs 错误 ============ -->
+<!-- ============ 16 根因对照：正确 vs 错误 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -556,7 +581,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
   <div class="footnote"><b>与 indexer share 的关系</b>：indexer share = 这行 656B 的 KV 同时被 indexer（选路打分）和 attention（计算）共享——这个概念<b>早就存在，不是本 commit 加的</b>。本 commit 只动了「往这行 KV 写入」的 kernel（两步融合成一步），融合时丢了 DCP 换算。所以 bug 在「写路径」，不在「共享」本身。</div>
 </div>
 </section>
-<!-- ============ 16 正确写回 kernel 全貌 ============ -->
+<!-- ============ 17 正确写回 kernel 全貌 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -643,7 +668,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 17 错误 fused kernel 全貌 ============ -->
+<!-- ============ 18 错误 fused kernel 全貌 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -705,7 +730,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 18 定位·空间 ============ -->
+<!-- ============ 19 定位·空间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -774,7 +799,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 19 定位·时间 ============ -->
+<!-- ============ 20 定位·时间 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -816,7 +841,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 20 现象核对 ① 开头正常 ============ -->
+<!-- ============ 21 现象核对 ① 开头正常 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -853,7 +878,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 21 现象核对 ② 几小时后 ============ -->
+<!-- ============ 22 现象核对 ② 几小时后 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -876,7 +901,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 22 现象核对 ③ 不是所有请求 ============ -->
+<!-- ============ 23 现象核对 ③ 不是所有请求 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -913,7 +938,7 @@ tl.store(rope_buf_ptr  + <span class="bad">cache_loc</span> * rope_buf_stride_0 
 </div>
 </section>
 
-<!-- ============ 23 现象核对 ④ 关掉就好了 ============ -->
+<!-- ============ 24 现象核对 ④ 关掉就好了 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -999,7 +1024,7 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 </section>
 
-<!-- ============ 24 现象核对 ⑤ dcp=8 没炸 ============ -->
+<!-- ============ 25 现象核对 ⑤ dcp=8 没炸 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="funnel">
@@ -1021,7 +1046,7 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 </section>
 
-<!-- ============ 25 修复 ============ -->
+<!-- ============ 26 修复 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">修复 · 把旧 kernel 的两行映射补回来</div>
@@ -1045,7 +1070,7 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 </section>
 
-<!-- ============ 26 证据索引 ============ -->
+<!-- ============ 27 证据索引 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">证据索引 · 每条结论的源码出处（点击直达 GitHub）</div>
@@ -1071,7 +1096,7 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 </section>
 
-<!-- ============ 27 总结 ============ -->
+<!-- ============ 28 总结 ============ -->
 <section class="slide">
 <div class="inner">
   <div class="kicker">总结 · 三句话</div>

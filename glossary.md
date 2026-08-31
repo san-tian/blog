@@ -24,9 +24,9 @@
 | **DSA（DeepSeek Sparse Attention）** | 稀疏注意力架构：先 indexer 选路、再对 top-k 条目计算（两段式） | dsa-fused-kv-store-dcp-regression.html（P2，首次详细解释） |
 | **indexer（索引器）** | DSA 的选路模块：fp8 低精度打分器扫全部历史 KV、选出 top-k（GLM-5.2 约 2048） | dsa-fused-kv-store-dcp-regression.html（P2，首次详细解释） |
 | indexer KV share | indexer 打分与 attention 计算共用同一份 K（656B 行） | dsa-fused-kv-store-dcp-regression.html（P3） |
-| DCP（概念） | KV Cache 切分维度从头维改为序列维，消除高 TP 下 KV 重复存储 | dynamic-context-parallelism.md；本文 P5-8 |
+| DCP（概念） | KV Cache 切分维度从头维改为序列维，消除高 TP 下 KV 重复存储 | dynamic-context-parallelism.md；本文 P5-9 |
 | DCP 上限公式 | DCP 上限 = TP 并行度 ÷ KV 头数（且需整除） | glm52-dcp-config-draft.md |
-| DCP（sglang 实现：虚拟 id 换算） | loc 为全局虚拟 slot 编号；写入前换算：归属 rank = v % dcp，物理行号 = v // dcp | dsa-fused-kv-store-dcp-regression.html（P6 详解；排查见 P12）；prefill CP 与 decode CP 对比见 why-prefill-cp-breaks-standalone-decode.md（§4.3） |
+| DCP（sglang 实现：虚拟 id 换算） | loc 为全局虚拟 slot 编号；写入前换算：归属 rank = v % dcp，物理行号 = v // dcp | dsa-fused-kv-store-dcp-regression.html（P6 详解；排查见 P13）；prefill CP 与 decode CP 对比见 why-prefill-cp-breaks-standalone-decode.md（§4.3） |
 | 656B fp8 DSA KV 行布局 | [k_nope fp8(512B) \| scales(16B) \| k_rope bf16(128B)]，indexer 与 attention 共读 | glm52-tpot-decode-optimization.html（§背景） |
 | fp8 e4m3fn 量化 | 对称格式，max = -min = 448；per-128 块 fp32 scale | glm52-tpot-decode-optimization.html（§正确性细节） |
 | MTP（多 token 预测） | 每步起草多个 token 的投机解码；draft 槽位分走 KV pool | mtp-kv-cache-viz.html |
