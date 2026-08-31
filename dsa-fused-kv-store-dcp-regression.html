@@ -206,14 +206,14 @@
 </div>
 </section>
 
-<!-- ============ 5 背景·DCP 1/5：KV cache 与并行地图 ============ -->
+<!-- ============ 5 背景·DCP 1/5：为什么有了 TP 还要它 ============ -->
 <section class="slide">
 <div class="inner">
-  <div class="kicker">背景 · DCP 1/5：为什么需要它（本文首次详细解释）</div>
-  <h2>KV cache 随序列线性涨，DCP 是切「序列」的那把刀</h2>
+  <div class="kicker">背景 · DCP 1/5：为什么有了 TP 还要它（本文首次详细解释）</div>
+  <h2>TP 切「权重」，DCP 切「KV cache 这份数据」——两种内存</h2>
   <div class="grid2">
-    <div class="mini"><b>KV cache 是什么</b>自回归生成时，每个历史 token 的 K、V 算一次存起来反复读（避免每步重算 O(n²)）。大小 = <b>序列长度 × 每 token 字节数</b>，随序列<b>线性</b>增长——长上下文下它是显存里最大的一块</div>
-    <div class="mini"><b>问题</b>几十万～上百万 token 时，单张 GPU 装不下整条序列的 KV，必须切到多张卡。切哪一维、怎么切，就是下面这张地图</div>
+    <div class="mini warn"><b>误区：TP 不是已经在切了吗？</b>TP 切的是<b>模型权重</b>（固定大小，模型多大就多大）；而 <b>KV cache 是运行时数据</b>——每个历史 token 的 K、V 算一次存起来反复读（自回归），大小 = 序列 × 每 token 字节，随序列<b>线性</b>增长。两者根本不是同一种内存。</div>
+    <div class="mini ok"><b>所以 DCP 补「序列」这一维</b>TP 对 KV cache 只切<b>头</b>维（每卡 <code>头数/tp</code> 个头），但<b>整条序列每张卡都存</b>；长上下文吃爆显存的是「序列长度」这条轴，只有 DCP 能切它——把序列按轮转切到多卡，每卡只存 <code>1/dcp</code> 的 token。</div>
   </div>
   <table class="tbl">
     <tr><th>并行方式</th><th>切什么</th><th>对 KV cache 的影响</th></tr>
@@ -222,7 +222,7 @@
     <tr><td><b>TP</b> 张量并行</td><td>模型权重按「头 / 隐藏维」切</td><td>KV 按<b>头</b>切：每卡 <code>头数/tp</code> 个头，但<b>整条序列仍在每张卡上</b></td></tr>
     <tr><td><b>DCP</b> 数据/上下文并行</td><td>切<b>序列（context）维度</b></td><td>KV 按<b>序列</b>切：每卡只存 <code>1/dcp</code> 的 token</td></tr>
   </table>
-  <div class="footnote">关键区别：TP 切「头」，每张卡还是要存<b>完整序列</b>，所以长上下文下 TP 帮不上 KV 的忙；DCP 才直接切「序列长度」——KV cache 增长最快的那个因子。这就是为什么 dcp&gt;1 才需要做那套「归属 + 行号换算」。</div>
+  <div class="footnote"><b>每卡 KV cache 公式</b>：只有 TP = <code>(头数/tp) × 完整序列 × head_dim × 2 × 字节</code>；加 DCP = <code>头数 × (序列/dcp) × head_dim × 2 × 字节</code>。TP 和 DCP 正交——TP 切头、DCP 切序列，长上下文必须两个一起上。这就是为什么 dcp&gt;1 才需要那套「归属 + 行号换算」。</div>
 </div>
 </section>
 
