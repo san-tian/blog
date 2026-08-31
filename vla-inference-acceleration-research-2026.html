@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="系统调研 VLA 推理加速的动作并行解码、flow/diffusion 少步生成、动态深度、量化、token/KV 压缩、异步控制与运行时协同。">
+<meta name="color-scheme" content="light">
+<title>VLA 推理加速：研究进展与现状</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --card: #ffffff;
+    --card-2: #f8f8f7;
+    --border: #e7e5e4;
+    --border-strong: #d6d3d1;
+    --text: #1c1917;
+    --text-dim: #6b625c;
+    --accent: #1d4ed8;
+    --accent-soft: #eff6ff;
+    --green: #047857;
+    --yellow: #b45309;
+    --code-bg: #f8fafc;
+    --inline-code-bg: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Noto Sans", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 16px;
+    line-height: 1.78;
+  }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:hover { text-decoration-thickness: 2px; }
+  .skip-link { position: fixed; left: 12px; top: -80px; z-index: 20; padding: 8px 12px; background: var(--text); color: #fff; }
+  .skip-link:focus { top: 12px; }
+  .site-nav {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 22px 28px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    font-size: 0.9rem;
+  }
+  .site-nav a { color: var(--text-dim); text-decoration: none; }
+  .site-nav a:hover { color: var(--accent); }
+  .container { max-width: 960px; margin: 0 auto; padding: 38px 28px 100px; }
+  .hero { padding: 22px 0 44px; border-bottom: 1px solid var(--border); }
+  .eyebrow { margin: 0 0 14px; color: var(--accent); font-size: 0.82rem; font-weight: 700; text-transform: uppercase; }
+  .hero h1 { max-width: 820px; margin: 0; color: #111; font-size: 2.45rem; line-height: 1.28; font-weight: 750; }
+  .dek { max-width: 760px; margin: 20px 0 0; color: var(--text-dim); font-size: 1.08rem; line-height: 1.7; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+  .meta span { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--text-dim); font-size: 0.78rem; }
+  .toc { margin: 34px 0 50px; padding: 18px 20px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+  .toc summary { cursor: pointer; color: #111; font-weight: 650; }
+  .toc ol { columns: 2; column-gap: 38px; margin: 14px 0 2px; padding-left: 22px; }
+  .toc li { break-inside: avoid; margin: 5px 0; }
+  .toc a { color: var(--text-dim); text-decoration: none; }
+  .toc a:hover { color: var(--accent); }
+  .content { max-width: 860px; }
+  .content h2, .content h3, .content h4 { scroll-margin-top: 24px; color: #111; line-height: 1.38; }
+  .content h2 { margin: 64px 0 20px; padding-bottom: 9px; border-bottom: 1px solid var(--border); font-size: 1.56rem; }
+  .content h3 { margin: 38px 0 14px; font-size: 1.22rem; }
+  .content h4 { margin: 28px 0 10px; font-size: 1.04rem; }
+  .heading-anchor { margin-left: 8px; color: var(--border-strong); font-size: 0.8em; font-weight: 500; text-decoration: none; opacity: 0; }
+  h2:hover .heading-anchor, h3:hover .heading-anchor, h4:hover .heading-anchor, .heading-anchor:focus { opacity: 1; }
+  .content p { margin: 14px 0; }
+  .content strong { color: #111; font-weight: 650; }
+  .content ul, .content ol { padding-left: 1.55em; }
+  .content li { margin: 7px 0; }
+  .content li::marker { color: var(--text-dim); }
+  .abstract { margin: 0 0 56px; padding: 28px 30px 30px; border: 1px solid #bfdbfe; border-radius: 8px; background: var(--accent-soft); }
+  .abstract h2 { margin-top: 0; border-bottom-color: #bfdbfe; }
+  .abstract ol { margin-bottom: 0; }
+  .table-wrap { width: 100%; margin: 22px 0; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+  .table-wrap:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+  table { width: 100%; min-width: 660px; border-collapse: collapse; font-size: 0.91rem; line-height: 1.58; }
+  th, td { padding: 11px 13px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  th:last-child, td:last-child { border-right: 0; }
+  tr:last-child td { border-bottom: 0; }
+  th { background: var(--card-2); color: #111; font-weight: 650; }
+  tbody tr:nth-child(even) td { background: #fdfdfc; }
+  code { padding: 2px 6px; border-radius: 4px; background: var(--inline-code-bg); color: #1e40af; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.88em; }
+  pre { margin: 20px 0; padding: 18px 20px; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg); line-height: 1.62; }
+  pre code { padding: 0; background: transparent; color: var(--text); font-size: 0.86rem; }
+  .equation { margin: 22px 0; padding: 17px 20px; overflow-x: auto; border-left: 4px solid var(--accent); background: var(--card); color: #111; font-family: Georgia, "Times New Roman", serif; font-size: 1.04rem; white-space: nowrap; }
+  blockquote { margin: 20px 0; padding: 13px 18px; border-left: 4px solid var(--accent); background: var(--card); color: var(--text-dim); }
+  hr { margin: 64px 0 32px; border: 0; border-top: 1px solid var(--border); }
+  .article-footer { margin-top: 68px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.88rem; }
+  .article-footer a { margin-right: 18px; }
+  .back-top { position: fixed; right: 22px; bottom: 22px; display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; background: rgba(255,255,255,0.94); color: var(--text); text-decoration: none; box-shadow: 0 4px 14px rgba(28,25,23,0.08); }
+  .back-top:hover { color: var(--accent); border-color: #93c5fd; }
+  @media (max-width: 700px) {
+    .site-nav { padding: 16px 18px 0; }
+    .container { padding: 28px 18px 72px; }
+    .hero { padding-top: 12px; }
+    .hero h1 { font-size: 1.82rem; }
+    .dek { font-size: 1rem; }
+    .toc ol { columns: 1; }
+    .abstract { padding: 22px 18px; }
+    .content h2 { margin-top: 50px; font-size: 1.35rem; }
+    .content h3 { font-size: 1.13rem; }
+    .back-top { right: 14px; bottom: 14px; }
+  }
+  @media print {
+    .site-nav, .back-top, .heading-anchor { display: none; }
+    body { background: #fff; }
+    .container { max-width: none; padding: 0; }
+    a { color: inherit; }
+  }
+</style>
+</head>
+<body id="top">
+<a class="skip-link" href="#article-content">跳到正文</a>
+<nav class="site-nav" aria-label="文章导航">
+  <a href="index.html">← 返回技术 blog</a>
+  <span>截至 2026-08-30</span>
+</nav>
+<main class="container">
+  <header class="hero">
+    <p class="eyebrow">Research Survey · Vision-Language-Action</p>
+    <h1>VLA 推理加速：研究进展与现状</h1>
+    <p class="dek">从动作并行解码、flow/diffusion 少步生成，到动态计算、时序复用、异步控制与运行时协同，梳理截至 2026 年 8 月的研究证据和工程落地路径。</p>
+    <div class="meta">
+      <span>更新于 2026-08-30</span>
+      <span>AI-assisted</span>
+      <span>Survey</span>
+      <span>正文就地引用</span>
+    </div>
+  </header>
+
+  <details class="toc" open>
+    <summary>文章目录</summary>
+    <ol>
+      <li><a href="#summary">摘要</a></li>
+      <li><a href="#section-1">VLA 推理栈的计算在哪里</a></li>
+      <li><a href="#section-2">六条技术路线总览</a></li>
+      <li><a href="#section-3">证据分层与代表性结果</a></li>
+      <li><a href="#section-4">为什么论文速度不能直接排名</a></li>
+      <li><a href="#section-5">目前的研究现状判断</a></li>
+      <li><a href="#section-6">推荐的工程路线</a></li>
+      <li><a href="#section-7">推荐优先阅读的论文</a></li>
+      <li><a href="#conclusion">结论</a></li>
+    </ol>
+  </details>
+
+  <article class="content" id="article-content">
+<section class="abstract"><h2 id="summary">摘要<a class="heading-anchor" href="#summary" aria-label="链接到本节">#</a></h2>
+<p>VLA（Vision-Language-Action）推理加速已经从“把模型做小”发展为一个跨算法、模型、运行时和硬件的系统问题。当前瓶颈通常同时出现在四个位置：视觉 token/跨帧特征重复计算，VLM/LLM 主干的深度与 KV-cache，动作生成的自回归或多步 flow/diffusion 解码，以及机器人闭环中的同步等待和动作块陈旧。</p>
+<p>本文把“推理加速”限定为 inference efficiency，不展开提升 CoT/空间推理能力本身；仅在 reasoning token 直接造成延迟时涉及。检索以 arXiv 元数据、论文正文和项目页为主，最后核验日期为 2026-08-30。所有性能数字均视为原作者报告；“已接收”状态以 arXiv comment/论文版本为依据，并不等价于独立复现。</p>
+<p>截至 2026 年 8 月，最可靠的进展可以概括为：</p>
+<ol>
+<li><strong>低风险、无需重新训练的加速</strong> 已经稳定在约 1.4–1.7x：跨帧 KV-cache（<a href="https://arxiv.org/abs/2502.02175" target="_blank" rel="noopener noreferrer">VLA-Cache</a>）、视觉 token 剪枝（<a href="https://arxiv.org/abs/2509.12594" target="_blank" rel="noopener noreferrer">LightVLA</a>）和动作感知的 speculative decoding（<a href="https://arxiv.org/abs/2507.22424" target="_blank" rel="noopener noreferrer">Spec-VLA</a>）等。</li>
+<li><strong>需要微调/蒸馏的解码加速</strong> 可达到约 2–4x：action chunking（<a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a>）、并行 fixed-point/Jacobi 解码（<a href="https://arxiv.org/abs/2503.02310" target="_blank" rel="noopener noreferrer">PD-VLA</a>、<a href="https://arxiv.org/abs/2506.13725" target="_blank" rel="noopener noreferrer">CEED-VLA</a>）、一致性蒸馏和一步 flow 解码（<a href="https://arxiv.org/abs/2506.08822" target="_blank" rel="noopener noreferrer">FreqPolicy</a>）等。</li>
+<li><strong>架构重设计或多技术叠加</strong> 已经出现 4–15x 的作者报告（例如 <a href="https://arxiv.org/abs/2608.12932" target="_blank" rel="noopener noreferrer">FlashDrive</a>、<a href="https://arxiv.org/abs/2608.01035" target="_blank" rel="noopener noreferrer">WAM-Diff2</a>），但大多是预印本、特定硬件/任务和特定测量口径，不能视为统一 SOTA。</li>
+<li><strong>边缘部署正在从“可行性演示”走向可用</strong>：0.2–0.45B 的小 VLA（<a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA</a>、<a href="https://arxiv.org/abs/2607.27205" target="_blank" rel="noopener noreferrer">TurboVLA</a>）已能在消费级 GPU 上达到约 30 Hz；但动态、接触丰富、长时程真机任务的稳定 20–50 Hz 闭环仍未解决。</li>
+</ol>
+<p>最重要的判断是：VLA 的“action throughput（每秒产生多少动作）”不能替代“端到端闭环控制频率”（<a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a> 对这一区分给出了典型测量）。报告性能时必须同时给出单次 observation-to-action/chunk 延迟、实际 observation refresh Hz、动作块长度、成功率、显存和功耗。</p>
+</section>
+<h2 id="section-1">1. 先定义问题：VLA 推理栈的计算在哪里<a class="heading-anchor" href="#section-1" aria-label="链接到本节">#</a></h2>
+<p>典型 VLA 的一次控制调用可以抽象为：</p>
+<pre><code class="language-text">相机/本体状态 -&gt; 视觉编码 -&gt; 多模态融合/VLM 主干 -&gt; 动作解码器 -&gt; 动作块 -&gt; 执行与重新观测
+</code></pre>
+<p>不同范式的主要成本不同：</p>
+<div class="table-wrap" tabindex="0"><table>
+<thead>
+<tr>
+<th>范式</th>
+<th>主要计算</th>
+<th>典型问题</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>AR 离散动作（<a href="https://arxiv.org/abs/2307.15818" target="_blank" rel="noopener noreferrer">RT-2</a>、<a href="https://arxiv.org/abs/2406.09246" target="_blank" rel="noopener noreferrer">OpenVLA</a>）</td>
+<td>LLM/VLM prefill + 逐 token 解码</td>
+<td>token 串行，动作维度和 chunk 长度会放大解码成本</td>
+</tr>
+<tr>
+<td>AR + 连续动作头（<a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a>）</td>
+<td>一次主干前向 + 连续动作回归</td>
+<td>主干仍重，但可以把多个时间步放入一个 chunk</td>
+</tr>
+<tr>
+<td>Flow/diffusion 动作头（<a href="https://arxiv.org/abs/2410.24164" target="_blank" rel="noopener noreferrer">π0</a>、<a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA</a>）</td>
+<td>主干条件下的多次积分/去噪</td>
+<td>每个动作块需要多次 forward，实时性受采样步数限制</td>
+</tr>
+<tr>
+<td>分层/双频策略（<a href="https://arxiv.org/abs/2410.05273" target="_blank" rel="noopener noreferrer">HiRT</a>、<a href="https://arxiv.org/abs/2601.14945" target="_blank" rel="noopener noreferrer">TIDAL</a>、<a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA async</a>）</td>
+<td>慢语义路径 + 快控制路径</td>
+<td>需要处理 stale feature、动作连续性和调度</td>
+</tr>
+<tr>
+<td>自动驾驶 VLA</td>
+<td>视频编码、长上下文、推理 token、轨迹 flow</td>
+<td>多阶段级联，单点优化收益受其他阶段限制</td>
+</tr>
+</tbody></table></div>
+<p>一次闭环的端到端延迟可写成：</p>
+<div class="equation" role="math" aria-label="端到端延迟等于采集、传输、视觉编码、主干、解码、排队和执行器延迟之和"><var>T<sub>e2e</sub></var> = <var>T<sub>capture</sub></var> + <var>T<sub>transfer</sub></var> + <var>T<sub>vision</sub></var> + <var>T<sub>backbone</sub></var> + <var>T<sub>decode</sub></var> + <var>T<sub>queue</sub></var> + <var>T<sub>actuation</sub></var></div>
+
+<p>许多论文只测 <code>T_decode</code> 或 CUDA kernel latency；这对算子研究有用，但不能直接推断真机控制频率。</p>
+<h3 id="section-1-1">1.1 技术演进时间线<a class="heading-anchor" href="#section-1-1" aria-label="链接到本节">#</a></h3>
+<div class="table-wrap" tabindex="0"><table>
+<thead>
+<tr>
+<th>时间</th>
+<th>关键转折</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>2023</td>
+<td><a href="https://arxiv.org/abs/2307.15818" target="_blank" rel="noopener noreferrer">RT-2</a> 建立 VLA/action-token 范式；<a href="https://arxiv.org/abs/2312.01990" target="_blank" rel="noopener noreferrer">SARA-RT</a> 尝试线性注意力 up-training</td>
+<td>大型 VLM 成为能力来源，也成为延迟瓶颈</td>
+</tr>
+<tr>
+<td>2024</td>
+<td><a href="https://arxiv.org/abs/2406.09246" target="_blank" rel="noopener noreferrer">OpenVLA</a> 开源 7B 基线；<a href="https://arxiv.org/abs/2410.05273" target="_blank" rel="noopener noreferrer">HiRT</a> 双频控制；<a href="https://arxiv.org/abs/2411.02359" target="_blank" rel="noopener noreferrer">DeeR-VLA</a> 动态早退；<a href="https://arxiv.org/abs/2409.12514" target="_blank" rel="noopener noreferrer">TinyVLA</a>/Smol-style 小模型萌芽</td>
+<td>研究从“能控制”转向“如何实时控制”</td>
+</tr>
+<tr>
+<td>2025 H1</td>
+<td><a href="https://arxiv.org/abs/2501.09747" target="_blank" rel="noopener noreferrer">FAST</a>、<a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a>、<a href="https://arxiv.org/abs/2502.02175" target="_blank" rel="noopener noreferrer">VLA-Cache</a>、<a href="https://arxiv.org/abs/2503.02310" target="_blank" rel="noopener noreferrer">PD-VLA</a>、<a href="https://arxiv.org/abs/2503.20384" target="_blank" rel="noopener noreferrer">MoLe-VLA</a>、<a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA</a></td>
+<td>action representation、chunk、跨帧复用、动态层和异步系统形成主线</td>
+</tr>
+<tr>
+<td>2025 H2</td>
+<td><a href="https://arxiv.org/abs/2506.08822" target="_blank" rel="noopener noreferrer">FreqPolicy</a>、<a href="https://arxiv.org/abs/2507.22424" target="_blank" rel="noopener noreferrer">Spec-VLA</a>、<a href="https://arxiv.org/abs/2509.05614" target="_blank" rel="noopener noreferrer">SpecPrune-VLA</a>、<a href="https://arxiv.org/abs/2509.12594" target="_blank" rel="noopener noreferrer">LightVLA</a></td>
+<td>一步 flow、speculative decoding、动作感知 token pruning 走向成熟</td>
+</tr>
+<tr>
+<td>2026 H1</td>
+<td><a href="https://arxiv.org/abs/2602.03782" target="_blank" rel="noopener noreferrer">QVLA</a>/<a href="https://arxiv.org/abs/2602.20309" target="_blank" rel="noopener noreferrer">QuantVLA</a>、<a href="https://arxiv.org/abs/2601.20262" target="_blank" rel="noopener noreferrer">Shallow-π</a>、<a href="https://arxiv.org/abs/2601.14945" target="_blank" rel="noopener noreferrer">TIDAL</a>、<a href="https://arxiv.org/abs/2601.19634" target="_blank" rel="noopener noreferrer">AC²-VLA</a>、<a href="https://arxiv.org/abs/2605.24011" target="_blank" rel="noopener noreferrer">ActQuant</a></td>
+<td>动作敏感低比特、flow 蒸馏、跨时间自适应计算成为热点</td>
+</tr>
+<tr>
+<td>2026 H2</td>
+<td><a href="https://arxiv.org/abs/2607.27205" target="_blank" rel="noopener noreferrer">TurboVLA</a>、<a href="https://arxiv.org/abs/2607.02501" target="_blank" rel="noopener noreferrer">Embodied.cpp</a>、<a href="https://arxiv.org/abs/2608.12932" target="_blank" rel="noopener noreferrer">FlashDrive</a>、<a href="https://arxiv.org/abs/2608.01035" target="_blank" rel="noopener noreferrer">WAM-Diff2</a>、<a href="https://arxiv.org/abs/2608.27384" target="_blank" rel="noopener noreferrer">streaming FlashVLA</a></td>
+<td>架构、runtime、kernel、异步和硬件开始联合设计</td>
+</tr>
+</tbody></table></div>
+<h2 id="section-2">2. 技术路线总览<a class="heading-anchor" href="#section-2" aria-label="链接到本节">#</a></h2>
+<h3 id="section-2-1">2.1 Action chunking、并行解码和动作表示<a class="heading-anchor" href="#section-2-1" aria-label="链接到本节">#</a></h3>
+<p><strong><a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a>（RSS 2025）</strong> 是目前最有影响力的基线级工程配方：parallel decoding、action chunking、continuous action representation 和 L1 regression。它把 <a href="https://arxiv.org/abs/2406.09246" target="_blank" rel="noopener noreferrer">OpenVLA</a> 在 LIBERO 的平均成功率从 76.5% 提升到 97.1%，作者报告 action generation throughput 提升 26x。正文的 A100 测量更能说明问题：原生 OpenVLA 约 4.2 action/s、单 query 239.6 ms；OFT（chunk=8）约 109.7 action/s、单 chunk 72.9 ms。也就是说，26x 是“每秒动作数”，而不是 26x 的端到端单次调用降延迟。</p>
+<p><strong><a href="https://arxiv.org/abs/2503.02310" target="_blank" rel="noopener noreferrer">PD-VLA</a>（IROS 2025）</strong> 把带 action chunk 的 AR 解码重写为 fixed-point 并行迭代，training-free，7-DoF 执行频率作者报告提升 2.52x。它的价值在于不改主干架构，但收益依赖 fixed-point 收敛步数和动作容忍度。</p>
+<p><strong><a href="https://arxiv.org/abs/2506.13725" target="_blank" rel="noopener noreferrer">CEED-VLA</a>（2025 预印本）</strong> 进一步使用 consistency distillation、mixed-label supervision 和 early-exit。作者在 <a href="https://arxiv.org/abs/2406.09246" target="_blank" rel="noopener noreferrer">OpenVLA</a> 上报告约 4.1x speedup，在 <a href="https://arxiv.org/abs/2304.08485" target="_blank" rel="noopener noreferrer">LLaVA</a>-VLA 自建基线上约 2x；真机实验的平均频率从 3.3 Hz（LLaVA-VLA）提升到 13.0 Hz，平均成功率从 33.25% 提升到 77.5%。其关键观察是 Jacobi 的最后若干迭代 token 变化很小，严格 fixed-point 收敛条件浪费了延迟。</p>
+<p><strong><a href="https://arxiv.org/abs/2501.09747" target="_blank" rel="noopener noreferrer">FAST</a>（2025）</strong> 用离散余弦变换把连续动作压缩为频域 token，主要解决高频灵巧动作的 tokenization 和训练问题。作者报告配合 <a href="https://arxiv.org/abs/2410.24164" target="_blank" rel="noopener noreferrer">π0</a> 可将训练时间最多降低 5x，但这不是部署期推理加速；而且 π0 的 flow 版本与 FAST 的 AR 版本之间不能直接做速度比较。</p>
+<h3 id="section-2-2">2.2 Flow/diffusion 动作头：多步采样变少步或一步<a class="heading-anchor" href="#section-2-2" aria-label="链接到本节">#</a></h3>
+<p><a href="https://arxiv.org/abs/2410.24164" target="_blank" rel="noopener noreferrer">π0</a>/<a href="https://arxiv.org/abs/2504.16054" target="_blank" rel="noopener noreferrer">π0.5</a> 代表的 flow-matching VLA 可以生成连续、多模态动作，但一次动作块需要多次积分。当前路线有三种：</p>
+<ul>
+<li><strong>Consistency / frequency consistency</strong>：<a href="https://arxiv.org/abs/2506.08822" target="_blank" rel="noopener noreferrer">FreqPolicy</a>（NeurIPS 2025）在 flow policy 上加入频域一致性，支持一步 action generation；集成 VLA 后作者在 LIBERO 40 任务上报告无性能下降，真机推理频率 93.5 Hz。</li>
+<li><strong>Normalizing flow</strong>：<a href="https://arxiv.org/abs/2508.16845" target="_blank" rel="noopener noreferrer">NinA</a>（2025 预印本）把 diffusion action decoder 换成可逆的 normalizing flow，一步采样；作者报告在 <a href="https://arxiv.org/abs/2509.04996" target="_blank" rel="noopener noreferrer">FLOWER</a> 上与 diffusion 对手性能相当但更快。</li>
+<li><strong>范式蒸馏</strong>：<a href="https://arxiv.org/abs/2608.01035" target="_blank" rel="noopener noreferrer">WAM-Diff2</a>（2026 预印本）把自回归 VLA 蒸馏到并行离散 diffusion；作者报告解码 2.8x，加 FlashInfer/CUDA Graph 后总加速 15.1x。该结果来自自动驾驶场景，不能直接外推到操作臂。</li>
+</ul>
+<h3 id="section-2-3">2.3 Backbone 压缩：层跳过、动态深度、蒸馏和小模型<a class="heading-anchor" href="#section-2-3" aria-label="链接到本节">#</a></h3>
+<ul>
+<li><strong><a href="https://arxiv.org/abs/2312.01990" target="_blank" rel="noopener noreferrer">SARA-RT</a>（2023 预印本）</strong> 用 up-training 将既有机器人 Transformer 的二次注意力替换为线性注意力；论文正文中 <a href="https://arxiv.org/abs/2307.15818" target="_blank" rel="noopener noreferrer">RT-2</a> TPU forward 从 53.2 ms 降到 45.7 ms，约 14%，性能近似保持。它说明只改 attention 往往只能拿到局部收益，无法消除整个 VLA 栈的其他瓶颈。</li>
+<li><strong><a href="https://arxiv.org/abs/2411.02359" target="_blank" rel="noopener noreferrer">DeeR-VLA</a>（NeurIPS 2024）</strong> 使用多出口动态 early-exit，根据延迟、功耗和显存约束选择激活深度；CALVIN 上作者报告 LLM 计算量降低 5.2–6.5x、LLM GPU memory 降低 2–6x，任务性能基本保持。</li>
+<li><strong><a href="https://arxiv.org/abs/2503.20384" target="_blank" rel="noopener noreferrer">MoLe-VLA</a>（2025 预印本）</strong> 将 LLM 层视为可路由 experts，用空间-时间 router 动态激活层，并以 CogKD 补偿被跳过的认知能力；作者报告计算成本最多降 5.6x、10 任务平均成功率提升 8 个百分点。</li>
+<li><strong><a href="https://arxiv.org/abs/2406.04339" target="_blank" rel="noopener noreferrer">RoboMamba</a>（NeurIPS 2024）</strong> 以 Mamba/SSM 替代 Transformer 处理视觉-语言序列，作者报告推理约 3x，且只需微调约 0.1% 参数；它更像重新设计骨干，而非即插即用压缩。</li>
+<li><strong><a href="https://arxiv.org/abs/2601.20262" target="_blank" rel="noopener noreferrer">Shallow-π</a>（2026 预印本）</strong> 把 flow VLA 深度从 18 层蒸馏到 6 层，作者报告超过 2x 推理加速、成功率绝对下降小于 1 个百分点，并在 Jetson Orin/Thor 上做了真机验证。</li>
+<li><strong><a href="https://arxiv.org/abs/2409.12514" target="_blank" rel="noopener noreferrer">TinyVLA</a> / <a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA</a></strong> 走“直接训练小模型”路线。TinyVLA 的当前预印本版本在同一 A6000 上报告 TinyVLA-1B 约 14 ms、<a href="https://arxiv.org/abs/2406.09246" target="_blank" rel="noopener noreferrer">OpenVLA-7B</a> 约 292 ms，约 20x 延迟差，但版本演进较多，适合作为早期证据而非统一 SOTA。SmolVLA 约 0.45B 参数、使用冻结 SmolVLM-2 和 flow action expert，作者报告可在消费级 GPU 甚至 CPU 部署；其 LIBERO 0.45B 版本平均成功率 87.3%，并且较 <a href="https://arxiv.org/abs/2410.24164" target="_blank" rel="noopener noreferrer">π0</a> 训练约快 40%、显存约少 6x。</li>
+<li><strong><a href="https://arxiv.org/abs/2607.27205" target="_blank" rel="noopener noreferrer">TurboVLA</a>（2026 预印本）</strong> 直接绕开 LLM-centric 的 <code>V -&gt; L -&gt; A</code> 路径，改为轻量 <code>V + L -&gt; A</code>。作者报告 0.2B 参数、RTX 4090 上 31.2 ms、0.9 GB inference VRAM、约 32 Hz，LIBERO 平均成功率 97.7%。这是很激进的架构结果，尚需跨任务和跨机器人复现。</li>
+</ul>
+<h3 id="section-2-4">2.4 量化、剪枝和 token/KV 压缩<a class="heading-anchor" href="#section-2-4" aria-label="链接到本节">#</a></h3>
+<h4 id="quantization">量化<a class="heading-anchor" href="#quantization" aria-label="链接到本节">#</a></h4>
+<ul>
+<li><strong><a href="https://arxiv.org/abs/2602.20309" target="_blank" rel="noopener noreferrer">QuantVLA</a>（CVPR 2026，arXiv 元数据显示会议归属）</strong> 是首个面向 VLA 的 PTQ 框架之一，并首次处理 DiT action head。它采用 selective quantization、attention temperature matching 和 output-head balancing；作者报告量化模块相对显存节省约 70%，任务成功率不低于全精度基线。</li>
+<li><strong><a href="https://arxiv.org/abs/2602.03782" target="_blank" rel="noopener noreferrer">QVLA</a>（ICLR 2026，arXiv 元数据显示会议归属）</strong> 强调“动作敏感”而非单纯权重/激活重建误差，按通道测量最终 action-space sensitivity，并把 0-bit pruning 纳入统一优化。<a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a> 上作者报告仅使用原始 VRAM 的 29.2%，保留 98.9% 性能、1.49x speedup，比 <a href="https://arxiv.org/abs/2211.10438" target="_blank" rel="noopener noreferrer">SmoothQuant</a> 高 22.6% 性能。</li>
+<li><strong><a href="https://arxiv.org/abs/2506.07530" target="_blank" rel="noopener noreferrer">BitVLA</a>（2025 预印本/WIP）</strong> 是原生 ternary/1-bit VLA，结合 1.58-bit 视觉编码器蒸馏；作者报告相对 <a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a> memory 降 11x、端到端 latency 降 4.4x，但目前不应与已接收工作同等看待。</li>
+<li><strong><a href="https://arxiv.org/abs/2605.24011" target="_blank" rel="noopener noreferrer">ActQuant</a>（2026 预印本）</strong> 把 action-guided mixed-precision PTQ 与原生 C/C++ 低比特 runtime 结合。作者报告 <a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a> 在不高于 3 bpw 时保留 95.0% 性能；2.5 bpw 时保留 90.1%，backbone 从 14.3 GB 压到 2.7 GB（5.3x）。在 UR3 真机上，量化 <a href="https://arxiv.org/abs/2504.16054" target="_blank" rel="noopener noreferrer">π0.5</a> 保持 baseline 成功率、内存降低 2.5x。</li>
+</ul>
+<p>VLA 量化的独特难点是：小的动作误差会沿闭环累积，不能只用 perplexity、重建误差或单步 MSE 判断。未来更合理的量化校准目标应包括动作空间敏感度、接触状态、长时程成功率和安全约束。</p>
+<h4 id="pruning-cache">剪枝、视觉 token 与 KV-cache<a class="heading-anchor" href="#pruning-cache" aria-label="链接到本节">#</a></h4>
+<ul>
+<li><strong><a href="https://arxiv.org/abs/2502.02175" target="_blank" rel="noopener noreferrer">VLA-Cache</a>（NeurIPS 2025）</strong> 跨帧复用变化很小的视觉 token 的 KV，只重算任务相关 token；作者报告 CUDA latency 最多 1.7x、控制频率提升 15%，成功率几乎不变。</li>
+<li><strong><a href="https://arxiv.org/abs/2608.10824" target="_blank" rel="noopener noreferrer">Gated VLA-Cache</a>（IROS 2026，arXiv comment 标注接收）</strong> 用 action-token top-2 logit margin 作为置信门控，低置信时失效缓存并完整重算。在 LIBERO Goal/Long 上作者报告保留约 80% compute savings，同时恢复盲缓存损失的 100% 以上。</li>
+<li><strong><a href="https://arxiv.org/abs/2509.12594" target="_blank" rel="noopener noreferrer">LightVLA</a>（2025 预印本）</strong> 用可微 query + Gumbel softmax 学习视觉 token 选择，作者报告 FLOPs 降 59.1%、latency 降 38.2%、成功率提升 2.6 个百分点。</li>
+<li><strong><a href="https://arxiv.org/abs/2509.05614" target="_blank" rel="noopener noreferrer">SpecPrune-VLA</a>（ICML 2026，arXiv comment 标注接收）</strong> 结合历史/局部信息、层级动态剪枝和动作粗细粒度控制；作者报告 LIBERO 1.57x、真机 1.70x，成功率近乎无损。</li>
+<li><strong><a href="https://arxiv.org/abs/2506.10100" target="_blank" rel="noopener noreferrer">EfficientVLA</a>（2025 预印本）</strong> 同时做语言层剪枝、任务感知视觉 token 选择和 diffusion 中间特征缓存；在 <a href="https://arxiv.org/abs/2411.19650" target="_blank" rel="noopener noreferrer">CogACT</a>/SIMPLER 上作者报告 1.93x、FLOPs 只剩 28.9%、成功率下降 0.6 个百分点。</li>
+<li><strong><a href="https://arxiv.org/abs/2505.21200" target="_blank" rel="noopener noreferrer">FlashVLA（Think Twice, Act Once）</a>（2025 预印本）</strong> 复用稳定时间步的动作并选择视觉 token，作者报告 FLOPs 降 55.7%、latency 降 36.0%、成功率下降 0.7 个百分点。它与 2026 年同名的 <a href="https://arxiv.org/abs/2608.27384" target="_blank" rel="noopener noreferrer">streaming FlashVLA</a> 不是同一篇论文。</li>
+<li><strong><a href="https://arxiv.org/abs/2602.00686" target="_blank" rel="noopener noreferrer">Learned adaptive visual-token caching</a>（2026 预印本）</strong> 把 cache ratio 和 token 选择变成可学习决策；作者报告 wall-clock 1.76x，LIBERO 平均成功率由 75.0% 升到 76.9%，真机提升 5 个百分点。</li>
+<li><strong><a href="https://arxiv.org/abs/2602.03983" target="_blank" rel="noopener noreferrer">DySta</a>（2026 预印本）</strong> 把多帧视觉拆成静态/动态 token，只保留一份静态上下文并用 gate 决定何时重建 KV；作者报告仿真 2.0x 且成功率 +2.3 个百分点，真机 2.2x 且成功率 +10.6 个百分点。</li>
+</ul>
+<p>2026 年的新趋势是从“删 token”转向“保留 token 但压缩 value 表示”：<a href="https://arxiv.org/abs/2608.18410" target="_blank" rel="noopener noreferrer">RoleSub</a> 报告在匹配 visual-KV 预算时多数设置优于 token-only control；<a href="https://arxiv.org/abs/2608.21247" target="_blank" rel="noopener noreferrer">Action-JND</a> 则直接以“token 扰动对闭环动作的可容忍度”决定压缩强度。这些结果仍处于预印本阶段。</p>
+<h3 id="section-2-5">2.5 Speculative decoding、流式和双频控制<a class="heading-anchor" href="#section-2-5" aria-label="链接到本节">#</a></h3>
+<ul>
+<li><strong><a href="https://arxiv.org/abs/2507.22424" target="_blank" rel="noopener noreferrer">Spec-VLA</a>（EMNLP 2025）</strong> 把 speculative decoding 引入 VLA，并用 action-token 的相对距离放宽接受条件；作者报告接受长度提升 44%、相对 <a href="https://arxiv.org/abs/2406.09246" target="_blank" rel="noopener noreferrer">OpenVLA</a> 1.42x，成功率无明显损失。</li>
+<li><strong><a href="https://arxiv.org/abs/2410.05273" target="_blank" rel="noopener noreferrer">HiRT</a>（CoRL 2024）</strong> 是双频控制的早期代表：低频 VLM 提取暂时不变的语义特征，高频视觉策略负责反应；静态任务控制频率翻倍，动态真机任务成功率由 48% 提升到 75%。</li>
+<li><strong><a href="https://arxiv.org/abs/2601.14945" target="_blank" rel="noopener noreferrer">TIDAL</a>（2026 预印本）</strong> 缓存低频 macro-intent，在高频 micro-control 中做单步 flow integration；作者报告边缘设备约 9 Hz，相比约 2.4 Hz baseline，动态拦截性能约 2x，但静态任务有轻微回退。</li>
+<li><strong><a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA asynchronous stack</a>（2025）</strong> 将执行、观测和策略预测并行化。SO100 实验中，同步完成一个任务平均 13.75 s，异步 9.7 s（约快 30%）；固定时间内成功 pick-and-place 循环从 9 次增至 19 次。</li>
+<li><strong><a href="https://arxiv.org/abs/2608.27384" target="_blank" rel="noopener noreferrer">FlashVLA: Streaming Action Decoding</a>（2026-08 预印本）</strong> 维护不同噪声水平的 action-chunk buffer，用 chunk-wise causal attention 每次产生一个可执行 chunk；作者报告单 GPU 真机异步控制频率至少 30 Hz。</li>
+</ul>
+<p>这条路线的核心不是单纯提高 GPU utilization，而是让机器人在等待慢路径时仍能执行安全、连续、不过时的动作。难点是缓存语义何时失效、动作块如何重叠、观测延迟如何进入训练，以及异常时如何立即切回慢路径。</p>
+<h3 id="section-2-6">2.6 运行时和硬件协同<a class="heading-anchor" href="#section-2-6" aria-label="链接到本节">#</a></h3>
+<ul>
+<li><strong><a href="https://arxiv.org/abs/2607.02501" target="_blank" rel="noopener noreferrer">Embodied.cpp</a>（2026 预印本）</strong> 提供面向异构机器人的 C++ runtime，包含输入适配、序列构建、backbone、head plugin 和 deployment adapter 五层；跨 3 个 VLA 和 2 个 WAM，作者报告相对 Python baseline 1.05–2.70x、VRAM 降 7–77%。这是工程落地很重要的一类结果，因为它减少了 Python glue、数据拷贝和多速率执行不一致。</li>
+<li><strong><a href="https://arxiv.org/abs/2608.12932" target="_blank" rel="noopener noreferrer">FlashDrive</a>（2026 预印本）</strong> 同时优化四阶段：视频重叠的 streaming KV reuse、LM prefill context reuse、低熵 reasoning token 的 diffusion drafter、flow velocity 的 adaptive step cache，再叠加 CUDA Graph/kernel fusion。Alpamayo 1.5-10B + W4A8 上作者报告端到端 717 ms 降到 151 ms（4.7x），单 GPU 1.4 Hz 提升到 6.6 Hz。</li>
+<li><strong><a href="https://arxiv.org/abs/2608.15636" target="_blank" rel="noopener noreferrer">SpecVLA</a>（2026 预印本）</strong> 利用机器人“活跃/非活跃”状态，非活跃段长动作 speculative prediction，活跃段用小验证模型选择性验证；同时设计 GPU + 专用模块的异构数据流。</li>
+<li><strong><a href="https://arxiv.org/abs/2608.04428" target="_blank" rel="noopener noreferrer">Deltoris</a>（2026 预印本）</strong> 针对 diffusion VLA 使用 temporal-aware bit sparsity、speculative inference 和 bit-serial systolic accelerator；作者报告相对 mobile GPU 最高 34.2x、相对已有 accelerator 6.1x，但属于强硬件协同结果，不能与通用 GPU 软件加速横比。</li>
+<li><strong><a href="https://arxiv.org/abs/2608.15502" target="_blank" rel="noopener noreferrer">EcoVLA（device-edge co-inference）</a>（2026 预印本）</strong> 根据网络和设备状态选择在哪个阶段切分模型；20 Hz action-output 约束下，作者报告系统能效相对既有 co-inference 方法最高提升 236%。这个指标是能效而非延迟倍数。</li>
+</ul>
+<h2 id="section-3">3. 证据分层与代表性结果<a class="heading-anchor" href="#section-3" aria-label="链接到本节">#</a></h2>
+<div class="table-wrap" tabindex="0"><table>
+<thead>
+<tr>
+<th>成熟度</th>
+<th>代表工作</th>
+<th>主要结果（作者报告）</th>
+<th>适合的结论</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>已接收/同行评审</td>
+<td><a href="https://arxiv.org/abs/2410.05273" target="_blank" rel="noopener noreferrer">HiRT</a>、<a href="https://arxiv.org/abs/2411.02359" target="_blank" rel="noopener noreferrer">DeeR-VLA</a>、<a href="https://arxiv.org/abs/2406.04339" target="_blank" rel="noopener noreferrer">RoboMamba</a></td>
+<td>约 2x 控制频率；5.2–6.5x LLM compute 降；约 3x 推理</td>
+<td>双频、早退、SSM 路线有较早实证基础</td>
+</tr>
+<tr>
+<td>已接收/同行评审</td>
+<td><a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a>、<a href="https://arxiv.org/abs/2502.02175" target="_blank" rel="noopener noreferrer">VLA-Cache</a>、<a href="https://arxiv.org/abs/2503.02310" target="_blank" rel="noopener noreferrer">PD-VLA</a>、<a href="https://arxiv.org/abs/2506.08822" target="_blank" rel="noopener noreferrer">FreqPolicy</a>、<a href="https://arxiv.org/abs/2507.22424" target="_blank" rel="noopener noreferrer">Spec-VLA</a></td>
+<td>26x action throughput；1.7x cache；2.52x parallel；93.5 Hz one-step；1.42x speculative</td>
+<td>目前最值得复现的通用操作基线</td>
+</tr>
+<tr>
+<td>已接收/同行评审</td>
+<td><a href="https://arxiv.org/abs/2602.20309" target="_blank" rel="noopener noreferrer">QuantVLA</a>、<a href="https://arxiv.org/abs/2602.03782" target="_blank" rel="noopener noreferrer">QVLA</a>、<a href="https://arxiv.org/abs/2509.05614" target="_blank" rel="noopener noreferrer">SpecPrune-VLA</a>、<a href="https://arxiv.org/abs/2601.09708" target="_blank" rel="noopener noreferrer">Fast-ThinkAct</a></td>
+<td>约 1.49–1.57x；量化 VRAM 29.2%；reasoning latency 最多降 89.3%</td>
+<td>动作敏感压缩和 latent planning 已成为主流方向</td>
+</tr>
+<tr>
+<td>预印本/WIP</td>
+<td><a href="https://arxiv.org/abs/2607.27205" target="_blank" rel="noopener noreferrer">TurboVLA</a>、<a href="https://arxiv.org/abs/2506.07530" target="_blank" rel="noopener noreferrer">BitVLA</a>、<a href="https://arxiv.org/abs/2601.20262" target="_blank" rel="noopener noreferrer">Shallow-π</a>、<a href="https://arxiv.org/abs/2601.14945" target="_blank" rel="noopener noreferrer">TIDAL</a>、<a href="https://arxiv.org/abs/2608.12932" target="_blank" rel="noopener noreferrer">FlashDrive</a>、<a href="https://arxiv.org/abs/2608.01035" target="_blank" rel="noopener noreferrer">WAM-Diff2</a>、<a href="https://arxiv.org/abs/2608.27384" target="_blank" rel="noopener noreferrer">2026 FlashVLA</a></td>
+<td>2–15x 或 30 Hz 级别</td>
+<td>方向很有潜力，但需跨硬件、协议和真机复核</td>
+</tr>
+</tbody></table></div>
+<p>截至检索日，2026 年新方法的 arXiv 预印本比例很高。表中“已接收”主要依据 arXiv 页面 comment/论文版本信息，正式会议论文集和独立复现实验仍应作为最终引用前的二次核验。</p>
+<h2 id="section-4">4. 为什么论文速度不能直接排名<a class="heading-anchor" href="#section-4" aria-label="链接到本节">#</a></h2>
+<p>至少有五个口径差异会改变结论：</p>
+<ol>
+<li><strong>action throughput vs query latency</strong>：<code>K / T_chunk</code> 会随动作块长度 K 增大，即使机器人只能在 chunk 结束后重新观测。</li>
+<li><strong>GPU kernel latency vs sensor-to-action latency</strong>：前者忽略相机、PCIe、预处理、网络、队列和执行器。</li>
+<li><strong>control Hz vs observation refresh Hz</strong>：异步策略可以保持高控制频率，但慢语义特征可能已过时。</li>
+<li><strong>单视角 vs 多视角</strong>：<a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a> LIBERO 常见单张 224×224；ALOHA 表中是三张图和 14-D 状态，不能混用。</li>
+<li><strong>硬件和 batch</strong>：A100/H100/4090/Jetson 的 kernel、显存带宽和量化支持差异很大；batch=1 才接近闭环机器人。</li>
+</ol>
+<p>建议统一报告以下指标：</p>
+<pre><code class="language-text">P50/P95 端到端 latency
+单 action 与单 chunk latency
+实际 observation refresh Hz、执行 Hz、jitter
+chunk 长度 K 与重规划策略
+成功率/碰撞率/近接触失败率
+峰值 VRAM、模型参数、功耗和温度
+硬件、batch、输入相机和软件栈版本
+</code></pre>
+<h2 id="section-5">5. 目前的研究现状判断<a class="heading-anchor" href="#section-5" aria-label="链接到本节">#</a></h2>
+<h3 id="mature">已经相对成熟<a class="heading-anchor" href="#mature" aria-label="链接到本节">#</a></h3>
+<ul>
+<li>在 <a href="https://arxiv.org/abs/2406.09246" target="_blank" rel="noopener noreferrer">OpenVLA</a>/<a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OFT</a> 这类 AR VLA 上，action chunking + continuous action head + parallel decoding 是最成熟的第一步。</li>
+<li>跨帧视觉 token KV-cache（<a href="https://arxiv.org/abs/2502.02175" target="_blank" rel="noopener noreferrer">VLA-Cache</a>）、轻量 token pruning（<a href="https://arxiv.org/abs/2509.12594" target="_blank" rel="noopener noreferrer">LightVLA</a>）和 relaxed speculative decoding（<a href="https://arxiv.org/abs/2507.22424" target="_blank" rel="noopener noreferrer">Spec-VLA</a>）已能在不重训或少量校准下获得约 1.4–1.7x，适合作为现有系统的低风险优化。</li>
+<li>双频/异步执行已经从概念变成可运行系统；<a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA</a>、<a href="https://arxiv.org/abs/2410.05273" target="_blank" rel="noopener noreferrer">HiRT</a>、<a href="https://arxiv.org/abs/2601.14945" target="_blank" rel="noopener noreferrer">TIDAL</a> 说明“慢语义 + 快控制”比强行让一个 7B/10B 模型每个控制周期完整运行更现实。</li>
+</ul>
+<h3 id="frontier">正在快速发展<a class="heading-anchor" href="#frontier" aria-label="链接到本节">#</a></h3>
+<ul>
+<li><strong>动作感知压缩</strong>：量化和剪枝目标从权重误差转向最终动作、接触状态和任务成功率（<a href="https://arxiv.org/abs/2602.03782" target="_blank" rel="noopener noreferrer">QVLA</a>、<a href="https://arxiv.org/abs/2509.05614" target="_blank" rel="noopener noreferrer">SpecPrune-VLA</a>）。</li>
+<li><strong>解码范式改变</strong>：AR→parallel/diffusion、multi-step flow→consistency/normalizing flow，一次 forward 取代多次迭代（<a href="https://arxiv.org/abs/2506.08822" target="_blank" rel="noopener noreferrer">FreqPolicy</a>、<a href="https://arxiv.org/abs/2508.16845" target="_blank" rel="noopener noreferrer">NinA</a>）。</li>
+<li><strong>动态计算</strong>：根据环境阶段、动作粗细、置信度和过去 action 决定层数、token 数、精度和是否调用慢模型（<a href="https://arxiv.org/abs/2411.02359" target="_blank" rel="noopener noreferrer">DeeR-VLA</a>、<a href="https://arxiv.org/abs/2503.20384" target="_blank" rel="noopener noreferrer">MoLe-VLA</a>、<a href="https://arxiv.org/abs/2601.14945" target="_blank" rel="noopener noreferrer">TIDAL</a>）。</li>
+<li><strong>小型原生 VLA</strong>：0.2–0.45B 级模型在消费级 GPU 30 Hz 左右已出现可信结果（<a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA</a>、<a href="https://arxiv.org/abs/2607.27205" target="_blank" rel="noopener noreferrer">TurboVLA</a>），研究问题从“能否压缩”转为“如何保持跨 embodiment 和长时程泛化”。</li>
+<li><strong>运行时/硬件协同</strong>：CUDA Graph、FlashInfer、kernel fusion、C++ runtime、专用 bit-serial accelerator 开始与模型设计共同优化（<a href="https://arxiv.org/abs/2607.02501" target="_blank" rel="noopener noreferrer">Embodied.cpp</a>、<a href="https://arxiv.org/abs/2608.04428" target="_blank" rel="noopener noreferrer">Deltoris</a>）。</li>
+</ul>
+<h3 id="open-problems">仍然没有解决<a class="heading-anchor" href="#open-problems" aria-label="链接到本节">#</a></h3>
+<ol>
+<li><strong>没有统一 latency–success benchmark</strong>：不同论文的 GPU、chunk、同步协议和任务集不一致。</li>
+<li><strong>闭环稳定性缺乏理论</strong>：量化/剪枝误差如何沿动力学和接触事件放大，尚无通用稳定性界。</li>
+<li><strong>缓存与异步的陈旧性</strong>：视觉变化检测不等于动作重要性检测；静态场景有效的 cache 可能在抓取、碰撞和快速目标处失效。</li>
+<li><strong>动作多模态与 L1 回归冲突</strong>：L1 速度快且稳定，但可能平均化多个可行动作模式；flow/diffusion 表达力强，却更贵。</li>
+<li><strong>真实边缘设备证据少</strong>：Jetson、移动机器人、网络抖动、功耗/热约束下的长期闭环测试仍明显少于 A100/4090 仿真。</li>
+<li><strong>操作 VLA 与驾驶 VLA 的方法迁移不足</strong>：自动驾驶的长视频/KV reuse 和操作臂的接触感知、动作敏感剪枝还没有统一框架。</li>
+<li><strong>安全与效率尚未联合设计</strong>：低比特权重、动态跳层和 speculative acceptance 对故障、攻击和异常观测的影响缺乏系统评估。</li>
+</ol>
+<h2 id="section-6">6. 推荐的工程路线<a class="heading-anchor" href="#section-6" aria-label="链接到本节">#</a></h2>
+<h3 id="scenario-a">场景 A：已有 <a href="https://arxiv.org/abs/2406.09246" target="_blank" rel="noopener noreferrer">OpenVLA</a>，目标是尽快提速<a class="heading-anchor" href="#scenario-a" aria-label="链接到本节">#</a></h3>
+<ol>
+<li>先采用 <a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a> 的连续动作 + action chunk + parallel decoding 配方，建立真实 batch=1 的 P50/P95 端到端基线。</li>
+<li>加 <a href="https://arxiv.org/abs/2502.02175" target="_blank" rel="noopener noreferrer">VLA-Cache</a>/<a href="https://arxiv.org/abs/2608.10824" target="_blank" rel="noopener noreferrer">Gated VLA-Cache</a>；缓存失效门控用动作 logit margin 或观测变化双重触发。</li>
+<li>再评估 <a href="https://arxiv.org/abs/2507.22424" target="_blank" rel="noopener noreferrer">Spec-VLA</a>/<a href="https://arxiv.org/abs/2503.02310" target="_blank" rel="noopener noreferrer">PD-VLA</a>；接受条件必须改为动作空间/安全空间，而不是纯 token 精确匹配。</li>
+<li>最后做 <a href="https://arxiv.org/abs/2602.03782" target="_blank" rel="noopener noreferrer">QVLA</a>/<a href="https://arxiv.org/abs/2602.20309" target="_blank" rel="noopener noreferrer">QuantVLA</a> 风格的动作敏感混合精度，先量化语言层，再单独校准 action head。</li>
+</ol>
+<h3 id="scenario-b">场景 B：需要真机 20–50 Hz 动态控制<a class="heading-anchor" href="#scenario-b" aria-label="链接到本节">#</a></h3>
+<ol>
+<li>将语义规划与控制拆成双频路径：慢路径 1–5 Hz，快路径 20–50 Hz。</li>
+<li>快路径使用 <a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA</a> 这类小 VLA、flow expert 或蒸馏 student，慢路径只在任务阶段改变、置信度下降或接触事件附近触发。</li>
+<li>action chunk 不要固定整段 open-loop 执行；采用可中断队列、chunk overlap 和 stale-state compensation。</li>
+<li>重点优化 P95 latency、jitter、观测刷新率和异常恢复，而不是只追求平均 action/s。</li>
+</ol>
+<h3 id="scenario-c">场景 C：Jetson/移动端受显存和功耗约束<a class="heading-anchor" href="#scenario-c" aria-label="链接到本节">#</a></h3>
+<ol>
+<li>优先考虑 0.2–0.5B 小模型或蒸馏 student，再做 W8A8/W4A8；不要一开始把 7B 主干硬塞进端侧。</li>
+<li>用 <a href="https://arxiv.org/abs/2601.20262" target="_blank" rel="noopener noreferrer">Shallow-π</a>/<a href="https://arxiv.org/abs/2411.02359" target="_blank" rel="noopener noreferrer">DeeR-VLA</a>/<a href="https://arxiv.org/abs/2503.20384" target="_blank" rel="noopener noreferrer">MoLe-VLA</a> 类动态深度，给任务阶段设计算力预算。</li>
+<li>采用 <a href="https://arxiv.org/abs/2607.02501" target="_blank" rel="noopener noreferrer">Embodied.cpp</a> 的 C++ runtime 思路、CUDA Graph、固定 shape 和预分配 buffer，减少 Python、数据拷贝和 kernel launch 开销。</li>
+<li>用真实功耗、温度降频和网络断开测试验证“可持续 Hz”，不能只测短时峰值。</li>
+</ol>
+<h2 id="section-7">7. 推荐优先阅读的论文<a class="heading-anchor" href="#section-7" aria-label="链接到本节">#</a></h2>
+<h3 id="accepted-reading">已接收或基线价值高<a class="heading-anchor" href="#accepted-reading" aria-label="链接到本节">#</a></h3>
+<ul>
+<li><a href="https://arxiv.org/abs/2307.15818" target="_blank" rel="noopener noreferrer">RT-2</a></li>
+<li><a href="https://arxiv.org/abs/2312.01990" target="_blank" rel="noopener noreferrer">SARA-RT</a></li>
+<li><a href="https://arxiv.org/abs/2406.09246" target="_blank" rel="noopener noreferrer">OpenVLA</a></li>
+<li><a href="https://arxiv.org/abs/2410.24164" target="_blank" rel="noopener noreferrer">π0</a></li>
+<li><a href="https://arxiv.org/abs/2410.05273" target="_blank" rel="noopener noreferrer">HiRT</a></li>
+<li><a href="https://arxiv.org/abs/2411.02359" target="_blank" rel="noopener noreferrer">DeeR-VLA</a></li>
+<li><a href="https://arxiv.org/abs/2406.04339" target="_blank" rel="noopener noreferrer">RoboMamba</a></li>
+<li><a href="https://arxiv.org/abs/2502.19645" target="_blank" rel="noopener noreferrer">OpenVLA-OFT</a></li>
+<li><a href="https://arxiv.org/abs/2502.02175" target="_blank" rel="noopener noreferrer">VLA-Cache</a></li>
+<li><a href="https://arxiv.org/abs/2503.02310" target="_blank" rel="noopener noreferrer">PD-VLA</a></li>
+<li><a href="https://arxiv.org/abs/2506.08822" target="_blank" rel="noopener noreferrer">FreqPolicy</a></li>
+<li><a href="https://arxiv.org/abs/2507.22424" target="_blank" rel="noopener noreferrer">Spec-VLA</a></li>
+<li><a href="https://arxiv.org/abs/2601.09708" target="_blank" rel="noopener noreferrer">Fast-ThinkAct</a></li>
+<li><a href="https://arxiv.org/abs/2602.20309" target="_blank" rel="noopener noreferrer">QuantVLA</a></li>
+<li><a href="https://arxiv.org/abs/2602.03782" target="_blank" rel="noopener noreferrer">QVLA</a></li>
+<li><a href="https://arxiv.org/abs/2509.05614" target="_blank" rel="noopener noreferrer">SpecPrune-VLA</a></li>
+</ul>
+<h3 id="preprint-reading">2026 年值得跟踪的预印本<a class="heading-anchor" href="#preprint-reading" aria-label="链接到本节">#</a></h3>
+<ul>
+<li><a href="https://arxiv.org/abs/2506.01844" target="_blank" rel="noopener noreferrer">SmolVLA</a></li>
+<li><a href="https://arxiv.org/abs/2506.13725" target="_blank" rel="noopener noreferrer">CEED-VLA</a></li>
+<li><a href="https://arxiv.org/abs/2506.10100" target="_blank" rel="noopener noreferrer">EfficientVLA</a></li>
+<li><a href="https://arxiv.org/abs/2506.07530" target="_blank" rel="noopener noreferrer">BitVLA</a></li>
+<li><a href="https://arxiv.org/abs/2605.24011" target="_blank" rel="noopener noreferrer">ActQuant</a></li>
+<li><a href="https://arxiv.org/abs/2601.20262" target="_blank" rel="noopener noreferrer">Shallow-π</a></li>
+<li><a href="https://arxiv.org/abs/2601.14945" target="_blank" rel="noopener noreferrer">TIDAL</a></li>
+<li><a href="https://arxiv.org/abs/2602.00686" target="_blank" rel="noopener noreferrer">Learned adaptive visual-token caching</a></li>
+<li><a href="https://arxiv.org/abs/2602.03983" target="_blank" rel="noopener noreferrer">DySta</a></li>
+<li><a href="https://arxiv.org/abs/2607.27205" target="_blank" rel="noopener noreferrer">TurboVLA</a></li>
+<li><a href="https://arxiv.org/abs/2607.02501" target="_blank" rel="noopener noreferrer">Embodied.cpp</a></li>
+<li><a href="https://arxiv.org/abs/2608.12932" target="_blank" rel="noopener noreferrer">FlashDrive</a></li>
+<li><a href="https://arxiv.org/abs/2608.01035" target="_blank" rel="noopener noreferrer">WAM-Diff2</a></li>
+<li><a href="https://arxiv.org/abs/2608.27384" target="_blank" rel="noopener noreferrer">FlashVLA streaming</a></li>
+</ul>
+<p>综述入口：</p>
+<ul>
+<li><a href="https://arxiv.org/abs/2510.24795" target="_blank" rel="noopener noreferrer"><em>A Survey on Efficient Vision-Language-Action Models</em></a></li>
+<li><a href="https://arxiv.org/abs/2510.17111" target="_blank" rel="noopener noreferrer"><em>Efficient Vision-Language-Action Models for Embodied Manipulation: A Systematic Survey</em></a></li>
+</ul>
+<h2 id="conclusion">结论<a class="heading-anchor" href="#conclusion" aria-label="链接到本节">#</a></h2>
+<p>VLA 推理加速的主战场已经从单点算子优化转向“动作解码范式 + 动态计算 + 时序复用 + 异步系统”的联合设计。对今天要落地的团队，最稳妥的组合是：<strong>小/中型 VLA 或蒸馏 student + action chunk/连续动作 + 双频异步执行 + 跨帧 KV/token 复用 + 动作敏感量化 + C++/CUDA runtime</strong>。论文中 10x 以上的数字可以作为研究上限参考，但在统一的真机闭环协议出现之前，不应当作为跨论文的直接性能排名。</p>
+
+  </article>
+
+  <footer class="article-footer">
+    <a href="index.html">博客目录</a>
+    <span>外部事实与性能数字均在正文就近链接原论文。</span>
+  </footer>
+</main>
+<a class="back-top" href="#top" aria-label="返回页面顶部" title="返回顶部">↑</a>
+</body>
+</html>
