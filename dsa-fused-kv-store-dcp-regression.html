@@ -19,8 +19,8 @@
   }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .progress { position: fixed; top: 0; left: 0; height: 3px; background: var(--accent); width: 0; transition: width .3s; z-index: 20; }
-  .deck { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 56px 20px 90px; }
+  .progress { position: fixed; top: 0; left: 300px; right: 0; height: 3px; background: var(--accent); transform: scaleX(0); transform-origin: left; transition: transform .3s; z-index: 20; }
+  .deck { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 56px 24px 90px; margin-left: 300px; }
   .slide { display: none; width: 100%; }
   .slide.active { display: flex; justify-content: center; animation: fadeUp .35s ease; }
   @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
@@ -103,14 +103,9 @@
   .nav button { border: 1px solid var(--border); background: var(--card-2); color: var(--text); border-radius: 999px; width: 34px; height: 34px; font-size: 16px; cursor: pointer; }
   .nav button:hover { background: var(--inline-code-bg); }
   .counter { font-size: 13px; color: var(--text-dim); min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
-  .hint { position: fixed; bottom: 26px; left: 26px; font-size: 12px; color: #b8b3ad; z-index: 20; }
-  .toc-btn { position: fixed; top: 16px; left: 20px; z-index: 30; border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 999px; padding: 8px 16px; font-size: 14px; cursor: pointer; box-shadow: 0 4px 16px rgba(0,0,0,.10); }
-  .toc-btn:hover { background: var(--card-2); }
-  .toc { position: fixed; top: 60px; left: 20px; z-index: 29; width: 304px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px); overflow-y: auto; background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,.16); padding: 6px; display: none; }
-  .toc.open { display: block; }
-  .toc-head { display: flex; justify-content: space-between; align-items: center; font-weight: 700; font-size: 14px; padding: 6px 8px 8px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
-  .toc-close { border: none; background: transparent; color: var(--text-dim); font-size: 16px; cursor: pointer; padding: 2px 6px; }
-  .toc-close:hover { color: var(--text); }
+  .hint { position: fixed; bottom: 26px; left: 326px; font-size: 12px; color: #b8b3ad; z-index: 20; }
+  .toc { position: fixed; top: 0; left: 0; bottom: 0; width: 300px; z-index: 29; overflow-y: auto; background: var(--card-2); border-right: 1px solid var(--border); padding: 18px 10px 24px; }
+  .toc-head { font-weight: 700; font-size: 14px; padding: 0 8px 10px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
   .toc-group { font-size: 11.5px; font-weight: 700; color: var(--accent); letter-spacing: .06em; padding: 8px 10px 3px; }
   .toc-item { font-size: 13px; color: var(--text-dim); padding: 5px 10px 5px 20px; cursor: pointer; border-radius: 6px; line-height: 1.5; }
   .toc-item:hover { background: var(--card-2); color: var(--text); }
@@ -118,6 +113,9 @@
   @media (max-width: 760px) {
     .inner { padding: 26px 20px; } .grid3, .grid4 { grid-template-columns: 1fr 1fr; } .grid2 { grid-template-columns: 1fr; }
     .inner h2 { font-size: 21px; } .hint { display: none; }
+    .deck { margin-left: 0; }
+    .toc { display: none; }
+    .progress { left: 0; }
   }
 </style>
 </head>
@@ -1105,9 +1103,8 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
 </div>
 <div class="hint">← / → 翻页</div>
 
-<button class="toc-btn" id="tocBtn" aria-label="目录">☰ 目录</button>
 <nav class="toc" id="toc" aria-label="目录">
-  <div class="toc-head">目录 <button class="toc-close" id="tocClose" aria-label="关闭">✕</button></div>
+  <div class="toc-head">目录</div>
   <div id="tocList"></div>
 </nav>
 
@@ -1153,7 +1150,7 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
     i = Math.max(0, Math.min(slides.length - 1, n));
     slides.forEach(function (s, k) { s.classList.toggle('active', k === i); });
     counter.textContent = (i + 1) + ' / ' + slides.length;
-    progress.style.width = ((i + 1) / slides.length * 100) + '%';
+    progress.style.transform = 'scaleX(' + ((i + 1) / slides.length) + ')';
     tocItems.forEach(function (el) {
       el.classList.toggle('active', parseInt(el.getAttribute('data-i'), 10) === i);
     });
@@ -1165,13 +1162,10 @@ else:                                   <span class="cmt"># bf16 布局 ← 关�
   }
   document.getElementById('prev').onclick = function () { go(i - 1); };
   document.getElementById('next').onclick = function () { go(i + 1); };
-  document.getElementById('tocBtn').onclick = function () { toc.classList.toggle('open'); };
-  document.getElementById('tocClose').onclick = function () { toc.classList.remove('open'); };
   tocList.addEventListener('click', function (e) {
     var el = e.target.closest ? e.target.closest('.toc-item') : null;
     if (!el) return;
     go(parseInt(el.getAttribute('data-i'), 10));
-    toc.classList.remove('open');
   });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); go(i + 1); }
